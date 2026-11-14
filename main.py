@@ -285,6 +285,22 @@ class GamehubPlugin(BasePlugin):
 
         inject_into_request(self, event, request, tag_set)
 
+    @on.llm_response(priority=Priority.LOW)
+    async def note_turn_llm_response(self, event, response=None, *args, **kwargs):
+        """A model step finished: the notice turn is making real progress.
+
+        This is the per-step signal the turn watchdog needs — ``ON_STEP_RESULT``
+        only fires after a text delivery, so a tool-only step would otherwise
+        look like silence.
+        """
+        director = self._director
+        note = getattr(director, "note_progress", None)
+        if not callable(note):
+            return
+        sid = str(getattr(event, "sid", "") or "")
+        if sid:
+            note(sid)
+
     @on.step_result(priority=Priority.LOW)
     async def note_turn_progress(self, event, step_result=None, *args, **kwargs):
         """Tell the turn director the host is still working on the notice turn.
