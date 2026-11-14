@@ -1,0 +1,1316 @@
+/* games/doudizhu/table.css — 斗地主牌桌的「实体感」皮肤（在 app.css 之后加载，整块覆盖旧 .dz-* 规则）。
+ *
+ * 设计口径：
+ * - 木桌（暖橡木纹理）+ 粉蓝毡面 + 奶油纸质牌面：像真实牌桌，而不是信息卡片。
+ * - 手牌一排扇形叠放（负外边距 + 轻微弧度），主流斗地主手感；选中抬升、悬停上浮。
+ * - 贴纸只做点缀（探头诺里/爪印/星点），不压文字、不吃点击。
+ * - 所有尺寸走 CSS 变量，四档断点；320px 下 20 张牌仍在桌内（见 --dz-overlap）。
+ * - 牌面始终奶油色（浅/深主题都一样），红牌保持亮红，不做深蓝牌。
+ */
+
+.dz-shell {
+  --dz-card-w: 60px;
+  --dz-card-h: 84px;
+  --dz-mini-w: 40px;
+  --dz-mini-h: 56px;
+  --dz-overlap: 38px;      /* 手牌叠压量：20 张 = 60 + 19*(60-38) = 478px */
+  --dz-mini-overlap: 21px; /* 桌面/底牌/最近动作的小牌叠压量 */
+  --dz-felt-min: 330px;
+  --dz-hand-min: 150px;
+  --dz-wood-line: #6b4423;
+  --dz-wood-line-soft: rgba(107, 68, 35, 0.55);
+  --dz-paper: #fffaf0;
+  --dz-paper-2: #f6ead2;
+  --dz-paper-line: #d9c6a4;
+  --dz-brown: #4a3218;
+  --dz-brown-soft: #7a5a33;
+  --dz-red: #e11d48;
+  --dz-black: #1f2937;
+  --dz-felt-ink: #2c4f6e;
+  --dz-felt-ink-soft: #4d7291;
+}
+
+/* ---------------- 木桌 ---------------- */
+
+.dz-table {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 720px;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 14px 12px;
+  border-radius: 24px;
+  border: 2px solid var(--dz-wood-line-soft);
+  background-color: #b5793f;
+  background-image: url("./assets/table-wood.jpg");
+  background-size: cover;
+  background-position: center;
+  box-shadow:
+    0 1px 0 rgba(255, 232, 196, 0.55) inset,
+    0 0 0 4px rgba(122, 79, 42, 0.16) inset,
+    0 18px 40px rgba(74, 44, 20, 0.34),
+    0 4px 10px rgba(74, 44, 20, 0.22);
+  overflow: hidden;
+  color: var(--dz-brown);
+}
+
+/* 暗角：让桌边更沉、中间更亮（贴纸/牌/信息都在上层） */
+.dz-table::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    radial-gradient(120% 90% at 50% 36%, rgba(255, 236, 200, 0.16) 0%, rgba(255, 236, 200, 0) 58%),
+    radial-gradient(130% 120% at 50% 50%, rgba(60, 34, 12, 0) 52%, rgba(60, 34, 12, 0.34) 100%);
+}
+
+/* 桌面高光边：一道浅浅的倒角反光 */
+.dz-table::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: 21px;
+  border-top: 1px solid rgba(255, 240, 210, 0.5);
+  border-left: 1px solid rgba(255, 240, 210, 0.32);
+  border-bottom: 1px solid rgba(70, 40, 16, 0.26);
+  border-right: 1px solid rgba(70, 40, 16, 0.18);
+}
+
+.dz-table > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---------------- 顶部奶油纸带 ---------------- */
+
+.dz-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 34px 6px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--dz-paper-line);
+  background: linear-gradient(170deg, var(--dz-paper) 0%, var(--dz-paper-2) 100%);
+  box-shadow: 0 2px 6px rgba(70, 40, 16, 0.24), 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+  color: var(--dz-brown);
+}
+
+.dz-header-paw {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  transform: translateY(-50%) rotate(14deg);
+  opacity: 0.85;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 1px rgba(70, 40, 16, 0.25));
+}
+
+.dz-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* 纸带内统一用深棕文字，不依赖 --ink（深色主题会翻成浅色） */
+.dz-hand-no {
+  font: 600 12px/18px var(--font-body);
+  color: var(--dz-brown);
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--dz-brown-soft);
+  background: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
+}
+
+.dz-header .dz-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--dz-paper-line);
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--dz-brown-soft);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.dz-header .dz-pill.dz-mult { color: #1f6f9e; border-color: #a9cde6; font-weight: 600; }
+.dz-header .dz-pill.dz-bombs { color: #b3245c; border-color: #e9a9c4; font-weight: 600; }
+.dz-header .dz-pill.dz-base { color: var(--dz-brown); font-weight: 600; }
+.dz-header .dz-pill.dz-redeals { color: var(--dz-brown-soft); }
+
+.dz-seat-roles { display: flex; gap: 5px; flex-wrap: wrap; min-width: 0; }
+
+.dz-header .dz-role-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--dz-paper-line);
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--dz-brown-soft);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+}
+.dz-header .dz-role-chip b { color: var(--dz-brown); font-weight: 600; }
+.dz-header .dz-role-chip .dz-role-count { color: var(--dz-brown-soft); font-family: var(--font-mono); }
+.dz-header .dz-role-chip.landlord { border-color: #e9a9c4; background: #fdeef5; }
+.dz-header .dz-role-chip.landlord b { color: #b3245c; }
+.dz-header .dz-role-chip.farmer { border-color: #a9cde6; background: #eef7fd; }
+.dz-header .dz-role-chip.farmer b { color: #1f6f9e; }
+.dz-role-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: #7ea6c2;
+}
+.dz-header .dz-role-chip.landlord .dz-role-dot { background: #d6478a; }
+.dz-header .dz-role-chip.bidding .dz-role-dot { background: #b09a7a; }
+
+.dz-header .dz-bid-history {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  min-height: 16px;
+  font-size: 10.5px;
+  color: var(--dz-brown-soft);
+  min-width: 0;
+}
+.dz-header .dz-bid-history-label {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px dashed var(--dz-brown-soft);
+  color: var(--dz-brown-soft);
+  font-size: 9.5px;
+  line-height: 14px;
+}
+.dz-header .dz-bid-history-item {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--dz-paper-line);
+  color: var(--dz-brown);
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+/* ---------------- 毡面 ---------------- */
+
+.dz-felt {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: var(--dz-felt-min);
+  padding: 10px 12px 12px;
+  border-radius: 20px;
+  border: 1px solid rgba(96, 150, 190, 0.5);
+  background-color: #cfe8f6;
+  background-image:
+    radial-gradient(85% 110% at 50% 6%, rgba(255, 255, 255, 0.24) 0%, rgba(255, 255, 255, 0) 58%),
+    linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12)),
+    url("./assets/table-felt.jpg");
+  background-size: cover, cover, cover;
+  background-position: center, center, center;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.35) inset,
+    0 10px 22px rgba(38, 74, 108, 0.24) inset,
+    0 -2px 6px rgba(38, 74, 108, 0.16) inset;
+  overflow: hidden;
+  color: var(--dz-felt-ink);
+}
+
+/* 缝线 + 内侧暗角 */
+.dz-felt::before {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: 15px;
+  border: 1px dashed rgba(255, 255, 255, 0.62);
+  box-shadow: 0 0 0 3px rgba(44, 79, 110, 0.06) inset;
+}
+
+.dz-felt > * { position: relative; z-index: 1; }
+
+/* ---------------- 毡面装饰贴纸 ---------------- */
+
+.dz-sticker {
+  position: absolute;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 探头诺里：坐在右下桌沿，被毡面裁掉下半身（探出边缘的效果） */
+.dz-sticker-peek {
+  z-index: 2;
+  right: 8px;
+  bottom: 0;
+  width: 110px;
+  height: auto;
+  transform: translateY(22%);
+  filter: drop-shadow(0 6px 8px rgba(30, 60, 90, 0.28));
+}
+
+/* 左下小爪印 */
+.dz-sticker-paw {
+  z-index: 2;
+  left: 10px;
+  bottom: 8px;
+  width: 34px;
+  height: auto;
+  transform: rotate(-18deg);
+  opacity: 0.82;
+  filter: drop-shadow(0 2px 3px rgba(30, 60, 90, 0.2));
+}
+
+/* 右上星点 */
+.dz-sticker-sparkle {
+  z-index: 2;
+  right: 12px;
+  top: 8px;
+  width: 44px;
+  height: auto;
+  transform: rotate(8deg);
+  opacity: 0.9;
+  filter: drop-shadow(0 2px 4px rgba(30, 60, 90, 0.18));
+  animation: dz-bob 4.8s ease-in-out infinite;
+}
+
+/* ---------------- 底牌 ---------------- */
+
+.dz-bottom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+.dz-bottom-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--dz-felt-ink);
+  white-space: nowrap;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 250, 240, 0.94);
+  border: 1px solid var(--dz-paper-line);
+  box-shadow: 0 1px 2px rgba(38, 74, 108, 0.16);
+}
+.dz-bottom-cards { display: flex; align-items: flex-end; min-width: 0; }
+.dz-bottom.hidden-cards .dz-bottom-cards { opacity: 0.72; }
+
+/* 小牌扇：除第一张外都用负外边距叠压，配 --rot/--lift 的轻微弧度 */
+.dz-bottom-cards .dz-card {
+  transform-origin: bottom center;
+  transform: translateY(var(--lift, 0px)) rotate(var(--rot, 0deg));
+}
+.dz-bottom-cards .dz-card + .dz-card { margin-left: calc(var(--dz-mini-overlap) * -1); }
+
+/* ---------------- 中央「要压的牌」 ---------------- */
+
+.dz-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+}
+.dz-need {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--dz-felt-ink);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+/* 「你先出牌 / 需要压：X」做成一小片奶油贴纸，压在毡面上更好读 */
+.dz-need:not(:empty) {
+  padding: 1px 10px;
+  border-radius: 999px;
+  background: rgba(255, 250, 240, 0.92);
+  border: 1px solid var(--dz-paper-line);
+  box-shadow: 0 1px 2px rgba(38, 74, 108, 0.14);
+}
+
+.dz-trick {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-height: 100px;
+  max-width: 100%;
+  padding: 6px 16px 10px;
+  border: 0;
+  border-radius: 16px;
+  background: radial-gradient(70% 100% at 50% 55%, rgba(38, 74, 108, 0.14) 0%, rgba(38, 74, 108, 0) 72%);
+  box-shadow: none;
+  overflow: hidden;
+}
+.dz-trick.empty { display: none; }
+/* 本人先手、桌上无牌：毡面中央只留「你先出牌」一行贴纸，空桌子不占高，
+ * 把高度让给手牌托盘与抬起牌（抬起牌要落在毡面底部预留条带内）。 */
+.dz-stage.dz-stage-empty .dz-trick { display: none; }
+
+.dz-trick-who {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--dz-felt-ink-soft);
+  white-space: nowrap;
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 250, 240, 0.92);
+  border: 1px solid var(--dz-paper-line);
+  box-shadow: 0 1px 2px rgba(38, 74, 108, 0.16);
+}
+
+.dz-trick-cards {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 0;
+  max-width: 100%;
+  padding-bottom: 3px;
+  overflow: hidden;
+  filter: drop-shadow(0 5px 6px rgba(38, 74, 108, 0.3));
+}
+.dz-trick-cards .dz-card {
+  transform-origin: bottom center;
+  transform: translateY(var(--lift, 0px)) rotate(var(--rot, 0deg));
+}
+.dz-trick-cards .dz-card + .dz-card { margin-left: calc(var(--dz-mini-overlap) * -1); }
+
+.dz-trick-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--dz-brown);
+  white-space: nowrap;
+  flex: none;
+  padding: 1px 10px;
+  border-radius: 999px;
+  background: linear-gradient(170deg, var(--dz-paper) 0%, var(--dz-paper-2) 100%);
+  border: 1px solid var(--dz-paper-line);
+  box-shadow: 0 1px 2px rgba(38, 74, 108, 0.16);
+}
+
+/* ---------------- 最近动作（半透明丝带） ---------------- */
+
+.dz-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  max-width: 100%;
+  min-height: 22px;
+  max-height: 96px; /* 只保留最近两手；超出时丝带内部滚动，不与牌面叠压 */
+  padding: 3px 72px 3px 8px; /* 右侧给探头贴纸留位 */
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-radius: 10px;
+  background: rgba(255, 250, 240, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 1px 2px rgba(38, 74, 108, 0.1) inset;
+  color: var(--dz-felt-ink);
+}
+.dz-recent-empty { font-size: 10.5px; color: var(--dz-felt-ink-soft); text-align: center; }
+.dz-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: auto; /* 覆盖 app.css 旧规则的固定 20px：否则小牌会压到下一行 */
+  min-height: 22px;
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--dz-felt-ink-soft);
+}
+.dz-recent-row.latest { color: var(--dz-felt-ink); }
+.dz-recent-who { flex: none; max-width: 5.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.dz-recent-cards { display: flex; align-items: flex-end; min-width: 0; overflow: hidden; }
+.dz-recent-cards .dz-card { transform: translateY(var(--lift, 0px)) rotate(var(--rot, 0deg)); }
+/* 最近动作里的牌再小一号，保证行高不被 38px 小牌撑开 */
+.dz-recent-cards .dz-card.mini { width: 33px; height: 45px; border-radius: 5px; }
+.dz-recent-cards .dz-card.mini .dz-rank { font-size: 11px; }
+.dz-recent-cards .dz-card.mini .dz-pip { font-size: 13px; }
+.dz-recent-cards .dz-card + .dz-card { margin-left: -13px; }
+.dz-recent-name { flex: none; color: var(--dz-felt-ink); font-weight: 600; }
+.dz-recent-pass { flex: none; color: var(--dz-felt-ink-soft); }
+.dz-more { font-size: 9.5px; color: var(--dz-felt-ink-soft); align-self: center; padding: 0 2px; }
+
+/* ---------------- 结算面板（奶油成绩单） ---------------- */
+
+.dz-over {
+  position: absolute;
+  inset: 10px;
+  z-index: 5; /* 盖住毡面内容与贴纸 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  padding: 20px 16px 12px;
+  border-radius: 16px;
+  border: 1px solid var(--dz-paper-line);
+  background: linear-gradient(170deg, var(--dz-paper) 0%, var(--dz-paper-2) 100%);
+  box-shadow: 0 12px 26px rgba(38, 74, 108, 0.34), 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+  color: var(--dz-brown);
+  overflow-y: auto;
+  animation: dz-rise 0.32s ease-out;
+}
+
+.dz-over-sticker {
+  position: absolute;
+  left: 8px;
+  top: -6px;
+  width: 54px;
+  height: auto;
+  pointer-events: none;
+  filter: drop-shadow(0 3px 4px rgba(70, 40, 16, 0.2));
+}
+.dz-over-sparkle {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  width: 34px;
+  height: auto;
+  opacity: 0.85;
+  pointer-events: none;
+  transform: rotate(10deg);
+}
+
+.dz-over-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--dz-brown);
+  letter-spacing: 0.02em;
+}
+.dz-over-tags { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; }
+.dz-over .dz-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--dz-paper-line);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--dz-brown-soft);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.dz-over-scores { display: flex; flex-direction: column; gap: 2px; width: 100%; max-width: 340px; }
+.dz-over-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  font-size: 11px;
+  color: var(--dz-brown-soft);
+}
+.dz-over-who { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dz-brown); }
+.dz-over-delta { flex: none; font-family: var(--font-mono); font-weight: 700; }
+.dz-over-delta.plus { color: #b3245c; }
+.dz-over-delta.minus { color: #5f7f99; }
+.dz-over-total { flex: none; font-family: var(--font-mono); color: var(--dz-brown); }
+.dz-over-note { margin: 0; font-size: 10.5px; color: var(--dz-brown-soft); text-align: center; }
+
+@keyframes dz-rise {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------------- 我方区域 ---------------- */
+
+.dz-me { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.dz-table.is-over .dz-me { display: none; }
+.dz-table.is-over .dz-felt { min-height: 230px; padding-bottom: 10px; } /* 终局收起手牌托盘：底部不再给选中牌留位 */
+/* 结算面板占据整块毡面时，毡面贴纸让位（面板自带欢呼贴纸/星点） */
+.dz-table.is-over .dz-felt .dz-sticker { display: none; }
+.dz-table.spectator .dz-me { display: none; }
+
+.dz-me-head { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 2px; }
+.dz-me-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff6e6;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(60, 34, 12, 0.55);
+}
+.dz-me .dz-pill.dz-me-role {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 240, 210, 0.4);
+  background: rgba(255, 250, 240, 0.16);
+  color: #fff6e6;
+  font-size: 10.5px;
+  line-height: 1;
+  font-weight: 700;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(60, 34, 12, 0.5);
+}
+.dz-me .dz-pill.dz-me-role.landlord { border-color: #f6b9d4; background: rgba(253, 238, 245, 0.9); color: #b3245c; text-shadow: none; }
+.dz-me .dz-pill.dz-me-role.farmer { border-color: #a9cde6; background: rgba(238, 247, 253, 0.9); color: #1f6f9e; text-shadow: none; }
+.dz-sel { margin-left: auto; font-size: 10.5px; color: #ffe9c9; white-space: nowrap; text-shadow: 0 1px 2px rgba(60, 34, 12, 0.5); }
+
+/* 手牌托盘：深木色半透明导轨，托住扇形手牌。
+ * --dz-hand-pad-top 是托盘上沿的内边距：选中牌靠它抬到「牌组上方」，
+ * 不再与同排其他手牌叠压（见 .dz-hand-row .dz-card.selected）。
+ * overflow 保持 visible：抬起部分不能被托盘裁掉。 */
+.dz-hand {
+  --dz-hand-pad-top: 26px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 4px;
+  min-height: var(--dz-hand-min);
+  padding: var(--dz-hand-pad-top) 6px 6px;
+  border-radius: 16px;
+  border: 1px solid rgba(70, 40, 16, 0.35);
+  background: linear-gradient(180deg, rgba(58, 34, 14, 0.28) 0%, rgba(58, 34, 14, 0.44) 100%);
+  box-shadow:
+    0 6px 14px rgba(40, 24, 8, 0.3) inset,
+    0 1px 0 rgba(255, 232, 196, 0.28) inset;
+  overflow: visible;
+}
+.dz-hand-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 2px;
+}
+.dz-hand-empty {
+  margin: 0;
+  padding: 22px 0;
+  text-align: center;
+  font-size: 11.5px;
+  color: #ffe9c9;
+  text-shadow: 0 1px 2px rgba(60, 34, 12, 0.5);
+}
+
+
+/* ---------------- 牌面 ---------------- */
+
+.dz-card {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: var(--dz-card-w);
+  height: var(--dz-card-h);
+  padding: 2px;
+  border-radius: 7px;
+  border: 1px solid var(--dz-paper-line);
+  background: linear-gradient(168deg, #fffdf7 0%, var(--dz-paper-2) 100%);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.85) inset,
+    0 2px 4px rgba(40, 24, 8, 0.2),
+    0 5px 10px rgba(40, 24, 8, 0.14);
+  color: var(--dz-black);
+  font-family: var(--font-body);
+  flex: none;
+  overflow: hidden;
+  transform-origin: bottom center;
+  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+}
+
+button.dz-card { cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+button.dz-card:disabled { cursor: default; }
+button.dz-card:focus-visible { outline: 2px solid #5db9f5; outline-offset: 2px; }
+
+/* 手牌扇形叠放：除第一张外负外边距，z-index 随 --i 递增（后一张压前一张） */
+.dz-hand-row .dz-card {
+  transform: translateY(var(--lift, 0px)) rotate(var(--rot, 0deg));
+  z-index: calc(10 + var(--i, 0));
+}
+.dz-hand-row .dz-card + .dz-card { margin-left: calc(var(--dz-overlap) * -1); }
+.dz-hand-row .dz-card:hover:not(:disabled) {
+  transform: translateY(calc(var(--lift, 0px) - 6px)) rotate(var(--rot, 0deg));
+  z-index: 100;
+}
+/* 选中：整张牌抬到托盘上沿之上（按牌高与上边距自适应），并保留自身扇形弧度，
+ * 所以无论选中的是哪张、旁边有多少张牌，牌面都不再被同排手牌压住。
+ * 抬起量 = 上边距 + 牌高 × 1.16，牌底落在托盘上沿之上约 12%。
+ * 选中牌抬起后落在桌面（毡面）底部之上，不会与「等待出牌」行或提示抽屉叠压。 */
+.dz-hand-row .dz-card.selected,
+.dz-hand-row .dz-card.selected:hover {
+  transform: translateY(calc(-1 * (var(--dz-hand-pad-top, 26px) + var(--dz-card-h, 84px) * 1.16)))
+    rotate(var(--rot, 0deg));
+  border-color: #e58bb8;
+  box-shadow:
+    0 0 0 2px rgba(229, 139, 184, 0.9),
+    0 10px 20px rgba(200, 90, 150, 0.4),
+    0 1px 0 rgba(255, 255, 255, 0.85) inset;
+  z-index: 120;
+}
+
+/* 角标：左上点数+花色；右下镜像（旋转 180°） */
+.dz-corner {
+  position: absolute;
+  top: 2px;
+  left: 3px;
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  line-height: 1;
+  color: inherit;
+}
+.dz-corner.bottom {
+  top: auto;
+  left: auto;
+  right: 3px;
+  bottom: 2px;
+  transform: rotate(180deg);
+}
+.dz-rank { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
+.dz-suit { font-size: 11px; font-style: normal; margin-left: 0.5px; }
+
+/* 中央大花色：淡，作为牌面的水印 */
+.dz-pip {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  right: auto;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  margin: 0;
+  opacity: 0.52;
+  pointer-events: none;
+}
+
+/* 红牌：亮绯红（浅/深主题一致）；黑牌深墨 */
+.dz-card.red,
+.dz-card.red .dz-corner,
+.dz-card.red .dz-pip { color: var(--dz-red); }
+.dz-card.red .dz-pip { opacity: 0.58; }
+.dz-card.red .dz-rank,
+.dz-card.red .dz-suit { font-weight: 800; }
+.dz-card.joker .dz-pip { font-size: 23px; font-weight: 800; opacity: 0.62; }
+.dz-card.joker.red .dz-pip { opacity: 0.68; }
+.dz-card.joker .dz-rank { font-size: 12px; }
+.dz-joker-name { display: none; }
+
+/* 花牌（J/Q/K）与大小王：诺里风格插画铺在牌面中央，角标仍标点数/花色，
+ * 既好看也能一眼读出是哪张牌。迷你牌不加载插画，避免小尺寸糊成一片。 */
+.dz-face-art {
+  position: absolute;
+  inset: 2px;
+  width: calc(100% - 4px);
+  height: calc(100% - 4px);
+  object-fit: contain;
+  object-position: 50% 45%;
+  z-index: 0;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 1px rgba(40, 24, 8, 0.18));
+}
+.dz-card.has-art .dz-pip { display: none; }
+.dz-card.has-art .dz-corner {
+  z-index: 2;
+  padding: 0 2px 0 1px;
+  border-radius: 3px;
+  background: rgba(255, 250, 240, 0.92);
+  box-shadow: 0 0 2px rgba(40, 24, 8, 0.18);
+}
+
+/* 迷你牌：桌面中央/底牌/最近动作（只展示，不可点） */
+.dz-card.mini {
+  width: var(--dz-mini-w);
+  height: var(--dz-mini-h);
+  border-radius: 5px;
+  padding: 1px;
+}
+.dz-card.mini .dz-corner { top: 1px; left: 2px; }
+/* 迷你牌也保留右下角对角标：桌面打出的牌、底牌、最近动作与记录里
+ * 都能从两个方向读出点数/花色（否则只剩左上角，像缺了一角）。 */
+.dz-card.mini .dz-corner.bottom {
+  display: flex;
+  top: auto;
+  left: auto;
+  right: 2px;
+  bottom: 1px;
+}
+.dz-card.mini .dz-rank { font-size: 12px; }
+.dz-card.mini .dz-suit { font-size: 9px; }
+.dz-card.mini .dz-pip { font-size: 15px; }
+.dz-card.mini.joker .dz-pip { font-size: 12px; }
+.dz-card.mini.joker .dz-rank { font-size: 10px; }
+
+/* 牌背：纯 CSS 纹样（不随插件分发人像素材）。用 .dz-table 提高权重，
+ * 避免深色主题的 .dz-card background 简写把牌背纹样重置掉。 */
+.dz-table .dz-card.back {
+  border: 1px solid #d8c7ad;
+  background-color: #dbe9f5;
+  background-image:
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.55) 0 5px, rgba(255, 255, 255, 0) 5px 10px),
+    repeating-linear-gradient(-45deg, rgba(93, 185, 245, 0.16) 0 5px, rgba(93, 185, 245, 0) 5px 10px);
+  background-size: auto;
+  background-position: center;
+  box-shadow:
+    0 0 0 2px rgba(255, 250, 240, 0.9) inset,
+    0 1px 0 rgba(255, 255, 255, 0.6) inset,
+    0 2px 4px rgba(40, 24, 8, 0.22);
+}
+
+/* ---------------- 操作行 ---------------- */
+
+.dz-actions { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.dz-bids { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+
+/* 奶油木片按钮：在木桌上看得清、按得准 */
+.dz-bid,
+.dz-play-row .btn.dz-hint,
+.dz-play-row .btn.dz-pass {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--dz-paper-line);
+  background: linear-gradient(170deg, var(--dz-paper) 0%, var(--dz-paper-2) 100%);
+  color: var(--dz-brown);
+  font: 600 12.5px/1 var(--font-body);
+  box-shadow: 0 2px 4px rgba(40, 24, 8, 0.24), 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dz-bid { min-width: 56px; }
+.dz-bid:hover:not(:disabled),
+.dz-play-row .btn.dz-hint:hover:not(:disabled),
+.dz-play-row .btn.dz-pass:hover:not(:disabled) { border-color: var(--dz-brown-soft); }
+.dz-bid:disabled,
+.dz-play-row .btn:disabled { opacity: 0.55; cursor: default; }
+
+/* 强叫分 / 出牌：沿用 app.css 的粉色主色渐变 */
+.dz-bid.strong {
+  background: linear-gradient(120deg, var(--pink) 0%, var(--pink-deep) 100%);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 3px 8px rgba(200, 90, 150, 0.36), 0 1px 0 rgba(255, 255, 255, 0.4) inset;
+}
+.dz-bid.ghost { background: rgba(255, 250, 240, 0.72); color: var(--dz-brown-soft); }
+
+.dz-play-row { display: flex; gap: 6px; justify-content: center; align-items: center; }
+.dz-play-row .btn { min-width: 0; }
+.dz-hint { flex: 0 0 auto; }
+.dz-pass { flex: 0 0 auto; }
+.dz-play {
+  flex: 1 1 auto;
+  max-width: 220px;
+  min-height: 32px;
+  border-radius: 999px;
+  border-color: transparent;
+  background: linear-gradient(120deg, var(--pink) 0%, var(--pink-deep) 100%);
+  background-size: 100% 100%;
+  color: #fff;
+  font-weight: 700;
+  text-shadow: 0 1px 1px rgba(140, 40, 80, 0.28);
+  box-shadow: 0 4px 10px rgba(200, 90, 150, 0.4), 0 1px 0 rgba(255, 255, 255, 0.35) inset;
+}
+/* .btn.primary 的权重更高：出牌键用同一套粉色主色，但在木桌上更“实” */
+.dz-play-row .btn.dz-play {
+  background: linear-gradient(120deg, var(--pink) 0%, var(--pink-deep) 100%);
+  background-size: 100% 100%;
+  border-color: transparent;
+  color: #fff;
+}
+.dz-play-row .btn.dz-play:disabled { opacity: 0.55; box-shadow: none; }
+
+.dz-wait {
+  margin: 0;
+  min-height: 20px;
+  line-height: 20px;
+  padding: 0 10px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 11px;
+  color: #fff6e6;
+  text-shadow: 0 1px 2px rgba(60, 34, 12, 0.55);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dz-wait:not(:empty) { background: rgba(58, 34, 14, 0.3); border: 1px solid rgba(255, 240, 210, 0.24); }
+
+/* 提示抽屉 */
+.dz-hints {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-height: 92px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255, 240, 210, 0.4);
+  background: rgba(58, 34, 14, 0.28);
+}
+.dz-hint-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 4px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--dz-paper-line);
+  background: linear-gradient(170deg, var(--dz-paper) 0%, var(--dz-paper-2) 100%);
+  color: var(--dz-brown);
+  font-size: 10.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  max-width: 100%;
+}
+.dz-hint-chip.on { border-color: #e58bb8; box-shadow: 0 0 0 1px #e58bb8; }
+.dz-hint-chip:hover { border-color: var(--dz-brown-soft); }
+.dz-hint-name { font-weight: 700; color: #b3245c; }
+.dz-hint-cards { color: var(--dz-brown-soft); font-family: var(--font-mono); font-size: 9.5px; }
+
+/* ---------------- 深色主题 ---------------- */
+
+/* 木桌压暗但保留暖木色；毡面变深蓝但仍是蓝，不是黑 */
+html[data-theme="dark"] .dz-table {
+  border-color: rgba(140, 96, 58, 0.7);
+  background-color: #6e4726;
+  box-shadow:
+    0 1px 0 rgba(255, 232, 196, 0.2) inset,
+    0 0 0 4px rgba(30, 18, 8, 0.3) inset,
+    0 18px 40px rgba(0, 0, 0, 0.5),
+    0 4px 10px rgba(0, 0, 0, 0.36);
+}
+html[data-theme="dark"] .dz-table::before {
+  background:
+    radial-gradient(120% 90% at 50% 36%, rgba(255, 220, 170, 0.08) 0%, rgba(255, 220, 170, 0) 58%),
+    radial-gradient(130% 120% at 50% 50%, rgba(0, 0, 0, 0) 44%, rgba(0, 0, 0, 0.58) 100%);
+}
+html[data-theme="dark"] .dz-table::after {
+  border-top-color: rgba(255, 220, 180, 0.18);
+  border-left-color: rgba(255, 220, 180, 0.12);
+  border-bottom-color: rgba(0, 0, 0, 0.42);
+  border-right-color: rgba(0, 0, 0, 0.34);
+}
+
+/* 顶部纸带保持奶油色 + 深棕字（不跟随 --ink 翻转） */
+html[data-theme="dark"] .dz-header {
+  background: linear-gradient(170deg, #fdf6e6 0%, #efe0c4 100%);
+  border-color: #d3bd96;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.36), 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+  color: #4a3218;
+}
+
+html[data-theme="dark"] .dz-felt {
+  border-color: rgba(70, 120, 160, 0.6);
+  background-color: #1d3a52;
+  background-image:
+    radial-gradient(90% 120% at 50% 8%, rgba(120, 170, 210, 0.18) 0%, rgba(120, 170, 210, 0) 62%),
+    linear-gradient(rgba(16, 34, 50, 0.42), rgba(16, 34, 50, 0.42)),
+    url("./assets/table-felt.jpg");
+  background-size: cover, cover, cover;
+  background-position: center, center, center;
+  box-shadow:
+    0 0 0 1px rgba(120, 170, 210, 0.14) inset,
+    0 12px 26px rgba(0, 0, 0, 0.42) inset,
+    0 -2px 6px rgba(0, 0, 0, 0.28) inset;
+  color: #cfe3f2;
+}
+html[data-theme="dark"] .dz-felt::before { border-color: rgba(200, 225, 245, 0.34); }
+
+/* 底牌不铺深色底板：牌面直接落在毡面上，避免三张牌周围出现暗块 */
+html[data-theme="dark"] .dz-bottom {
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+/* 深色主题里底牌标签仍是奶油底 + 深蓝字（不是浅色字压浅底） */
+html[data-theme="dark"] .dz-bottom-label { color: #2c4f6e; background: rgba(255, 250, 240, 0.94); }
+html[data-theme="dark"] .dz-need { color: #e2eefa; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
+html[data-theme="dark"] .dz-trick {
+  background: radial-gradient(70% 100% at 50% 55%, rgba(0, 0, 0, 0.32) 0%, rgba(0, 0, 0, 0) 72%);
+}
+html[data-theme="dark"] .dz-trick-who {
+  background: #fdf6e6;
+  border-color: #d3bd96;
+  color: #4a3218;
+}
+html[data-theme="dark"] .dz-trick-name {
+  background: linear-gradient(170deg, #fdf6e6 0%, #efe0c4 100%);
+  border-color: #d3bd96;
+  color: #4a3218;
+}
+html[data-theme="dark"] .dz-recent {
+  background: rgba(20, 40, 60, 0.4);
+  border-color: rgba(120, 170, 210, 0.24);
+  color: #d6e7f5;
+}
+html[data-theme="dark"] .dz-recent-empty,
+html[data-theme="dark"] .dz-recent-row,
+html[data-theme="dark"] .dz-recent-who { color: #b7d3e8; }
+html[data-theme="dark"] .dz-recent-row.latest,
+html[data-theme="dark"] .dz-recent-name { color: #e2eefa; }
+html[data-theme="dark"] .dz-recent-pass,
+html[data-theme="dark"] .dz-more { color: #9dbdd4; }
+
+/* 结算面板：深色主题下也是奶油成绩单 + 深棕字 */
+html[data-theme="dark"] .dz-over {
+  background: linear-gradient(170deg, #fdf6e6 0%, #efe0c4 100%);
+  border-color: #d3bd96;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.75) inset;
+  color: #4a3218;
+}
+
+/* 牌面在深色主题下仍是奶油色 + 深墨字（旧 app.css 曾把牌染成浅蓝） */
+html[data-theme="dark"] .dz-card {
+  border-color: var(--dz-paper-line);
+  background: linear-gradient(168deg, #fffdf7 0%, var(--dz-paper-2) 100%);
+  color: var(--dz-black);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.85) inset,
+    0 2px 5px rgba(0, 0, 0, 0.34),
+    0 6px 12px rgba(0, 0, 0, 0.24);
+}
+html[data-theme="dark"] .dz-card.red,
+html[data-theme="dark"] .dz-card.red .dz-corner,
+html[data-theme="dark"] .dz-card.red .dz-pip { color: var(--dz-red); }
+html[data-theme="dark"] .dz-table .dz-card.back {
+  border-color: #cbb99e;
+  background-color: #dbe9f5;
+  background-image:
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.55) 0 5px, rgba(255, 255, 255, 0) 5px 10px),
+    repeating-linear-gradient(-45deg, rgba(93, 185, 245, 0.16) 0 5px, rgba(93, 185, 245, 0) 5px 10px);
+  background-size: auto;
+  background-position: center;
+}
+
+html[data-theme="dark"] .dz-hand {
+  border-color: rgba(0, 0, 0, 0.4);
+  background: linear-gradient(180deg, rgba(10, 20, 30, 0.4) 0%, rgba(10, 20, 30, 0.58) 100%);
+}
+html[data-theme="dark"] .dz-me-name { color: #f3e6cf; }
+html[data-theme="dark"] .dz-sel { color: #f3e6cf; }
+html[data-theme="dark"] .dz-hand-empty { color: #f3e6cf; }
+html[data-theme="dark"] .dz-wait { color: #f3e6cf; }
+
+/* 深色主题下奶油按钮不变（仍是纸片质感），只是阴影更重 */
+html[data-theme="dark"] .dz-bid,
+html[data-theme="dark"] .dz-play-row .btn.dz-hint,
+html[data-theme="dark"] .dz-play-row .btn.dz-pass {
+  background: linear-gradient(170deg, #fdf6e6 0%, #efe0c4 100%);
+  border-color: #d3bd96;
+  color: #4a3218;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.4), 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+html[data-theme="dark"] .dz-bid.ghost { background: rgba(253, 246, 230, 0.78); color: #7a5a33; }
+html[data-theme="dark"] .dz-hints { background: rgba(10, 20, 30, 0.4); border-color: rgba(200, 225, 245, 0.28); }
+
+/* ---------------- 动画（不改变布局，尊重减少动效） ---------------- */
+
+/* 发牌错峰：按 --i 每张晚 22ms 进场（只用 backwards，播完立刻交还 transform 给 hover/选中）。
+   只在首帧/换牌时挂 .dealing：对局推送触发的重渲染不再整手重放（否则靠右的牌
+   最多 0.4s 保持透明，20 张牌整体闪烁且期间仍可点击）。 */
+.dz-hand-row.dealing .dz-card {
+  animation: dz-deal 0.3s ease-out backwards;
+  animation-delay: calc(var(--i, 0) * 22ms);
+}
+@keyframes dz-deal {
+  from { opacity: 0; transform: translateY(calc(var(--lift, 0px) + 14px)) rotate(var(--rot, 0deg)) scale(0.92); }
+  to { opacity: 1; transform: translateY(var(--lift, 0px)) rotate(var(--rot, 0deg)) scale(1); }
+}
+
+.dz-trick:not(.empty) .dz-trick-cards {
+  animation: dz-trick-pop 0.24s ease-out backwards;
+}
+@keyframes dz-trick-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes dz-bob {
+  0%, 100% { transform: rotate(8deg) translateY(0); }
+  50% { transform: rotate(4deg) translateY(-3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dz-hand-row .dz-card,
+  .dz-trick:not(.empty) .dz-trick-cards,
+  .dz-over,
+  .dz-sticker-sparkle { animation: none !important; }
+  .dz-card { transition: none; }
+}
+
+/* ---------------- 响应式（牌桌自身四档；座位等页面布局不动） ---------------- */
+
+@media (max-width: 880px) {
+  .dz-table.is-over .dz-felt { padding-bottom: 10px; }
+  .dz-shell {
+    --dz-card-w: 51px;
+    --dz-card-h: 72px;
+    --dz-mini-w: 37px;
+    --dz-mini-h: 52px;
+    --dz-overlap: 33px;
+    --dz-mini-overlap: 19px;
+    --dz-felt-min: 250px;
+    --dz-hand-min: 128px;
+  }
+  .dz-rank { font-size: 13px; }
+  .dz-suit { font-size: 10px; }
+  .dz-pip { font-size: 21px; }
+  .dz-card.joker .dz-pip { font-size: 20px; }
+  .dz-card.joker .dz-rank { font-size: 11px; }
+  .dz-card.mini .dz-rank { font-size: 11px; }
+  .dz-card.mini .dz-suit { font-size: 8px; }
+  .dz-card.mini .dz-pip { font-size: 14px; }
+  .dz-card.mini.joker .dz-pip { font-size: 11px; }
+  .dz-card.mini.joker .dz-rank { font-size: 9px; }
+  .dz-recent-cards .dz-card.mini { width: 28px; height: 38px; }
+  .dz-recent-cards .dz-card.mini .dz-rank { font-size: 10px; }
+  .dz-recent-cards .dz-card.mini .dz-pip { font-size: 11px; }
+  .dz-recent-cards .dz-card + .dz-card { margin-left: -11px; }
+  .dz-table { max-width: 100%; max-height: none; border-radius: 22px; }
+  .dz-sticker-peek { width: 88px; }
+  .dz-table.is-over .dz-felt { min-height: 215px; }
+}
+
+@media (max-width: 480px) {
+  .dz-table.is-over .dz-felt { padding-bottom: 10px; }
+  .dz-shell {
+    --dz-card-w: 45px;
+    --dz-card-h: 64px;
+    --dz-mini-w: 34px;
+    --dz-mini-h: 48px;
+    /* 375px 手牌托盘内宽 ~309px：20 张 = 45 + 19*(45-33) = 273px，
+     * 留出两端旋转外扩（±7°）后仍在托盘内 */
+    --dz-overlap: 33px;
+    --dz-mini-overlap: 17px;
+    --dz-felt-min: 210px;
+    --dz-hand-min: 112px;
+  }
+  .dz-table { padding: 8px 10px 10px; gap: 6px; border-radius: 18px; }
+  .dz-header { padding: 5px 30px 5px 9px; border-radius: 10px; }
+  .dz-header-paw { display: none; }
+  /* 窄屏座位卡已写身份+张数，顶部不再重复阵营摘要（沿用旧布局的取舍）。
+   * 但叫分阶段地主未定时，阵营摘要条是唯一能同时看到三位「叫分中」的地方，保留。 */
+  .dz-header .dz-seat-roles { display: none; }
+  .dz-table[data-phase="bid"] .dz-header .dz-seat-roles { display: flex; }
+  .dz-felt { min-height: var(--dz-felt-min); padding: 8px 8px 34px; gap: 4px; border-radius: 16px; }
+  .dz-sticker-peek { width: 78px; right: 4px; }
+  .dz-sticker-paw { width: 26px; left: 8px; bottom: 6px; }
+  .dz-sticker-sparkle { width: 34px; right: 8px; top: 6px; }
+  .dz-hand { --dz-hand-pad-top: 24px; padding: 24px 4px 5px; border-radius: 13px; }
+  .dz-rank { font-size: 12px; }
+  .dz-corner.bottom .dz-rank { font-size: 11px; }
+  .dz-suit { font-size: 9px; }
+  .dz-pip { font-size: 20px; }
+  .dz-card.joker .dz-pip { font-size: 18px; }
+  .dz-card.joker .dz-rank { font-size: 11px; }
+  .dz-card.mini .dz-rank { font-size: 10px; }
+  .dz-card.mini .dz-suit { font-size: 8px; }
+  .dz-card.mini .dz-pip { font-size: 13px; }
+  .dz-card.mini.joker .dz-pip { font-size: 11px; }
+  .dz-card.mini.joker .dz-rank { font-size: 9px; }
+  .dz-recent-cards .dz-card.mini { width: 25px; height: 34px; }
+  .dz-recent-cards .dz-card.mini .dz-rank { font-size: 9px; }
+  .dz-recent-cards .dz-card.mini .dz-pip { font-size: 10px; }
+  .dz-recent-cards .dz-card + .dz-card { margin-left: -10px; }
+  .dz-play-row { gap: 5px; }
+  .dz-play-row .btn { padding-inline: 10px; font-size: 12px; min-height: 30px; }
+  .dz-bid { min-width: 48px; padding-inline: 10px; }
+  .dz-recent { padding-right: 52px; }
+  .dz-over { inset: 8px; padding: 14px 12px 10px; }
+  .dz-over-sticker { width: 42px; }
+  .dz-table.is-over .dz-felt { min-height: 196px; }
+}
+
+@media (max-width: 360px) {
+  .dz-table.is-over .dz-felt { padding-bottom: 10px; }
+  .dz-shell {
+    --dz-card-w: 40px;
+    --dz-card-h: 58px;
+    --dz-mini-w: 31px;
+    --dz-mini-h: 43px;
+    /* 320px 桌内可用宽 ~268px：20 张 = 40 + 19*(40-30) = 230px，
+   * 留足两端旋转外扩（±5°）后仍在桌内 */
+    --dz-overlap: 30px;
+    --dz-mini-overlap: 16px;
+    --dz-felt-min: 190px;
+    --dz-hand-min: 104px;
+  }
+  .dz-table { padding: 7px 8px 8px; border-radius: 16px; }
+  /* 320px：桌内可用宽约 304px，20 张牌 = 27 + 19*(27-14) = 274px */
+  .dz-felt { padding: 7px 6px 30px; }
+  .dz-sticker-sparkle { display: none; }
+  .dz-sticker-peek { width: 68px; }
+  .dz-hand { --dz-hand-pad-top: 24px; padding: 24px 2px 4px; }
+  .dz-hand-row { padding: 0; }
+  .dz-card { border-radius: 6px; }
+  .dz-card.mini { border-radius: 4px; }
+  .dz-rank { font-size: 11px; }
+  .dz-corner.bottom .dz-rank { font-size: 10px; }
+  .dz-suit { font-size: 8px; }
+  .dz-pip { font-size: 18px; }
+  .dz-card.joker .dz-pip { font-size: 16px; }
+  .dz-card.joker .dz-rank { font-size: 10px; }
+  .dz-card.mini .dz-rank { font-size: 9px; }
+  .dz-card.mini .dz-suit { font-size: 7px; }
+  .dz-card.mini .dz-pip { font-size: 12px; }
+  .dz-card.mini.joker .dz-pip { font-size: 10px; }
+  .dz-card.mini.joker .dz-rank { font-size: 8px; }
+  .dz-recent-cards .dz-card.mini { width: 23px; height: 31px; }
+  .dz-recent-cards .dz-card.mini .dz-rank { font-size: 8px; }
+  .dz-recent-cards .dz-card.mini .dz-pip { font-size: 9px; }
+  .dz-recent-cards .dz-card + .dz-card { margin-left: -9px; }
+  .dz-bid { min-width: 42px; padding-inline: 8px; }
+  .dz-play-row { gap: 4px; }
+  .dz-play-row .btn { padding-inline: 8px; }
+  .dz-recent { padding-right: 46px; }
+  .dz-over { inset: 6px; padding: 12px 10px 8px; }
+}
+
+/* ---------------- 对局记录里的牌面 ----------------
+ * 牌类出牌记录不再只写点数文字，而是复用同一套迷你牌面（含花牌/王插画）。
+ * 记录行较窄，牌面比桌面小一号；长牌串超出时横向裁切，不撑破侧栏。 */
+.dz-log-cards {
+  /* 记录面板在 .dz-shell 之外：把牌面调色板变量一并带过来，
+   * 否则纸牌会变成透明文字（奶油底/边框/红黑都取不到值）。 */
+  --dz-paper: #fffaf0;
+  --dz-paper-2: #f6ead2;
+  --dz-paper-line: #d9c6a4;
+  --dz-red: #e11d48;
+  --dz-black: #1f2937;
+  --dz-brown: #4a3218;
+  --dz-mini-w: 24px;
+  --dz-mini-h: 34px;
+  --dz-mini-overlap: 10px;
+  display: inline-flex;
+  align-items: flex-end;
+  min-width: 0;
+  overflow: hidden;
+  flex: 0 1 auto;
+}
+.dz-log-cards .dz-card { transform: none; }
+/* 记录里的牌更小：只留左上角标，避免两个角标在 24px 宽内挤成一团；
+ * 桌面打出的牌/底牌仍保留上下双角标。提高权重覆盖 .dz-card.mini 规则。 */
+.dz-log-cards .dz-card.mini .dz-corner.bottom { display: none; }
+.dz-log-cards .dz-card + .dz-card { margin-left: calc(var(--dz-mini-overlap) * -1); }
+
+/* ---------------- 大屏牌桌：放大纸牌与桌面，减少四周空位 ----------------
+ * 纸牌在小屏按 27–40px 渲染；高分辨率下 40px 会显得太小，这里按断点
+ * 放大牌面、毡面与手牌托盘，同时放宽牌桌宽度让 20 张手牌仍能舒展。 */
+@media (min-width: 1200px) {
+  .dz-shell {
+    --dz-card-w: 75px;
+    --dz-card-h: 105px;
+    --dz-mini-w: 50px;
+    --dz-mini-h: 70px;
+    --dz-overlap: 37px;      /* 20 张 = 75 + 19*(75-37) = 797px，1200px 视口桌内仍放得下 */
+    --dz-mini-overlap: 27px;
+    --dz-felt-min: 370px;
+    --dz-hand-min: 140px;
+  }
+  .dz-table { max-width: 980px; gap: 10px; padding: 12px 16px 14px; }
+  .dz-sticker-peek { width: 132px; }
+  .dz-recent-cards .dz-card.mini { width: 39px; height: 51px; }
+  .dz-recent-cards .dz-card.mini .dz-rank { font-size: 13px; }
+  .dz-recent-cards .dz-card.mini .dz-pip { font-size: 16px; }
+  .dz-recent-cards .dz-card + .dz-card { margin-left: -16px; }
+  .dz-recent { max-height: 110px; }
+  .dz-rank { font-size: 18px; }
+  .dz-suit { font-size: 13px; }
+  .dz-pip { font-size: 28px; }
+  .dz-card.joker .dz-pip { font-size: 27px; }
+  .dz-card.joker .dz-rank { font-size: 14px; }
+  .dz-card.mini .dz-rank { font-size: 15px; }
+  .dz-card.mini .dz-suit { font-size: 11px; }
+  .dz-card.mini .dz-pip { font-size: 19px; }
+  .dz-card.mini.joker .dz-pip { font-size: 15px; }
+  .dz-card.mini.joker .dz-rank { font-size: 12px; }
+  .dz-log-cards {
+    --dz-mini-w: 26px;
+    --dz-mini-h: 36px;
+    --dz-mini-overlap: 11px;
+  }
+}
+
+@media (min-width: 1600px) and (min-height: 1000px) {
+  .dz-shell {
+    --dz-card-w: 87px;
+    --dz-card-h: 123px;
+    --dz-mini-w: 58px;
+    --dz-mini-h: 81px;
+    --dz-overlap: 39px;      /* 20 张 = 87 + 19*(87-39) = 999px */
+    --dz-mini-overlap: 30px;
+    --dz-felt-min: 430px;
+    --dz-hand-min: 190px;
+  }
+  .dz-table { max-width: 1180px; }
+  .dz-sticker-peek { width: 148px; }
+  .dz-recent-cards .dz-card.mini { width: 42px; height: 57px; }
+  .dz-recent-cards .dz-card.mini .dz-rank { font-size: 14px; }
+  .dz-recent-cards .dz-card.mini .dz-pip { font-size: 18px; }
+  .dz-recent-cards .dz-card + .dz-card { margin-left: -17px; }
+  .dz-recent { max-height: 120px; }
+  .dz-rank { font-size: 20px; }
+  .dz-suit { font-size: 14px; }
+  .dz-pip { font-size: 32px; }
+  .dz-card.joker .dz-pip { font-size: 30px; }
+  .dz-card.joker .dz-rank { font-size: 15px; }
+  .dz-card.mini .dz-rank { font-size: 17px; }
+  .dz-card.mini .dz-suit { font-size: 12px; }
+  .dz-card.mini .dz-pip { font-size: 22px; }
+  .dz-card.mini.joker .dz-pip { font-size: 17px; }
+  .dz-card.mini.joker .dz-rank { font-size: 13px; }
+  .dz-log-cards {
+    --dz-mini-w: 30px;
+    --dz-mini-h: 42px;
+    --dz-mini-overlap: 13px;
+  }
+}

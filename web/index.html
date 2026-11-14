@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>游戏中心</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%E2%99%9F%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./app.css?v=k1">
+  <script>
+    /* 主题跟随 KiraAI WebUI（本页不提供独立切换）：
+       localStorage["theme"]（"light"|"dark"）→ 宿主 <html class="dark"> →
+       prefers-color-scheme 兜底。宿主切换时 storage 事件即时同步；
+       本页把结果写到自己的 html[data-theme] 上（CSS 变量 1:1 沿用）。 */
+    (function () {
+      function apply(t) {
+        if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
+        else document.documentElement.removeAttribute("data-theme");
+      }
+      function detect() {
+        var t = null;
+        try { t = localStorage.getItem("theme"); } catch (e) {}
+        if (t !== "dark" && t !== "light") {
+          // 同源宿主页把主题类挂在 documentElement 上（class="dark"）
+          t = document.documentElement.classList.contains("dark") ? "dark" : null;
+        }
+        if (t !== "dark" && t !== "light") {
+          try { t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }
+          catch (e) { t = "light"; }
+        }
+        apply(t);
+      }
+      detect();
+      addEventListener("storage", function (e) { if (!e.key || e.key === "theme") detect(); });
+      // 宿主切换主题只改 localStorage + class：本页独立加载，轮询兜底一次
+      try {
+        new MutationObserver(function () { detect(); }).observe(document.documentElement, {
+          attributes: true, attributeFilter: ["class"],
+        });
+      } catch (e) { /* 老内核忽略 */ }
+    })();
+  </script>
+</head>
+<body class="lobby">
+  <main class="hub">
+    <div class="hub-inner">
+      <header class="hero reveal">
+        <!-- 顶部横幅：一张合成的宽幅插画（左侧留白给标题），取代原来的招手动图 + 气泡。
+             标题压在留白上，整体更紧凑。 -->
+        <div class="hero-banner">
+          <span class="hero-banner-art" role="img"
+                aria-label="云朵上的棋桌：围棋盘、黑白棋与纸牌并排摆开"></span>
+          <div class="hero-copy">
+            <p class="hero-eyebrow">KiraAI Game Hub · 棋室</p>
+            <h1>游戏中心</h1>
+            <p class="hero-sub">与<span id="hero-agent">诺里</span>对坐一局，或让陪练陪你练手</p>
+          </div>
+        </div>
+        <!-- 横幅下方一条细导航：连接状态 / 玩家身份 -->
+        <div class="hero-bar">
+          <span id="hub-conn" class="conn-chip loading"><i class="dot"></i><span id="hub-conn-label">加载中</span></span>
+          <details id="identity" class="identity">
+            <summary>
+              <i class="id-dot" aria-hidden="true"></i>
+              <span id="identity-label">玩家身份</span>
+            </summary>
+            <div class="identity-body">
+              <p id="identity-meta" class="identity-meta">读取中…</p>
+              <label class="id-field">棋桌昵称
+                <input id="identity-nick" maxlength="40" autocomplete="off" spellcheck="false" aria-describedby="identity-nick-err">
+              </label>
+              <p id="identity-nick-err" class="id-err hidden" role="alert"></p>
+              <p class="identity-note">昵称只用于棋桌上显示，可随时修改；进行中的对局不受影响。</p>
+              <button id="identity-save" class="btn primary sm" type="button">保存身份</button>
+            </div>
+          </details>
+        </div>
+      </header>
+
+      <section id="continue-slot" class="hidden" aria-label="进行中的对局"></section>
+
+      <section id="active-slot" aria-label="进行中的棋局">
+        <div class="section-head">
+          <h2>进行中的棋局</h2>
+          <span id="am-count" class="chip hidden"></span>
+        </div>
+        <div id="am-list" class="am-list"></div>
+      </section>
+
+      <section aria-label="游戏列表">
+        <div class="section-head"><h2>棋桌</h2></div>
+        <div id="games-grid" class="games-grid"></div>
+      </section>
+
+      <footer class="hub-foot">
+        <details class="diag">
+          <summary>联调诊断</summary>
+          <div class="diag-body">
+            <div class="diag-actions">
+              <button id="diag-ping" class="btn sm" type="button">Ping REST</button>
+              <button id="diag-session" class="btn sm" type="button">页面会话</button>
+              <button id="diag-notice" class="btn sm" type="button">发送 notice</button>
+            </div>
+            <pre id="diag-log" class="diag-log">诊断输出会显示在这里。</pre>
+          </div>
+        </details>
+        <p class="hub-note">对局记录保存在插件数据目录里；座位口令只存在本页会话里，不进链接、不上传。</p>
+      </footer>
+    </div>
+  </main>
+  <script type="module" src="./hub.js?v=k1"></script>
+</body>
+</html>

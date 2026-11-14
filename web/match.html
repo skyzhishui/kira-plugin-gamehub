@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>对局 · 游戏中心</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%E2%99%9F%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./app.css?v=k1">
+  <link rel="stylesheet" href="./games/doudizhu/table.css?v=k1">
+  <script>
+    /* 主题跟随 KiraAI WebUI（本页不提供独立切换）：
+       localStorage["theme"]（"light"|"dark"）→ 宿主 <html class="dark"> →
+       prefers-color-scheme 兜底。宿主切换时 storage 事件即时同步；
+       本页把结果写到自己的 html[data-theme] 上（CSS 变量 1:1 沿用）。 */
+    (function () {
+      function apply(t) {
+        if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
+        else document.documentElement.removeAttribute("data-theme");
+      }
+      function detect() {
+        var t = null;
+        try { t = localStorage.getItem("theme"); } catch (e) {}
+        if (t !== "dark" && t !== "light") {
+          t = document.documentElement.classList.contains("dark") ? "dark" : null;
+        }
+        if (t !== "dark" && t !== "light") {
+          try { t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }
+          catch (e) { t = "light"; }
+        }
+        apply(t);
+      }
+      detect();
+      addEventListener("storage", function (e) { if (!e.key || e.key === "theme") detect(); });
+      try {
+        new MutationObserver(function () { detect(); }).observe(document.documentElement, {
+          attributes: true, attributeFilter: ["class"],
+        });
+      } catch (e) { /* 老内核忽略 */ }
+    })();
+  </script>
+</head>
+<body>
+  <main class="match">
+    <header class="topbar reveal">
+      <a class="btn ghost back" href="./index.html">← 大厅</a>
+      <div class="title-wrap">
+        <h1 id="m-title">对局</h1>
+        <p id="m-sub" class="match-sub"></p>
+      </div>
+      <div class="top-right">
+        <span id="spectate-chip" class="pill accent hidden">观战中</span>
+        <span id="conn-chip" class="conn-chip loading"><i class="dot"></i><span id="conn-label">连接中…</span></span>
+      </div>
+    </header>
+
+    <div id="recon-banner" class="recon hidden" aria-live="polite"></div>
+
+    <section class="stage" aria-label="棋桌">
+      <div id="seats" class="seats reveal" aria-label="座位"></div>
+      <div id="mate-zone" class="mate-zone hidden" aria-label="队友区"></div>
+      <div id="board-shell" class="board-shell reveal">
+        <div id="board-skel" class="board-skel skel" aria-hidden="true"></div>
+        <div id="sticker-slot"></div>
+      </div>
+      <div id="board-meta" class="board-meta hidden" aria-label="棋局信息"></div>
+      <p id="status-line" class="status-line k-wait" aria-live="polite">正在进入棋局…</p>
+      <div id="level-row" class="level-row hidden" role="group" aria-label="对手等级"></div>
+      <div id="chat-status" class="chat-status hidden" role="status"></div>
+      <div id="chat-readonly" class="chat-readonly hidden" role="status"></div>
+      <div id="actions" class="action-row reveal"></div>
+    </section>
+
+    <aside class="side-col reveal" aria-label="对局侧栏">
+      <section class="log-panel" aria-label="对局记录">
+        <div class="log-head">对局记录</div>
+        <ol id="log-list" class="log-list"></ol>
+      </section>
+    </aside>
+  </main>
+
+  <dialog id="rename-dlg" class="dlg" aria-labelledby="rename-title">
+    <form id="rename-form">
+      <h2 id="rename-title">改个称呼</h2>
+      <label for="rename-input">在棋桌上显示的名字
+        <input id="rename-input" name="name" maxlength="24" autocomplete="off" placeholder="如：阿空">
+      </label>
+      <menu>
+        <button type="button" class="btn ghost" id="rename-cancel">取消</button>
+        <button type="submit" class="btn primary" id="rename-save">保存</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script type="module" src="./match.js?v=k1"></script>
+</body>
+</html>

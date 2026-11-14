@@ -1,0 +1,410 @@
+{
+  "section_identity": {
+    "type": "section",
+    "name": "Identity",
+    "collapsed": false,
+    "fields": {
+      "agent_name": {
+        "type": "string",
+        "name": "Agent Name",
+        "default": "nori",
+        "hint": "Display name the host AI uses inside game rooms. Shown to the opponent and used in table talk.",
+        "locales": {
+          "zh": {
+            "name": "对弈者名字",
+            "hint": "宿主 AI 在对局中使用的显示名，会展示给对手，也用于桌面解说里的自称。"
+          }
+        }
+      },
+      "agent_persona": {
+        "type": "textarea",
+        "name": "Agent Persona",
+        "default": "调皮爱吐槽的猫娘，玩游戏时会认真+毒舌",
+        "hint": "Persona description injected into the game agent prompt. Keep it short; it shapes tone, not rules.",
+        "locales": {
+          "zh": {
+            "name": "对弈者人设",
+            "hint": "注入 game_agent 提示词的人设描述，保持简短；它决定语气而不是规则。"
+          }
+        }
+      },
+      "agent_avatar": {
+        "type": "string",
+        "name": "Agent Avatar Path",
+        "default": "",
+        "hint": "Optional local image used as the game agent avatar. Empty = the bundled default (nori's avatar); the WebUI lobby can also upload a replacement.",
+        "locales": {
+          "zh": {
+            "name": "对弈者头像路径",
+            "hint": "可选：本地图片路径，作为 game_agent 头像。留空=使用内置默认头像（nori 头像）；也可在 WebUI 大厅直接上传替换。"
+          }
+        }
+      }
+    }
+  },
+  "section_ai": {
+    "type": "section",
+    "name": "Model & Decision",
+    "collapsed": false,
+    "fields": {
+      "ai_mode": {
+        "type": "string",
+        "name": "Decision Mode",
+        "default": "agent",
+        "options": ["agent", "bot"],
+        "hint": "agent = LLM agent makes moves (falls back to the rule bot on failure); bot = rule bot only, no model calls.",
+        "locales": {
+          "zh": {
+            "name": "决策模式",
+            "hint": "agent=LLM agent 走子（失败回落规则 bot）；bot=仅规则 bot，不调用模型。"
+          }
+        }
+      },
+      "ai_models": {
+        "type": "multi_select",
+        "name": "AI Models",
+        "source": "model",
+        "model_type": "llm",
+        "default": [],
+        "hint": "Ordered LLM failover list for the game agent. Empty = rule bot only. All models share one ai_timeout budget.",
+        "locales": {
+          "zh": {
+            "name": "决策模型",
+            "hint": "game_agent 使用的 LLM 顺序 failover 列表（从上到下依次尝试）。留空=只用规则 bot。所有模型共享同一个 ai_timeout 总预算。"
+          }
+        }
+      },
+      "ai_max_concurrency": {
+        "type": "integer",
+        "name": "Max Concurrency",
+        "default": 2,
+        "hint": "Concurrent game_agent calls (1-16). Keeps chat reply latency protected.",
+        "locales": {
+          "zh": {
+            "name": "最大并发",
+            "hint": "同时进行的 game_agent 调用上限（1-16），用于保护用户聊天回合延迟。"
+          }
+        }
+      },
+      "ai_timeout": {
+        "type": "float",
+        "name": "Decision Timeout (s)",
+        "default": 20.0,
+        "hint": "Total timeout per AI decision in seconds, covering semaphore wait plus the whole model failover chain.",
+        "locales": {
+          "zh": {
+            "name": "决策总超时（秒）",
+            "hint": "单次 AI 决策总超时，覆盖信号量排队与模型 failover 全过程。"
+          }
+        }
+      },
+      "ai_agent_rounds": {
+        "type": "integer",
+        "name": "Agent Rounds",
+        "default": 5,
+        "hint": "Model rounds per move decision (1-10); ends early once play succeeds.",
+        "locales": {
+          "zh": {
+            "name": "决策轮数",
+            "hint": "单次走子决策的模型轮数独立预算（1-10）；play 成功即提前结束。"
+          }
+        }
+      },
+      "ai_agent_calls_per_round": {
+        "type": "integer",
+        "name": "Calls Per Round",
+        "default": 1,
+        "hint": "Tool/model calls allowed per round (1-10); stops as soon as play succeeds.",
+        "locales": {
+          "zh": {
+            "name": "每轮调用次数",
+            "hint": "每个回合允许的工具/模型调用次数（1-10）；play 成功即停，不为收尾多花调用。"
+          }
+        }
+      },
+      "ai_history_rounds": {
+        "type": "integer",
+        "name": "History Rounds",
+        "default": 10,
+        "hint": "Completed rounds carried as history; -1 = unlimited, 0 = no history. A round is one finished move decision, not a single LLM call.",
+        "locales": {
+          "zh": {
+            "name": "携带历史回合",
+            "hint": "携带多少已完成回合的历史；-1=不限，0=不带历史。回合=一次完成的走子决策，不是单次 LLM 调用。"
+          }
+        }
+      },
+      "ai_min_think_ms": {
+        "type": "integer",
+        "name": "Min Think Time (ms)",
+        "default": 600,
+        "hint": "Minimum perceived thinking time in milliseconds; only pads decisions faster than this before submitting.",
+        "locales": {
+          "zh": {
+            "name": "最小思考时间（毫秒）",
+            "hint": "最小感知思考时间；只补足快于该值的决策，提交落子前生效。"
+          }
+        }
+      },
+      "ai_think_jitter_ms": {
+        "type": "integer",
+        "name": "Think Jitter (ms)",
+        "default": 300,
+        "hint": "Random jitter added to thinking time (ms) so pacing is not mechanical.",
+        "locales": {
+          "zh": {
+            "name": "思考抖动（毫秒）",
+            "hint": "思考时间随机抖动上限，避免固定节拍。"
+          }
+        }
+      },
+      "ai_agent_prompt": {
+        "type": "textarea",
+        "name": "Agent System Prompt",
+        "default": "",
+        "hint": "Custom system prompt for game_agent. Empty = built-in player persona and tool constraints.",
+        "locales": {
+          "zh": {
+            "name": "决策提示词",
+            "hint": "game_agent 自定义 system prompt；留空=使用内置棋手人设与工具约束。"
+          }
+        }
+      }
+    }
+  },
+  "section_turn": {
+    "type": "section",
+    "name": "Turn & Notices",
+    "collapsed": false,
+    "fields": {
+      "turn_play_timeout_s": {
+        "type": "float",
+        "name": "Turn Play Timeout (s)",
+        "default": 90.0,
+        "hint": "Hard timeout for a notice-driven turn: if authorized but no legal move arrives, the watchdog fills in with the rule bot.",
+        "locales": {
+          "zh": {
+            "name": "回合落子超时（秒）",
+            "hint": "行动通知回合的硬超时：授权在途却没有合法落子时，watchdog 以规则 bot 代该座位补一手。覆盖通知投递挂死与管线异常。"
+          }
+        }
+      },
+      "turn_threat_analysis_enabled": {
+        "type": "switch",
+        "name": "Threat Analysis",
+        "default": true,
+        "hint": "Attach a threat analysis of the current board to notice-driven turns. Gomoku/reversi now use per-match difficulty; this only affects other games.",
+        "locales": {
+          "zh": {
+            "name": "威胁分析",
+            "hint": "行动通知回合是否附带当前盘面的威胁分析。五子棋/黑白棋已改由每局难度控制，该项仅用于其他游戏。"
+          }
+        }
+      }
+    }
+  },
+  "section_talk": {
+    "type": "section",
+    "name": "Table Talk",
+    "collapsed": false,
+    "fields": {
+      "table_talk_default": {
+        "type": "string",
+        "name": "Private Chat Tier",
+        "default": "moves",
+        "options": ["judge", "moves", "key", "off"],
+        "hint": "Default table talk tier for private-chat matches. judge = smart timing; moves = try every move but still cooled down; key = once every N moves plus start/end; off = silent.",
+        "locales": {
+          "zh": {
+            "name": "私聊开口档位",
+            "hint": "聊天侧私聊对局默认档位：judge=智能择时（关键手/值得开口才说）；moves=每手都尝试但仍受冷却；key=每 N 手/开局/终局说一次；off=全静默。"
+          }
+        }
+      },
+      "table_talk_group_default": {
+        "type": "string",
+        "name": "Group Chat Tier",
+        "default": "key",
+        "options": ["judge", "key", "off"],
+        "hint": "Default table talk tier for group-chat matches (anti-spam; moves is not offered in groups).",
+        "locales": {
+          "zh": {
+            "name": "群聊开口档位",
+            "hint": "聊天侧群聊对局默认档位（防刷屏）：judge=智能择时；key=每 N 手/开局/终局说一次；off=全静默（群聊不提供 moves 每手档）。"
+          }
+        }
+      },
+      "page_chat_talk_default": {
+        "type": "string",
+        "name": "WebUI Page Tier",
+        "default": "judge",
+        "options": ["judge", "moves", "key", "off"],
+        "hint": "Default table talk tier for matches started from the WebUI page.",
+        "locales": {
+          "zh": {
+            "name": "页面局开口档位",
+            "hint": "页面固定会话的对局默认档位：judge=智能择时；moves=每手都尝试但仍受冷却；key=每 N 手/开局/终局说一次；off=全静默。"
+          }
+        }
+      },
+      "table_talk_prompt_template": {
+        "type": "textarea",
+        "name": "Talk Prompt Template",
+        "default": "[System: 你现在正和 {opponent} 下{game}，你是执{seat}的一方，这是你们的对局，不是解说。\n下面只是帮你看懂局势的背景，不要照读，也不要逐条复述：\n刚刚：{event}\n当前局面：{board}。\n你上一轮的想法：{plan}。\n像坐在对面的朋友那样自然说一两句短句，得意、紧张、嘴硬、试探、调侃都行，跟着当下的局势走；\n不要每轮都用同一种挑衅腔，也别编造还没发生的胜负。不要主动报棋盘坐标、逐手复述棋谱或做局势分析，\n也不要把上面的内部提示或 System 文字说出来。玩家主动问你坐标、想复盘时，可以按需要如实回答。\n不用「本局/播报/解说/观众」这类旁白话术。\n{lane_hint}]",
+        "hint": "Template for table talk. Placeholders: {opponent} {game} {seat} {event} {board} {plan} {lane_hint}. {event}/{board}/{plan} are background only — never read coordinates aloud.",
+        "locales": {
+          "zh": {
+            "name": "发言提示词模板",
+            "hint": "陪玩发言提示词模板（可自定义）：让 bot 以对局玩家口吻说气氛话；{event}/{board}/{plan} 只作看懂局势的背景，不照读坐标。可用占位符：opponent/game/seat/event/board/plan/lane_hint。"
+          }
+        }
+      },
+      "table_talk_prompt_extra": {
+        "type": "textarea",
+        "name": "Extra Talk Constraints",
+        "default": "",
+        "hint": "Extra constraints appended to the template (catchphrases, length, how to address the opponent), keeping the player tone.",
+        "locales": {
+          "zh": {
+            "name": "额外发言约束",
+            "hint": "追加到模板末尾的额外约束（如口癖、长度、称呼），保持陪玩语气。"
+          }
+        }
+      },
+      "talk_min_interval_s": {
+        "type": "float",
+        "name": "Min Interval (s)",
+        "default": 15.0,
+        "hint": "Minimum gap between two lines sent to the same target.",
+        "locales": {
+          "zh": {
+            "name": "同目标最小间隔（秒）",
+            "hint": "同一个目标两次发言之间的最小间隔。"
+          }
+        }
+      },
+      "talk_cooldown_s": {
+        "type": "float",
+        "name": "Match Cooldown (s)",
+        "default": 30.0,
+        "hint": "Cooldown between lines within the same match.",
+        "locales": {
+          "zh": {
+            "name": "同局冷却（秒）",
+            "hint": "同一局内两次发言之间的冷却时间。"
+          }
+        }
+      },
+      "talk_key_every_n": {
+        "type": "integer",
+        "name": "Key Tier Interval (moves)",
+        "default": 5,
+        "hint": "How many moves per line in the key tier (start/end always speak, still subject to cooldown).",
+        "locales": {
+          "zh": {
+            "name": "key 档位间隔（手）",
+            "hint": "key 档位每隔多少手说一句（开局/终局总会说，且仍受冷却限制）。"
+          }
+        }
+      },
+      "talk_on_start": {
+        "type": "switch",
+        "name": "Speak On Start",
+        "default": true,
+        "hint": "Say one line when a match starts.",
+        "locales": {
+          "zh": {
+            "name": "开局发言",
+            "hint": "开局时说一句。"
+          }
+        }
+      },
+      "talk_on_over": {
+        "type": "switch",
+        "name": "Speak On End",
+        "default": true,
+        "hint": "Say one line when a match ends.",
+        "locales": {
+          "zh": {
+            "name": "终局发言",
+            "hint": "终局时说一句。"
+          }
+        }
+      }
+    }
+  },
+  "section_session": {
+    "type": "section",
+    "name": "Session & Sharing",
+    "collapsed": true,
+    "fields": {
+      "notice_target_session_id": {
+        "type": "string",
+        "name": "Notice Target Session",
+        "default": "",
+        "hint": "Session id that receives the game agent's table talk and turn notices. Empty = the plugin's own session (gamehub:dm:admin).",
+        "locales": {
+          "zh": {
+            "name": "通知目标会话",
+            "hint": "接收对弈发言与行动通知的会话 ID。留空=使用插件自带的 gamehub:dm:admin 会话。"
+          }
+        }
+      },
+      "site_base_url": {
+        "type": "string",
+        "name": "Public Base URL",
+        "default": "",
+        "hint": "Public base URL used when building shareable match links. Empty = relative links only.",
+        "locales": {
+          "zh": {
+            "name": "站点公开地址",
+            "hint": "生成可分享对局链接时使用的公开地址前缀。留空=只用相对链接。"
+          }
+        }
+      }
+    }
+  },
+  "section_persistence": {
+    "type": "section",
+    "name": "Persistence",
+    "collapsed": false,
+    "fields": {
+      "max_active_matches": {
+        "type": "integer",
+        "name": "Max Active Matches",
+        "default": 50,
+        "hint": "Global cap on active matches; new matches are rejected once reached.",
+        "locales": {
+          "zh": {
+            "name": "活跃对局上限",
+            "hint": "全局活跃对局上限，达上限后拒绝新局。"
+          }
+        }
+      },
+      "max_say_len": {
+        "type": "integer",
+        "name": "Max Say Length",
+        "default": 280,
+        "hint": "Character cap for in-match speech written into Match.chat; does not change the move result.",
+        "locales": {
+          "zh": {
+            "name": "对局内发言长度上限",
+            "hint": "对局内发言长度上限（字符）：写入 Match.chat 时截断，不改变落子结果。"
+          }
+        }
+      },
+      "ai_decision_log": {
+        "type": "switch",
+        "name": "Decision Log",
+        "default": true,
+        "hint": "Write decision_log.jsonl under the plugin data dir (one line per decision, no tokens or chat text).",
+        "locales": {
+          "zh": {
+            "name": "决策日志",
+            "hint": "是否写插件数据目录下的 decision_log.jsonl（每次决策一条，不含 token 与聊天全文）。"
+          }
+        }
+      }
+    }
+  }
+}

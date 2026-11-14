@@ -1,0 +1,7 @@
+{
+  "name": "gamehub",
+  "display_name": "Game Hub (internal)",
+  "description": "Internal session adapter for the game hub plugin. Not a chat platform; used to drive notice-based agent turns for matches.",
+  "version": "0.1.0",
+  "author": "skyzhishui"
+}

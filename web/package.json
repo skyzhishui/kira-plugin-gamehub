@@ -1,0 +1,9 @@
+{
+  "name": "kira-plugin-gamehub-web",
+  "private": true,
+  "type": "module",
+  "description": "游戏中心前端静态资源（浏览器原生 ESM，无打包步骤）。type:module 仅服务于 Node 侧 node --check / node --test 的模块语法判定，浏览器与插件静态托管不受影响。",
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}
