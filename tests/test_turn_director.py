@@ -649,6 +649,34 @@ async def test_tools_for_only_the_announced_session():
     await director.stop()
 
 
+async def test_turn_tool_schemas_are_named_for_the_model():
+    """Every injected tool must expose its *instance* name to the model.
+
+    ``BaseTool.get_schema`` is a classmethod; the host builds ``request.tools``
+    from ``ToolSet.to_list()``, so a turn tool that only sets ``self.name``
+    would serialise ``{"name": null}`` and the provider rejects the request
+    ("tools[n] must include a function name").
+    """
+    rooms, _plugin, recorder, director = _harness_bound()
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: bool(recorder.sent))
+    session_id = recorder.sent[0][0]
+
+    tools = director.tools_for(session_id)
+    assert tools
+    schemas = {tool.get_schema()["name"]: tool.get_schema() for tool in tools}
+    assert play_tool_name(room.match.id) in schemas
+    assert state_tool_name(room.match.id) in schemas
+    for name, schema in schemas.items():
+        assert name, "tool schema must carry a name"
+        assert schema["description"], f"{name}: description must not be empty"
+        params = schema["parameters"]
+        assert isinstance(params, dict) and params.get("type") == "object"
+        assert isinstance(params.get("properties"), dict)
+    await director.stop()
+
+
 async def test_multi_match_same_target_gets_distinct_tools_no_overwrite():
     """Two matches sharing one target session keep distinct play tools."""
     rooms, plugin, recorder, director = _harness_bound()

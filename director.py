@@ -160,10 +160,19 @@ def _cfg(plugin: Any, name: str, default: Any) -> Any:
 
 
 def _agent_name(plugin: Any) -> str:
-    """Configured agent display name (no host bot nickname dependency)."""
-    settings = getattr(plugin, "settings", None)
-    name = str(getattr(settings, "agent_name", "") or "").strip()
-    return name or DEFAULT_AGENT_NAME
+    """Display name of whoever is being driven by the notice.
+
+    Turn notices go to the **host** agent, so its persona name wins; the
+    plugin-owned ``game_agent`` name is only the fallback (host unavailable).
+    """
+    for candidate in (
+        getattr(plugin, "host_agent_name", ""),
+        getattr(getattr(plugin, "settings", None), "agent_name", ""),
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return DEFAULT_AGENT_NAME
 
 
 def _seat_name(seat: Any, index: int, agent: str) -> str:

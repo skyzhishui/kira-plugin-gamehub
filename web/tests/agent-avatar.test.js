@@ -18,10 +18,13 @@ import fs from "node:fs";
 import {
   AGENT_AVATAR_URL,
   driverOf,
+  getAgentAvatar,
   getPersonaName,
   isAgentOpponent,
   personaNameText,
   personaText,
+  resolveAgentAvatar,
+  setAgentAvatar,
   setPersonaName,
 } from "../shared/mode.js";
 
@@ -42,6 +45,25 @@ test("头像地址是插件自己的相对素材路径，且文件真实存在",
   assert.ok(!AGENT_AVATAR_URL.includes("file:"), "不是文件系统路径");
   assert.ok(!AGENT_AVATAR_URL.includes("/plugins/"), "不是仓库内直接路径");
   assert.ok(fs.existsSync(new URL(`../${AGENT_AVATAR_URL.slice(2)}`, import.meta.url)), "素材必须存在");
+});
+
+test("头像地址解析：只接受插件默认素材或插件自己的 agent-avatar 端点", () => {
+  assert.equal(resolveAgentAvatar("./assets/agent-avatar.png"), "./assets/agent-avatar.png");
+  assert.equal(
+    resolveAgentAvatar("/api/plugin/kira-plugin-gamehub/agent-avatar?v=1700000000"),
+    "/api/plugin/kira-plugin-gamehub/agent-avatar?v=1700000000"
+  );
+  for (const bad of ["", null, undefined, "   ", "https://evil.example/x.png", "/page/plugin/agent/raiy.png", "../../etc/passwd"]) {
+    assert.equal(resolveAgentAvatar(bad), "./assets/agent-avatar.png", `脏值回落默认：${bad}`);
+  }
+});
+
+test("界面共享状态：setAgentAvatar 归一化，getAgentAvatar 返回当前渲染地址", () => {
+  assert.equal(getAgentAvatar(), "./assets/agent-avatar.png");
+  assert.equal(setAgentAvatar("/api/plugin/kira-plugin-gamehub/agent-avatar?v=7"), "/api/plugin/kira-plugin-gamehub/agent-avatar?v=7");
+  assert.equal(getAgentAvatar(), "/api/plugin/kira-plugin-gamehub/agent-avatar?v=7");
+  assert.equal(setAgentAvatar("https://evil.example/x.png"), "./assets/agent-avatar.png", "外链不被采用");
+  assert.equal(setAgentAvatar(undefined), "./assets/agent-avatar.png", "字段缺席回落默认");
 });
 
 test("归属：进阶陪练的对手（agent 驱动）才配进阶头像", () => {

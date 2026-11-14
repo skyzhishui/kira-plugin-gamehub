@@ -201,6 +201,19 @@ class PlayTool(BaseTool):
         self.description = _play_description(move_help)
         self.parameters = _play_parameters(move_help)
 
+    def get_schema(self) -> dict[str, Any]:
+        """Per-instance schema: the tool name carries the match id.
+
+        ``BaseTool.get_schema`` is a classmethod reading class attributes, but
+        turn tools are bound per grant, so the instance values must win — the
+        host builds ``request.tools`` from ``ToolSet.to_list()``.
+        """
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        }
+
     # -- validation ----------------------------------------------------
     def _bound_of(self, event: Any) -> dict[str, Any] | None:
         """Bound context of this call; must still match the captured grant."""
@@ -314,6 +327,14 @@ class BoundStateTool(GameStateTool):
         bound = build_turn_context(grant)
         super().__init__(plugin, bound=bound, ctx=ctx)
         self.name = state_tool_name(str(bound.get("match_id") or ""))
+
+    def get_schema(self) -> dict[str, Any]:
+        """Per-instance schema (the bound name differs from ``game_state``)."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        }
 
     async def execute(
         self, event: Any = None, match_id: str | None = None, **kwargs: Any

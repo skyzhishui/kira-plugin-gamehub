@@ -32,6 +32,8 @@ import {
   getPersonaName,
   personaNameText,
   practiceNameText,
+  setAgentAvatar,
+  getAgentAvatar,
   levelHint,
   LEVEL_VALUES,
   LEVEL_LABELS,
@@ -44,6 +46,7 @@ import {
   normalizeLineup,
   noriSeatOf,
   seatDisplay,
+  AGENT_AVATAR_URL,
 } from "./shared/mode.js";
 import { cardCoverCandidates } from "./games/registry.js";
 import "./shared/atmo.js";
@@ -932,6 +935,107 @@ function applyPersona(data) {
   if (hero) hero.textContent = getPersonaName();
 }
 
+/* ---------------- 对手头像（插件自有 agent-avatar，可上传/恢复默认） ----------------
+ * 地址由 /ui-config 的 agent_avatar 下发：默认是随插件分发的
+ * ./assets/agent-avatar.png；WebUI 上传后变成
+ * /api/plugin/kira-plugin-gamehub/agent-avatar?v=<mtime>。
+ * 上传流程：文件 → data URL → POST /agent-avatar {"data": ...}；
+ * 恢复默认：POST /agent-avatar {"reset": true}。素材文件本身不改。 */
+
+const AVATAR_MAX_BYTES = 4 * 1024 * 1024;
+const AVATAR_MIMES = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"];
+
+function avatarErr(msg) {
+  const p = $("avatar-err");
+  if (!p) return;
+  p.textContent = msg || "";
+  p.classList.toggle("hidden", !msg);
+}
+
+/** 预览图与共享状态同步（缓存戳由后端 URL 带着走，这里补一次时间戳兜底）。 */
+function applyAvatar(url, { bust = false } = {}) {
+  const src = setAgentAvatar(url);
+  const img = $("avatar-preview");
+  if (img) {
+    img.src = bust && !src.includes("?") ? `${src}?v=${Date.now()}` : src;
+    img.hidden = false;
+  }
+  return src;
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadAvatar(file) {
+  if (!file) return;
+  if (!AVATAR_MIMES.includes(String(file.type || "").toLowerCase())) {
+    avatarErr("只支持 PNG / JPG / WebP / GIF 图片。");
+    return;
+  }
+  if (file.size > AVATAR_MAX_BYTES) {
+    avatarErr("头像文件过大（上限 4MB）。");
+    return;
+  }
+  avatarErr("");
+  const btn = $("avatar-file");
+  if (btn) btn.disabled = true;
+  try {
+    const data = await readFileAsDataUrl(file);
+    const res = await api("/agent-avatar", { method: "POST", body: { data }, timeoutMs: 30000 });
+    applyAvatar((res && res.agent_avatar) || "", { bust: true });
+    toast("头像已更新", "ok");
+  } catch (err) {
+    avatarErr((err && err.message) || "头像上传失败，请稍后再试");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function resetAvatar() {
+  avatarErr("");
+  const btn = $("avatar-reset");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api("/agent-avatar", { method: "POST", body: { reset: true } });
+    applyAvatar((res && res.agent_avatar) || AGENT_AVATAR_URL, { bust: true });
+    toast("已恢复默认头像", "ok");
+  } catch (err) {
+    avatarErr((err && err.message) || "恢复默认头像失败，请稍后再试");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function bindAvatar() {
+  const input = $("avatar-file");
+  if (input) {
+    input.addEventListener("change", () => {
+      const file = input.files && input.files[0];
+      input.value = ""; // 允许重复选同一文件
+      uploadAvatar(file);
+    });
+  }
+  const reset = $("avatar-reset");
+  if (reset) reset.addEventListener("click", resetAvatar);
+}
+
+/** /ui-config 是头像地址的唯一来源（与对局页同一字段）。 */
+async function loadAvatar() {
+  try {
+    const cfg = await api("/ui-config");
+    if (cfg && cfg.agent_name) setPersonaName(cfg.agent_name);
+    if (cfg) applyAvatar(cfg.agent_avatar);
+  } catch {
+    applyAvatar(AGENT_AVATAR_URL); // 读不到就显示默认素材
+  }
+}
+
 /* ---------------- 启动 ---------------- */
 
 async function init() {
@@ -959,7 +1063,9 @@ renderSkeleton();
 init();
 bindDiag();
 bindIdentity();
+bindAvatar();
 loadIdentity();
+loadAvatar();
 
 /* ---------------- 玩家身份（hero 右侧折叠卡 · 只有显示名） ----------------
  * KiraAI 是单管理员 WebUI：插件身份只有 identity.json 里的一个 name，

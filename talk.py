@@ -101,15 +101,19 @@ def _safe(value: Any) -> str:
 
 
 def _bot_nickname(plugin: Any) -> str:
-    """Host bot display name for the notice sender (never changes persona)."""
+    """Display name of the host agent that speaks the table talk."""
     ctx = getattr(plugin, "ctx", None)
     bot_config = getattr(ctx, "bot_config", None)
     bot = getattr(bot_config, "bot", None)
-    name = str(getattr(bot, "nickname", "") or "").strip()
-    if name:
-        return name
-    name = str(getattr(plugin, "bot_nickname", "") or "").strip()
-    return name or "对手"
+    for candidate in (
+        getattr(plugin, "host_agent_name", ""),
+        getattr(bot, "nickname", ""),
+        getattr(plugin, "bot_nickname", ""),
+    ):
+        name = str(candidate or "").strip()
+        if name:
+            return name
+    return "对手"
 
 
 def build_prompt(

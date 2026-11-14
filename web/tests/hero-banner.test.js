@@ -64,12 +64,12 @@ test("紧凑：桌面 148px → 640px 106px → 380px 98px（成立前是 240px 
 
 test("窄屏换 2:1 竖切裁图；深色主题压暗插画并换深色柔光", () => {
   assert.match(css, /hero-banner-mobile\.webp/);
-  const dark = ruleOf("html[data-theme=\"dark\"] .hero-banner-art");
+  const dark = ruleOf("html.dark .hero-banner-art");
   assert.match(dark, /brightness\(0\.62\)/);
   // 深色柔光用深蓝（不是近黑），左侧底色与卡片同为深蓝
-  const darkScrim = ruleOf("html[data-theme=\"dark\"] .hero-banner::after");
+  const darkScrim = ruleOf("html.dark .hero-banner::after");
   assert.match(darkScrim, /rgba\(23, 41, 74, 0\.94\)/);
-  const darkBg = ruleOf("html[data-theme=\"dark\"] .hero-banner");
+  const darkBg = ruleOf("html.dark .hero-banner");
   assert.match(darkBg, /#17294a/);
   // 不允许出现接近纯黑的柔光（蓝通道必须明显高于红通道）
   const rgbs = [...darkScrim.matchAll(/rgba\((\d+), (\d+), (\d+),/g)].map((m) => m.slice(1, 4).map(Number));
@@ -98,6 +98,33 @@ test("贴纸/底图/头像引用都指向真实存在的公共素材", () => {
 test("对局页只引用公共头像，不再引用角色立绘或其它插画", () => {
   assert.doesNotMatch(matchJs, /hero-/);
   assert.doesNotMatch(matchHtml, /assets\/(?!agent-avatar)/);
-  // 人设/进阶对手座位都用同一个公共头像
-  assert.match(matchJs, /seatAvatarEl\(AGENT_AVATAR_URL, name, thinking\)/);
+  // 人设/进阶对手座位都用同一个插件自有头像（地址来自共享状态，即 /ui-config）
+  assert.match(matchJs, /seatAvatarEl\(getAgentAvatar\(\), name, thinking\)/);
+  assert.doesNotMatch(matchJs, /AGENT_AVATAR_URL/);
+});
+
+/* ---------------- 大厅头像上传控件（插件自有 agent-avatar） ---------------- */
+
+const hubJs = fs.readFileSync(new URL("../hub.js", import.meta.url), "utf8");
+
+test("大厅有头像预览 + 文件选择 + 恢复默认，且走插件 agent-avatar 端点", () => {
+  assert.match(html, /id="avatar-preview"/);
+  assert.match(html, /id="avatar-file"[^>]*type="file"/);
+  assert.match(html, /accept="image\/png,image\/jpeg,image\/webp,image\/gif"/);
+  assert.match(html, /id="avatar-reset"/);
+  assert.match(html, /id="avatar-err"/);
+  // 默认预览就是随插件分发的素材
+  assert.match(html, /id="avatar-preview"[^>]*src="\.\/assets\/agent-avatar\.png"/);
+  // 上传/恢复默认都打同一个端点，且上传走 data URL
+  assert.match(hubJs, /api\("\/agent-avatar", \{ method: "POST", body: \{ data \}/);
+  assert.match(hubJs, /api\("\/agent-avatar", \{ method: "POST", body: \{ reset: true \}/);
+  assert.match(hubJs, /readAsDataURL/, "文件转 data URL 再上传");
+  // 头像地址来自 /ui-config，不读宿主人设图
+  assert.match(hubJs, /applyAvatar\(cfg\.agent_avatar\)/);
+  assert.doesNotMatch(hubJs, /reference_image|avatar_path|persona_avatar/, "不读宿主人设图字段");
+});
+
+test("大厅头像控件不写素材文件（无 file: 路径、无写盘调用）", () => {
+  assert.doesNotMatch(hubJs, /file:\/\/|require\("fs"\)|writeFile/);
+  assert.match(hubJs, /AVATAR_MAX_BYTES = 4 \* 1024 \* 1024/, "前端先做 4MB 预检");
 });

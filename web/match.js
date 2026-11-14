@@ -48,10 +48,11 @@ import {
   LEVEL_VALUES,
   LEVEL_LABELS,
   LEVEL_HINTS,
-  AGENT_AVATAR_URL,
   MATE_NOTE_TEXT,
   setPersonaName,
   getPersonaName,
+  setAgentAvatar,
+  getAgentAvatar,
 } from "./shared/mode.js";
 import {
   moveText as doudizhuMoveText,
@@ -352,7 +353,7 @@ function renderSeats(match) {
     // 人类/规则陪练座位用名字首字占位（不冒充任何人设）。
     let avatar = null;
     if (identity === "nori" || identity === "agent") {
-      avatar = seatAvatarEl(AGENT_AVATAR_URL, name, thinking, { agent: identity === "agent" });
+      avatar = seatAvatarEl(getAgentAvatar(), name, thinking, { agent: identity === "agent" });
     } else if (three && (identity === "human" || identity === "bot")) {
       avatar = seatAvatarFallback(name, thinking, false);
     }
@@ -426,12 +427,12 @@ function renderSeats(match) {
     // 人设/进阶对手座位都挂公共头像 + 各自的 say 气泡（per-seat 单例，
     // 座位每次重渲染时重新挂载，不重建、不打断计时）。
     if (!three && identity === "nori") {
-      tile.appendChild(seatAvatarEl(AGENT_AVATAR_URL, name, thinking));
+      tile.appendChild(seatAvatarEl(getAgentAvatar(), name, thinking));
       const bubble = seatBubbleEl(i);
       bubble.classList.remove("bubble-top");
       tile.appendChild(bubble);
     } else if (!three && identity === "agent") {
-      tile.appendChild(seatAvatarEl(AGENT_AVATAR_URL, name, thinking, { agent: true }));
+      tile.appendChild(seatAvatarEl(getAgentAvatar(), name, thinking, { agent: true }));
       tile.appendChild(seatBubbleEl(i));
     } else if (!three && practice && seat.kind !== "human") {
       // 陪练局：对手座位 say 气泡挂对手座位（独立单例）。
@@ -505,7 +506,7 @@ function renderMateZone(match) {
   const avWrap = el("span", "mate-avatar-wrap");
   const av = document.createElement("img");
   av.className = "mate-avatar" + (noriActing ? " wiggle" : "");
-  av.src = AGENT_AVATAR_URL;
+  av.src = getAgentAvatar();
   av.alt = `队友${persona}`;
   av.addEventListener("error", () => av.remove());
   avWrap.appendChild(av);
@@ -1103,6 +1104,8 @@ async function initUiConfig() {
   }
   if (!cfg || typeof cfg !== "object") return;
   if (cfg.agent_name) setPersonaName(cfg.agent_name);
+  // 头像：插件自有 agent-avatar（默认素材或 WebUI 上传版，脏值回落默认）
+  setAgentAvatar(cfg.agent_avatar);
   const holdFromCfg = Math.round(Number(cfg.bubble_hold_s) * 1000);
   chat.holdMs = Math.min(
     BUBBLE_MAX_SHOW_MS,

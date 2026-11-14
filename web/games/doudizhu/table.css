@@ -919,7 +919,7 @@ button.dz-card:focus-visible { outline: 2px solid #5db9f5; outline-offset: 2px; 
 /* ---------------- 深色主题 ---------------- */
 
 /* 木桌压暗但保留暖木色；毡面变深蓝但仍是蓝，不是黑 */
-html[data-theme="dark"] .dz-table {
+html.dark .dz-table {
   border-color: rgba(140, 96, 58, 0.7);
   background-color: #6e4726;
   box-shadow:
@@ -928,12 +928,12 @@ html[data-theme="dark"] .dz-table {
     0 18px 40px rgba(0, 0, 0, 0.5),
     0 4px 10px rgba(0, 0, 0, 0.36);
 }
-html[data-theme="dark"] .dz-table::before {
+html.dark .dz-table::before {
   background:
     radial-gradient(120% 90% at 50% 36%, rgba(255, 220, 170, 0.08) 0%, rgba(255, 220, 170, 0) 58%),
     radial-gradient(130% 120% at 50% 50%, rgba(0, 0, 0, 0) 44%, rgba(0, 0, 0, 0.58) 100%);
 }
-html[data-theme="dark"] .dz-table::after {
+html.dark .dz-table::after {
   border-top-color: rgba(255, 220, 180, 0.18);
   border-left-color: rgba(255, 220, 180, 0.12);
   border-bottom-color: rgba(0, 0, 0, 0.42);
@@ -941,14 +941,14 @@ html[data-theme="dark"] .dz-table::after {
 }
 
 /* 顶部纸带保持奶油色 + 深棕字（不跟随 --ink 翻转） */
-html[data-theme="dark"] .dz-header {
+html.dark .dz-header {
   background: linear-gradient(170deg, #fdf6e6 0%, #efe0c4 100%);
   border-color: #d3bd96;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.36), 0 1px 0 rgba(255, 255, 255, 0.7) inset;
   color: #4a3218;
 }
 
-html[data-theme="dark"] .dz-felt {
+html.dark .dz-felt {
   border-color: rgba(70, 120, 160, 0.6);
   background-color: #1d3a52;
   background-image:
@@ -963,45 +963,45 @@ html[data-theme="dark"] .dz-felt {
     0 -2px 6px rgba(0, 0, 0, 0.28) inset;
   color: #cfe3f2;
 }
-html[data-theme="dark"] .dz-felt::before { border-color: rgba(200, 225, 245, 0.34); }
+html.dark .dz-felt::before { border-color: rgba(200, 225, 245, 0.34); }
 
 /* 底牌不铺深色底板：牌面直接落在毡面上，避免三张牌周围出现暗块 */
-html[data-theme="dark"] .dz-bottom {
+html.dark .dz-bottom {
   background: none;
   border: 0;
   box-shadow: none;
 }
 /* 深色主题里底牌标签仍是奶油底 + 深蓝字（不是浅色字压浅底） */
-html[data-theme="dark"] .dz-bottom-label { color: #2c4f6e; background: rgba(255, 250, 240, 0.94); }
-html[data-theme="dark"] .dz-need { color: #e2eefa; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
-html[data-theme="dark"] .dz-trick {
+html.dark .dz-bottom-label { color: #2c4f6e; background: rgba(255, 250, 240, 0.94); }
+html.dark .dz-need { color: #e2eefa; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
+html.dark .dz-trick {
   background: radial-gradient(70% 100% at 50% 55%, rgba(0, 0, 0, 0.32) 0%, rgba(0, 0, 0, 0) 72%);
 }
-html[data-theme="dark"] .dz-trick-who {
+html.dark .dz-trick-who {
   background: #fdf6e6;
   border-color: #d3bd96;
   color: #4a3218;
 }
-html[data-theme="dark"] .dz-trick-name {
+html.dark .dz-trick-name {
   background: linear-gradient(170deg, #fdf6e6 0%, #efe0c4 100%);
   border-color: #d3bd96;
   color: #4a3218;
 }
-html[data-theme="dark"] .dz-recent {
+html.dark .dz-recent {
   background: rgba(20, 40, 60, 0.4);
   border-color: rgba(120, 170, 210, 0.24);
   color: #d6e7f5;
 }
-html[data-theme="dark"] .dz-recent-empty,
-html[data-theme="dark"] .dz-recent-row,
-html[data-theme="dark"] .dz-recent-who { color: #b7d3e8; }
-html[data-theme="dark"] .dz-recent-row.latest,
-html[data-theme="dark"] .dz-recent-name { color: #e2eefa; }
-html[data-theme="dark"] .dz-recent-pass,
-html[data-theme="dark"] .dz-more { color: #9dbdd4; }
+html.dark .dz-recent-empty,
+html.dark .dz-recent-row,
+html.dark .dz-recent-who { color: #b7d3e8; }
+html.dark .dz-recent-row.latest,
+html.dark .dz-recent-name { color: #e2eefa; }
+html.dark .dz-recent-pass,
+html.dark .dz-more { color: #9dbdd4; }
 
 /* 结算面板：深色主题下也是奶油成绩单 + 深棕字 */
-html[data-theme="dark"] .dz-over {
+html.dark .dz-over {
   background: linear-gradient(170deg, #fdf6e6 0%, #efe0c4 100%);
   border-color: #d3bd96;
   box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.75) inset;
@@ -1009,7 +1009,7 @@ html[data-theme="dark"] .dz-over {
 }
 
 /* 牌面在深色主题下仍是奶油色 + 深墨字（旧 app.css 曾把牌染成浅蓝） */
-html[data-theme="dark"] .dz-card {
+html.dark .dz-card {
   border-color: var(--dz-paper-line);
   background: linear-gradient(168deg, #fffdf7 0%, var(--dz-paper-2) 100%);
   color: var(--dz-black);
@@ -1018,10 +1018,10 @@ html[data-theme="dark"] .dz-card {
     0 2px 5px rgba(0, 0, 0, 0.34),
     0 6px 12px rgba(0, 0, 0, 0.24);
 }
-html[data-theme="dark"] .dz-card.red,
-html[data-theme="dark"] .dz-card.red .dz-corner,
-html[data-theme="dark"] .dz-card.red .dz-pip { color: var(--dz-red); }
-html[data-theme="dark"] .dz-table .dz-card.back {
+html.dark .dz-card.red,
+html.dark .dz-card.red .dz-corner,
+html.dark .dz-card.red .dz-pip { color: var(--dz-red); }
+html.dark .dz-table .dz-card.back {
   border-color: #cbb99e;
   background-color: #dbe9f5;
   background-image:
@@ -1031,26 +1031,26 @@ html[data-theme="dark"] .dz-table .dz-card.back {
   background-position: center;
 }
 
-html[data-theme="dark"] .dz-hand {
+html.dark .dz-hand {
   border-color: rgba(0, 0, 0, 0.4);
   background: linear-gradient(180deg, rgba(10, 20, 30, 0.4) 0%, rgba(10, 20, 30, 0.58) 100%);
 }
-html[data-theme="dark"] .dz-me-name { color: #f3e6cf; }
-html[data-theme="dark"] .dz-sel { color: #f3e6cf; }
-html[data-theme="dark"] .dz-hand-empty { color: #f3e6cf; }
-html[data-theme="dark"] .dz-wait { color: #f3e6cf; }
+html.dark .dz-me-name { color: #f3e6cf; }
+html.dark .dz-sel { color: #f3e6cf; }
+html.dark .dz-hand-empty { color: #f3e6cf; }
+html.dark .dz-wait { color: #f3e6cf; }
 
 /* 深色主题下奶油按钮不变（仍是纸片质感），只是阴影更重 */
-html[data-theme="dark"] .dz-bid,
-html[data-theme="dark"] .dz-play-row .btn.dz-hint,
-html[data-theme="dark"] .dz-play-row .btn.dz-pass {
+html.dark .dz-bid,
+html.dark .dz-play-row .btn.dz-hint,
+html.dark .dz-play-row .btn.dz-pass {
   background: linear-gradient(170deg, #fdf6e6 0%, #efe0c4 100%);
   border-color: #d3bd96;
   color: #4a3218;
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.4), 0 1px 0 rgba(255, 255, 255, 0.7) inset;
 }
-html[data-theme="dark"] .dz-bid.ghost { background: rgba(253, 246, 230, 0.78); color: #7a5a33; }
-html[data-theme="dark"] .dz-hints { background: rgba(10, 20, 30, 0.4); border-color: rgba(200, 225, 245, 0.28); }
+html.dark .dz-bid.ghost { background: rgba(253, 246, 230, 0.78); color: #7a5a33; }
+html.dark .dz-hints { background: rgba(10, 20, 30, 0.4); border-color: rgba(200, 225, 245, 0.28); }
 
 /* ---------------- 动画（不改变布局，尊重减少动效） ---------------- */
 

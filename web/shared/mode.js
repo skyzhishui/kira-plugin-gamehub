@@ -437,9 +437,35 @@ export function driverOf(match) {
   return difficulty === "advanced" ? "agent" : "bot";
 }
 
-/* 座位头像（KiraAI 唯一允许的角色图）：公共 assets/agent-avatar.png。
- * 插件静态托管在 /page/plugin/kira-plugin-gamehub/hub/ 下，页面相对路径即可。 */
+/* 座位头像（KiraAI 唯一允许的角色图）：插件自己的 agent-avatar。
+ * 默认是随插件分发的 web/assets/agent-avatar.png（页面相对路径，静态托管在
+ * /page/plugin/kira-plugin-gamehub/hub/ 下）；WebUI 上传后后端把它换成
+ * /api/plugin/kira-plugin-gamehub/agent-avatar?v=<mtime>，由 /ui-config 的
+ * agent_avatar 下发（host/avatar.py）。前端只读这个字段，不改素材文件。 */
 export const AGENT_AVATAR_URL = "./assets/agent-avatar.png";
+
+/** 允许渲染的头像地址：插件默认素材，或插件自己的 agent-avatar 端点。
+ * 其它取值（含宿主人设图/外链/文件路径）一律回落默认，避免挂错图。 */
+export function resolveAgentAvatar(value) {
+  const s = String(value == null ? "" : value).trim();
+  if (!s) return AGENT_AVATAR_URL;
+  if (s === AGENT_AVATAR_URL) return s;
+  if (s.startsWith(`${AGENT_AVATAR_URL}?`)) return s;
+  if (/^\/api\/plugin\/kira-plugin-gamehub\/agent-avatar(\?.*)?$/.test(s)) return s;
+  return AGENT_AVATAR_URL;
+}
+
+let agentAvatar = AGENT_AVATAR_URL;
+
+/** 记录 /ui-config 下发的头像地址（脏值回落默认）。 */
+export function setAgentAvatar(value) {
+  agentAvatar = resolveAgentAvatar(value);
+  return agentAvatar;
+}
+
+export function getAgentAvatar() {
+  return agentAvatar;
+}
 
 /** 进阶对手（agent 驱动）的对手座位才配进阶对手头像。
  * 简单规则 bot、人类座位、人设本人局一律 false——头像归属按模式，不按名字猜。 */

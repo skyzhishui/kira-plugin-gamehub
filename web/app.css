@@ -2,10 +2,11 @@
  *
  * 主题：变量值沿用浅蓝 × 白 × 粉紫的宿主调色板——
  *      白天默认：天蓝 × 白 × 粉紫点缀，Soft-Neumorphism（外凸卡片 / 内凹输入）；
- *      html[data-theme="dark"]：深蓝黑 × 霓虹蓝。
- * 主题来源（KiraAI）：localStorage["theme"]（"light"|"dark"）+ 宿主
- *      <html class="dark"> / prefers-color-scheme 兜底（页面头部防闪烁脚本把
- *      结果写到本页 html[data-theme] 上）；本页不提供独立切换，始终跟随宿主。
+ *      html.dark：深蓝黑 × 霓虹蓝（选择器与宿主一致：documentElement 上的 dark 类）。
+ * 主题来源（KiraAI）：localStorage["theme"]（"light"|"dark"），宿主把它镜像成
+ *      <html class="dark">（webui stores/app.ts）；页面头部防闪烁脚本读同一份
+ *      storage 并就地切 html.dark，prefers-color-scheme 兜底。本页不提供独立
+ *      切换，始终跟随宿主（storage 事件即时同步）。
  * 棋盘配色取自 assets/card-gomoku.png 的插画语言：浅蓝盘面 + 白格线 + 粉色胜利光。
  * 布局契约：宿主给 .plugin-page-frame 柔性盒 → 页面 height:100% + min-height:0，
  *      375px 无横向溢出（纵向允许滚动）。
@@ -75,7 +76,7 @@
 
 /* ---------------- 黑夜主题（dark：深蓝 × 霓虹蓝，照抄宿主） ---------------- */
 
-html[data-theme="dark"] {
+html.dark {
   --sky: #4da6ff;
   --sky-deep: #2f7fe0;
   --sky-dark: #8ec7ff;
@@ -160,7 +161,7 @@ body.lobby {
   background-attachment: fixed, fixed;
 }
 
-html[data-theme="dark"] body.lobby {
+html.dark body.lobby {
   background-image:
     linear-gradient(180deg, rgba(13, 24, 52, 0.9) 0%, rgba(9, 13, 29, 0.93) 52%, rgba(18, 14, 44, 0.92) 100%),
     url("./assets/bg-lobby.png");
@@ -196,7 +197,7 @@ body.lobby::before {
     linear-gradient(180deg, rgba(255, 255, 255, 0) 34%, rgba(255, 255, 255, 0.42) 74%, rgba(255, 255, 255, 0.6) 100%);
 }
 
-html[data-theme="dark"] body.lobby::before {
+html.dark body.lobby::before {
   background:
     radial-gradient(1100px 540px at 86% -10%, rgba(70, 125, 255, 0.17), transparent 62%),
     radial-gradient(900px 520px at -10% 28%, rgba(178, 105, 255, 0.13), transparent 60%),
@@ -217,7 +218,7 @@ body.lobby::after {
   animation: clouds-drift 96s ease-in-out infinite alternate;
 }
 
-html[data-theme="dark"] body.lobby::after {
+html.dark body.lobby::after {
   background:
     linear-gradient(114deg, transparent 32%, rgba(90, 150, 255, 0.075) 44%, rgba(200, 130, 255, 0.06) 52%, transparent 66%),
     linear-gradient(248deg, transparent 44%, rgba(80, 120, 255, 0.06) 56%, transparent 68%);
@@ -246,7 +247,7 @@ html[data-theme="dark"] body.lobby::after {
 
 /* 对局页更克制：整层降透明 */
 body:not(.lobby) .fx-atmo { opacity: 0.6; }
-html[data-theme="dark"] body:not(.lobby) .fx-atmo { opacity: 0.72; }
+html.dark body:not(.lobby) .fx-atmo { opacity: 0.72; }
 
 .fx-atmo i { position: absolute; display: block; }
 
@@ -313,7 +314,7 @@ body:not(.lobby) .fx-orb {
   animation: none;
   opacity: 0.35;
 }
-html[data-theme="dark"] body:not(.lobby) .fx-orb { opacity: 0.4; }
+html.dark body:not(.lobby) .fx-orb { opacity: 0.4; }
 
 @keyframes fx-orb-breathe {
   from { transform: scale(1); opacity: 0.85; }
@@ -359,7 +360,7 @@ html[data-theme="dark"] body:not(.lobby) .fx-orb { opacity: 0.4; }
 .fx-mote.c4 { --c: rgba(165, 232, 197, 0.85); }
 .fx-mote.c5 { --c: rgba(201, 184, 255, 0.85); }
 
-html[data-theme="dark"] .fx-mote { display: none; }
+html.dark .fx-mote { display: none; }
 
 @keyframes fx-fall {
   0% { transform: translate3d(0, -6vh, 0) rotate(0deg); opacity: 0; }
@@ -382,14 +383,14 @@ html[data-theme="dark"] .fx-mote { display: none; }
   opacity: 0;
 }
 
-html[data-theme="dark"] body.lobby .fx-atmo::before {
+html.dark body.lobby .fx-atmo::before {
   display: block;
   left: 10%;
   top: 16%;
   animation: fx-shoot 12s linear 5s infinite;
 }
 
-html[data-theme="dark"] body.lobby .fx-atmo::after {
+html.dark body.lobby .fx-atmo::after {
   display: block;
   left: 52%;
   top: 7%;
@@ -783,20 +784,20 @@ a.btn:hover { color: var(--ink); }
   background: linear-gradient(96deg, rgba(255, 255, 255, 0.86) 0%, rgba(255, 255, 255, 0.6) 32%, rgba(255, 255, 255, 0.12) 54%, rgba(255, 255, 255, 0) 66%);
 }
 
-html[data-theme="dark"] .hero-banner {
+html.dark .hero-banner {
   border-color: rgba(120, 170, 220, 0.28);
   /* 深蓝底（对齐页面 --sky-pale / --sky-pale-2，而不是近黑）：
    * 上端偏靛蓝、下端偏紫，呼应插画里天空与云霞的过渡 */
   background: linear-gradient(180deg, #17294a 0%, #1b2f52 46%, #2a2350 100%);
 }
-html[data-theme="dark"] .hero-banner-art {
+html.dark .hero-banner-art {
   filter: brightness(0.62) saturate(0.9) contrast(1.02);
 }
 /* 深色：暗色柔光一路铺到右端（不到 0），插画只在最右淡淡透出，
  * 与卡片底色连续，不会出现一块比卡片亮的矩形 */
 /* 深色：深蓝柔光一路铺到右端（不到 0），插画只在最右淡淡透出，
  * 与卡片底色连续，不会出现一块比卡片亮的矩形，也不会压成纯黑 */
-html[data-theme="dark"] .hero-banner::after {
+html.dark .hero-banner::after {
   background: linear-gradient(96deg, rgba(23, 41, 74, 0.94) 0%, rgba(23, 41, 74, 0.84) 26%, rgba(24, 44, 79, 0.56) 48%, rgba(26, 47, 84, 0.28) 70%, rgba(28, 50, 88, 0.12) 100%);
 }
 
@@ -862,7 +863,7 @@ html[data-theme="dark"] .hero-banner::after {
   .hero-banner::after {
     background: linear-gradient(96deg, rgba(255, 255, 255, 0.92) 0%, rgba(255, 255, 255, 0.78) 34%, rgba(255, 255, 255, 0.2) 58%, rgba(255, 255, 255, 0) 72%);
   }
-  html[data-theme="dark"] .hero-banner::after {
+  html.dark .hero-banner::after {
     background: linear-gradient(96deg, rgba(23, 41, 74, 0.95) 0%, rgba(23, 42, 76, 0.84) 30%, rgba(24, 45, 80, 0.5) 58%, rgba(27, 49, 86, 0.26) 78%, rgba(28, 50, 88, 0.14) 100%);
   }
   .hero-copy { max-width: 66%; }
@@ -970,6 +971,41 @@ html[data-theme="dark"] .hero-banner::after {
 .identity-note { margin: 0; font-size: 11px; line-height: 1.6; color: var(--faint); }
 
 .identity .btn { align-self: flex-end; }
+
+/* 对手头像：预览 + 上传/恢复默认（插件自有 agent-avatar，素材文件不改） */
+.avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.avatar-preview {
+  width: 46px;
+  height: 46px;
+  flex: none;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--line);
+  background: var(--sky-pale);
+  box-shadow: var(--btn-shadow);
+}
+.avatar-preview[hidden] { display: none; }
+.avatar-controls { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.avatar-controls .id-field { display: flex; align-items: baseline; gap: 6px; }
+.avatar-hint { font-size: 10.5px; color: var(--faint); }
+.avatar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.avatar-actions .btn { align-self: center; }
+.avatar-pick { position: relative; overflow: hidden; cursor: pointer; }
+.avatar-file {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+.avatar-file:disabled { cursor: progress; }
 
 .section-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
 .section-head h2 {
@@ -1377,7 +1413,7 @@ html[data-theme="dark"] .hero-banner::after {
   animation: glass-in 0.4s cubic-bezier(0.2, 0.9, 0.3, 1.1) both;
 }
 
-html[data-theme="dark"] .result-glass {
+html.dark .result-glass {
   background: rgba(20, 32, 58, 0.55);
   border-color: rgba(130, 190, 255, 0.3);
 }
@@ -1919,7 +1955,7 @@ a.go:hover::after { transform: translateX(2px); }
   0%, 100% { opacity: 0.45; }
   50% { opacity: 1; }
 }
-html[data-theme="dark"] .speak-badge { border-color: var(--pink); }
+html.dark .speak-badge { border-color: var(--pink); }
 
 /* ---------------- 诺里座位发言气泡（锚在 AI 座位卡上，不占布局） ---------------- */
 
@@ -2903,7 +2939,7 @@ html[data-theme="dark"] .speak-badge { border-color: var(--pink); }
   box-shadow: var(--inset);
   overflow: hidden;
 }
-html[data-theme="dark"] .dz-felt {
+html.dark .dz-felt {
   background:
     radial-gradient(90% 120% at 50% 0%, rgba(77, 166, 255, 0.16), transparent 62%),
     linear-gradient(160deg, var(--sky-pale) 0%, var(--sky-pale-2) 100%);
@@ -3064,7 +3100,7 @@ html[data-theme="dark"] .dz-felt {
   overflow: hidden;
   transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
 }
-html[data-theme="dark"] .dz-card {
+html.dark .dz-card {
   background: linear-gradient(170deg, #f7fbff 0%, #e2eefc 100%);
   color: #1d2a3c;
   border-color: rgba(150, 200, 255, 0.5);
@@ -3082,7 +3118,7 @@ button.dz-card:focus-visible { outline: 2px solid var(--sky-dark); outline-offse
 /* 红桃/方块：深色主题的牌面是浅冰蓝，旧值 #c93450 在缩小后偏暗、容易被看成黑牌。
  * 统一用更亮的绯红，并让主花色满不透明，缩小到 320px 也一眼分得清红黑。 */
 .dz-card.red { color: #e11d48; }
-html[data-theme="dark"] .dz-card.red { color: #e11d48; }
+html.dark .dz-card.red { color: #e11d48; }
 .dz-card.red .dz-pip { opacity: 1; }
 .dz-card.red .dz-rank,
 .dz-card.red .dz-suit { font-weight: 700; }

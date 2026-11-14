@@ -8,21 +8,16 @@
   <link rel="stylesheet" href="./app.css?v=k1">
   <link rel="stylesheet" href="./games/doudizhu/table.css?v=k1">
   <script>
-    /* 主题跟随 KiraAI WebUI（本页不提供独立切换）：
-       localStorage["theme"]（"light"|"dark"）→ 宿主 <html class="dark"> →
-       prefers-color-scheme 兜底。宿主切换时 storage 事件即时同步；
-       本页把结果写到自己的 html[data-theme] 上（CSS 变量 1:1 沿用）。 */
+    /* 主题跟随 KiraAI WebUI（本页不提供独立切换），与宿主 stores/app.ts 同一口径：
+       localStorage["theme"]（"light"|"dark"）→ documentElement 上的 dark 类；
+       prefers-color-scheme 兜底。storage 事件（e.key === "theme"）即时同步。 */
     (function () {
       function apply(t) {
-        if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
-        else document.documentElement.removeAttribute("data-theme");
+        document.documentElement.classList.toggle("dark", t === "dark");
       }
       function detect() {
         var t = null;
         try { t = localStorage.getItem("theme"); } catch (e) {}
-        if (t !== "dark" && t !== "light") {
-          t = document.documentElement.classList.contains("dark") ? "dark" : null;
-        }
         if (t !== "dark" && t !== "light") {
           try { t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }
           catch (e) { t = "light"; }
@@ -30,12 +25,9 @@
         apply(t);
       }
       detect();
-      addEventListener("storage", function (e) { if (!e.key || e.key === "theme") detect(); });
-      try {
-        new MutationObserver(function () { detect(); }).observe(document.documentElement, {
-          attributes: true, attributeFilter: ["class"],
-        });
-      } catch (e) { /* 老内核忽略 */ }
+      addEventListener("storage", function (e) {
+        if (!e.key || e.key === "theme") detect();
+      });
     })();
   </script>
 </head>

@@ -79,3 +79,29 @@ test("matchWsUrl：两者都缺时不带 query（握手失败由 4003 提示）"
   );
   assert.equal(url, "ws://localhost/ws/plugin/kira-plugin-gamehub/matches/m-3/ws");
 });
+
+/* ---------------- 主题契约（宿主 webui stores/app.ts） ---------------- */
+
+const fs = await import("node:fs");
+const lobbyHtml = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
+const matchHtml = fs.readFileSync(new URL("../match.html", import.meta.url), "utf8");
+const appCss = fs.readFileSync(new URL("../app.css", import.meta.url), "utf8");
+const dzCss = fs.readFileSync(new URL("../games/doudizhu/table.css", import.meta.url), "utf8");
+
+test("主题：读 localStorage[\"theme\"]、切 documentElement 的 dark 类、只认 storage key=theme", () => {
+  for (const [name, html] of [["index.html", lobbyHtml], ["match.html", matchHtml]]) {
+    assert.match(html, /localStorage\.getItem\("theme"\)/, `${name} 读宿主主题键`);
+    assert.match(html, /classList\.toggle\("dark"/, `${name} 切 dark 类`);
+    assert.match(html, /prefers-color-scheme: dark/, `${name} 系统偏好兜底`);
+    assert.match(html, /e\.key === "theme"/, `${name} 只响应 theme 键`);
+    assert.doesNotMatch(html, /data-theme/, `${name} 不再使用 data-theme 属性`);
+    assert.doesNotMatch(html, /MutationObserver/, `${name} 不再观察父级/自身 data-theme`);
+    assert.doesNotMatch(html, /window\.parent/, `${name} 不再读父级 frame`);
+  }
+});
+
+test("主题：深色选择器与宿主一致用 html.dark（两个样式表）", () => {
+  assert.ok(appCss.includes("html.dark"), "app.css 深色调色板挂在 html.dark 上");
+  assert.ok(dzCss.includes("html.dark"), "牌桌样式同样跟随 html.dark");
+  assert.ok(!/\[data-theme/.test(appCss + dzCss), "不得残留 data-theme 选择器");
+});

@@ -133,12 +133,13 @@ def _is_private_session(session_id: str) -> bool:
 
 
 def _bot_name(plugin: Any) -> str:
-    """Host bot nickname (core config); neutral fallback, never hard-coded."""
+    """Host agent display name; neutral fallback, never hard-coded."""
     ctx = getattr(plugin, "ctx", None)
     bot_config = getattr(ctx, "bot_config", None)
     bot = getattr(bot_config, "bot", None)
     settings = getattr(plugin, "settings", None)
     for candidate in (
+        getattr(plugin, "host_agent_name", ""),
         getattr(bot, "nickname", ""),
         getattr(plugin, "bot_nickname", ""),
         getattr(plugin, "_agent_name", ""),
