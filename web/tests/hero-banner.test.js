@@ -125,7 +125,7 @@ test("大厅有头像预览 + 文件选择 + 恢复默认，且走插件 agent-a
   assert.match(hubJs, /api\("\/agent-avatar", \{ method: "POST", body: \{ reset: true \}/);
   assert.match(hubJs, /readAsDataURL/, "文件转 data URL 再上传");
   // 头像地址来自 /ui-config，不读宿主人设图
-  assert.match(hubJs, /applyAvatar\(cfg\.agent_avatar\)/);
+  assert.match(hubJs, /applyAvatar\(\(cfg && cfg\.agent_avatar\) \|\| AGENT_AVATAR_URL\)/, "头像随启动一起取");
   assert.doesNotMatch(hubJs, /reference_image|avatar_path|persona_avatar/, "不读宿主人设图字段");
 });
 

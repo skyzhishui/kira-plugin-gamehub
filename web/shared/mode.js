@@ -38,10 +38,22 @@
  *   bot   陪练（纯规则，不占座位地陪打）
  * 三档等级只对 nori/agent 有效：初级不做威胁分析、中级带坐标、高级另附
  * 机器人前三候选。等级不是棋力承诺，文案不写「搜索最优」。
- * MODE_LABELS / MODE_HINTS 是默认人设下的静态文案（导出给需要常量的调用方）；
- * 界面请用下面的 modeLabel / modeHint，它们跟随 setPersonaName 生效。 */
+ * MODE_LABELS / MODE_HINTS 是静态模板（导出给需要模板的调用方）；
+ * 界面请用下面的 modeLabel / modeHint，它们跟随 setHostAgentName / setPersonaName 生效。 */
 
-export const MODE_LABELS = { nori: "与AI对战", agent: "与搭档对战", bot: "与陪练对战" };
+/** 宿主 AI 名字的占位记号。文案模板里写它，渲染时替换成 /ui-config 下发的
+ * host_agent_name（宿主当前激活人设的名字）；只有在拿不到宿主名字时才原样
+ * 显示「AI」，绝不在界面上写死任何身份词。 */
+export const HOST_PLACEHOLDER = "AI";
+
+/** 静态模板：宿主名字用 HOST_PLACEHOLDER 占位，渲染时换成真实名字。
+ * 界面一律走下面的 modeLabel()（已替换好）；这里的常量只给需要模板的调用方，
+ * 绝不把「与AI对战」这种写死身份的串直接上屏。 */
+export const MODE_LABELS = {
+  nori: `与${HOST_PLACEHOLDER}对战`,
+  agent: "与搭档对战",
+  bot: "与陪练对战",
+};
 
 /** game_agent 的缺省配置名（schema.json 的 agent_name 默认值）。
  * 它只是一个配置标识；渲染文案由服务端下发的名字决定，前端不写死任何人设名。 */
@@ -125,11 +137,6 @@ export function levelHint(level, name) {
   if (lv === "advanced") return `${who}会全力以赴。`;
   return `${who}会认真应战。`;
 }
-
-/** 宿主 AI 名字的占位记号。文案模板里写它，渲染时替换成 /ui-config 下发的
- * host_agent_name（宿主当前激活人设的名字）；只有在拿不到宿主名字时才原样
- * 显示「AI」，绝不在界面上写死任何身份词。 */
-export const HOST_PLACEHOLDER = "AI";
 
 /** 把文案模板里的宿主占位记号换成宿主真名。
  *

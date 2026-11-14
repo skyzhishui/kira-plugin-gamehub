@@ -547,12 +547,18 @@ class GamehubApi:
             current = self._view(room, _seat_of_actor(room.match, PAGE_ACTOR))
         agent_name = self._agent_name()
         practice_name = self._practice_name()
+        # The lobby copy prints the host agent's name, so the catalog payload
+        # carries it too: the page can render in a single pass instead of
+        # waiting for /ui-config (which would leave the neutral fallback name
+        # baked into the buttons whenever /games answers first).
+        host_name = await self._refresh_host_agent_name()
         catalog = [
             {**entry, "agent_name": agent_name, "practice_name": practice_name}
-            for entry in games.catalog(self._host_agent_name(), agent_name)
+            for entry in games.catalog(host_name, agent_name)
         ]
         return envelope(
             {
+                "host_agent_name": host_name,
                 "games": catalog,
                 "current": current,
                 "active_matches": await self._active_match_summaries(),

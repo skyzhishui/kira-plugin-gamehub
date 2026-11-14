@@ -30,7 +30,6 @@ import {
   createMatchPayload,
   modeLabel,
   setPersonaName,
-  getPersonaName,
   setHostAgentName,
   getHostAgentName,
   personaNameText,
@@ -906,10 +905,12 @@ function bindDiag() {
 
 /** /games 顶层 agent_name 决定人设的渲染名；目录项也带一份，顶层优先。
  * 横幅里的「对坐一局」默认对手是宿主 AI（行动通知回合驱动），所以用
- * /ui-config 的 host_agent_name；拿不到时回落人设名。 */
+ * /games 的 host_agent_name（启动时与 /ui-config 一起取齐后再渲染），
+ * 两者都没有才显示中性占位。 */
 function applyPersona(data) {
   const name = data && (data.agent_name || (Array.isArray(data.games) && data.games[0] && data.games[0].agent_name));
   setPersonaName(name);
+  if (data && data.host_agent_name) setHostAgentName(data.host_agent_name);
   const hero = $("hero-agent");
   if (hero) hero.textContent = getHostAgentName();
 }
@@ -1004,31 +1005,30 @@ function bindAvatar() {
   if (reset) reset.addEventListener("click", resetAvatar);
 }
 
-/** /ui-config 是头像地址的唯一来源（与对局页同一字段）。 */
-async function loadAvatar() {
-  try {
-    const cfg = await api("/ui-config");
-    if (cfg && cfg.agent_name) setPersonaName(cfg.agent_name);
-    if (cfg && cfg.host_agent_name) setHostAgentName(cfg.host_agent_name);
-    if (cfg) applyAvatar(cfg.agent_avatar);
-    const hero = $("hero-agent");
-    if (hero) hero.textContent = getHostAgentName();
-  } catch {
-    applyAvatar(AGENT_AVATAR_URL); // 读不到就显示默认素材
-  }
-}
-
 /* ---------------- 启动 ---------------- */
 
+/** 宿主/agent 身份必须先到齐再渲染：卡片的模式文案、阵容标签、横幅都在
+ * 打印宿主名字，晚到的身份会让界面永久停在兜底名「AI」。
+ * 两个接口并行取，取齐后一次性上屏。 */
 async function init() {
-  try {
-    const data = await api("/games");
-    applyPersona(data);
-    render(data || {});
-  } catch (err) {
-    renderError(err);
-    toast(errorText(err, "加载游戏列表失败"), "error");
+  const [cfgRes, gamesRes] = await Promise.allSettled([api("/ui-config"), api("/games")]);
+  const cfg = cfgRes.status === "fulfilled" ? cfgRes.value : null;
+  if (!cfg) console.warn("ui-config 拉取失败（头像沿用默认素材）", cfgRes.reason);
+
+  if (gamesRes.status !== "fulfilled") {
+    renderError(gamesRes.reason);
+    toast(errorText(gamesRes.reason, "加载游戏列表失败"), "error");
+    return;
   }
+  const data = gamesRes.value || {};
+  // /ui-config 先落身份（同源、值一致），/games 随后覆盖并把横幅同步好。
+  if (cfg) {
+    if (cfg.agent_name) setPersonaName(cfg.agent_name);
+    if (cfg.host_agent_name) setHostAgentName(cfg.host_agent_name);
+  }
+  applyPersona(data);
+  render(data);
+  applyAvatar((cfg && cfg.agent_avatar) || AGENT_AVATAR_URL);
 }
 
 window.addEventListener("unhandledrejection", (e) => {
@@ -1047,7 +1047,6 @@ bindDiag();
 bindIdentity();
 bindAvatar();
 loadIdentity();
-loadAvatar();
 
 /* ---------------- 玩家身份（hero 右侧折叠卡 · 只有显示名） ----------------
  * KiraAI 是单管理员 WebUI：插件身份只有 identity.json 里的一个 name，

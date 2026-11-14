@@ -865,3 +865,28 @@ async def test_ui_config_refreshes_the_host_name_from_the_persona(tmp_path):
     config = await data_of(api.ui_config())
     assert config["host_agent_name"] == "阿狸"
     assert config["agent_name"] == "nori"  # configured game_agent name, untouched
+
+
+async def test_games_payload_carries_the_host_name(tmp_path):
+    """The lobby copy prints the host name, so /games must ship it.
+
+    The page renders as soon as /games answers; if the name only arrived via
+    /ui-config, the buttons would keep the neutral fallback (「与AI对战」).
+    """
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+
+    async def refresh_host_name():
+        plugin.host_agent_name = "汐祈（Seki）"
+        return plugin.host_agent_name
+
+    plugin._runtime = SimpleNamespace(refresh_host_name=refresh_host_name)
+
+    data = await data_of(api.games())
+    assert data["host_agent_name"] == "汐祈（Seki）"
+    gomoku = next(entry for entry in data["games"] if entry["kind"] == "gomoku")
+    doudizhu = next(entry for entry in data["games"] if entry["kind"] == "doudizhu")
+    labels = [item["label"] for item in doudizhu["lineups"]]
+    assert labels, "doudizhu exposes lineup labels"
+    assert all("AI" not in label or "汐祈" in label for label in labels), labels
+    assert any("汐祈（Seki）" in label for label in labels), labels
