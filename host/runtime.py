@@ -56,7 +56,7 @@ class GamehubRuntime:
             repository=self.store,
             config=settings,
             opponent_name=agent_name,
-            bot_name=bot_name,
+            bot_name=plugin.host_agent_name,
             practice_name=settings.practice_name,
         )
         self.talk = TableTalk(plugin)
@@ -113,6 +113,13 @@ class GamehubRuntime:
         """Re-read the host name (persona may have been switched at runtime)."""
         name = await self._read_host_name()
         self.plugin.host_agent_name = name
+        rooms = getattr(self.plugin, "rooms", None) or self.rooms
+        setter = getattr(rooms, "set_bot_name", None)
+        if callable(setter):
+            try:
+                setter(name)
+            except Exception:  # noqa: BLE001 - naming is cosmetic
+                logger.debug("gamehub: host-name propagation failed", exc_info=True)
         return name
 
     async def stop(self) -> None:
