@@ -80,43 +80,45 @@ def test_play_schema_has_move_and_optional_say_only() -> None:
 async def test_hallucinated_say_kwargs_do_not_break_the_move() -> None:
     calls: list[tuple] = []
 
-    async def submit(match_id, key, move, say=None):
-        calls.append((match_id, key, move, say))
+    async def submit(match_id, key, move, say=None, *, persist_say=False):
+        calls.append((match_id, key, move, say, persist_say))
         return "已落子 H8。本回合完成。", True
 
     tool = _play(_plugin(submit))
     event = _Event()
     text = await tool.execute(event, move="H8", unrelated="ignored")
     assert "本次行动授权已完成" in text
-    assert calls == [("m-action", "grant-key", "H8", None)]
+    assert calls == [("m-action", "grant-key", "H8", None, False)]
     assert event.stopped is True
 
 
 # ----------------------------------------------------------------------
 #  say handling
 # ----------------------------------------------------------------------
-async def test_say_is_truncated_to_configured_limit() -> None:
+async def test_say_is_truncated_and_persisted_with_the_move() -> None:
+    """The remark is persisted atomically with the move (opponent bubble)."""
     calls: list[tuple] = []
 
-    async def submit(match_id, key, move, say=None):
-        calls.append((match_id, key, move, say))
+    async def submit(match_id, key, move, say=None, *, persist_say=False):
+        calls.append((match_id, key, move, say, persist_say))
         return "已落子 H8。本回合完成。", True
 
     tool = _play(_plugin(submit, max_say_len=4))
     await tool.execute(_Event(), move="H8", say="这是一句很长的话")
     assert calls[0][3] == "这是一句"
+    assert calls[0][4] is True
 
 
 async def test_empty_say_is_not_forwarded() -> None:
     calls: list[tuple] = []
 
-    async def submit(match_id, key, move, say=None):
-        calls.append((match_id, key, move, say))
+    async def submit(match_id, key, move, say=None, *, persist_say=False):
+        calls.append((match_id, key, move, say, persist_say))
         return "已落子 H8。本回合完成。", True
 
     tool = _play(_plugin(submit, max_say_len=0))
     await tool.execute(_Event(), move="H8", say="   ")
-    assert calls == [("m-action", "grant-key", "H8", None)]
+    assert calls == [("m-action", "grant-key", "H8", None, False)]
 
 
 # ----------------------------------------------------------------------

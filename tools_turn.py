@@ -298,8 +298,11 @@ class PlayTool(BaseTool):
         director = getattr(self._plugin, "_director", None)
         submit = getattr(director, "submit_play", None)
         if callable(submit):
+            # KiraAI has no host-chat panel on the match page, so the optional
+            # one-line remark is persisted with the move (atomic: only a legal
+            # move writes it) and shows up as the opponent bubble.
             if say:
-                result = await submit(match_id, grant_key, move, say)
+                result = await submit(match_id, grant_key, move, say, persist_say=True)
             else:
                 result = await submit(match_id, grant_key, move)
             text, ok, applied, label = _parse_result(result, move)
