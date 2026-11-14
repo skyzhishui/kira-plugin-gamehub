@@ -71,6 +71,7 @@ import {
   seatDriverOf,
   seatIdentity,
   seatIdentityLabel,
+  setHostAgentName,
 } from "../shared/mode.js";
 import { DIR_MODULES, cardCoverCandidates, loadGameModule, moduleUrls } from "../games/registry.js";
 
@@ -370,6 +371,28 @@ test("阵容：目录选项（服务端 label 优先）+ 内置四档回落", ()
   assert.deepEqual(fallback.map((x) => x.value), ["nori_agent", "nori_bot", "agent_bot", "bot_bot"]);
   assert.ok(fallback.every((x) => typeof x.label === "string" && x.label.length > 0));
   assert.ok(!/AI|artificial|bot/i.test(lineupHint("nori_agent")));
+});
+
+test("身份口径：阵容里的「诺里」= 宿主主 agent，「搭档」= game_agent 配置名", () => {
+  // 默认配置（宿主名未下发）：两者都渲染「诺里」，保持旧文案。
+  assert.deepEqual(
+    lineupsOf({ lineups: [{ value: "nori_agent", label: "诺里 + 当前agent" }] }, "蕾依").map((x) => x.label),
+    ["诺里 + 蕾依"]
+  );
+  assert.equal(lineupHint("nori_agent", "蕾依"), "诺里和蕾依与你同桌；地主叫分后确定");
+
+  // 宿主名下发后：阵容里的「诺里」换成宿主名，game_agent 仍是配置名。
+  setHostAgentName("汐祈（Seki）");
+  try {
+    assert.deepEqual(
+      lineupsOf({ lineups: [{ value: "nori_agent", label: "诺里 + 当前agent" }] }, "诺里").map((x) => x.label),
+      ["汐祈（Seki） + 诺里"]
+    );
+    assert.equal(lineupHint("nori_bot", "诺里"), "汐祈（Seki）和陪练与你同桌；地主叫分后确定");
+    assert.equal(lineupHint("agent_bot", "诺里"), "诺里和陪练与你同桌，汐祈（Seki）在聊天里支招");
+  } finally {
+    setHostAgentName("");
+  }
 });
 
 test("开局载荷：四阵容写入 seat_drivers/nori_seat/nori_role + options.hands", () => {

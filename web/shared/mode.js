@@ -178,16 +178,22 @@ export function normalizeLineup(v) {
 
 /** 目录 label → 用户可读文案：目录当前可能写「当前agent/陪练」，
  * 前端统一收敛为「搭档/陪练」，不把技术词带进大厅（更不出现 AI 字样）。
- * agentName 可得时把「搭档」换成公开名（动态，不写死人设）。 */
+ * 身份口径：阵容里的「诺里」是 turn 驱动的宿主主 agent → 渲染宿主名；
+ * 「搭档」是 game_agent → 渲染 agentName（配置名，默认 nori → 诺里）。 */
 export function friendlyLineupLabel(label, fallback, agentName) {
   const raw = String(label == null ? "" : label).trim() || String(fallback == null ? "" : fallback).trim();
   if (!raw) return "";
-  const name = String(agentName == null ? "" : agentName).trim();
+  const name = String(agentName == null ? "" : agentName).trim() || "搭档";
+  const host = getHostAgentName();
+  // 占位符先落成不冲突的记号，避免「宿主名恰好是诺里」时被第二次替换：
+  // 「诺里」= turn 驱动的宿主主 agent；「搭档/当前agent」= game_agent。
   return raw
-    .replace(/当前\s*agent/gi, "搭档")
+    .replace(/当前\s*agent/gi, "\u0000")
+    .replace(/搭档/g, "\u0000")
+    .replaceAll(PERSONA_DEFAULT, "\u0001")
     .replace(/\s*\+\s*/g, " + ")
-    .replace(/搭档/g, name || "搭档")
-    .replaceAll(PERSONA_DEFAULT, personaName)
+    .replaceAll("\u0000", name)
+    .replaceAll("\u0001", host)
     .trim();
 }
 
@@ -218,9 +224,15 @@ export function lineupPlanOf(lineup) {
 export function lineupHint(lineup, agentName) {
   const key = normalizeLineup(lineup) || "nori_agent";
   const raw = LINEUP_HINTS[key];
-  // 「搭档」是进阶对手的占位称呼：有公开名时换成名字，缺席保持中性称呼。
-  const name = String(agentName == null ? "" : agentName).trim();
-  return raw.replace(/搭档/g, name || "搭档").replaceAll(PERSONA_DEFAULT, personaName);
+  // 「搭档」是 game_agent 的占位称呼：有配置名时换成名字，缺席保持中性称呼。
+  const name = String(agentName == null ? "" : agentName).trim() || "搭档";
+  const host = getHostAgentName();
+  // 同 friendlyLineupLabel：先占位再替换，宿主名与 game_agent 名相同也不会串。
+  return raw
+    .replace(/搭档/g, "\u0000")
+    .replaceAll(PERSONA_DEFAULT, "\u0001")
+    .replaceAll("\u0000", name)
+    .replaceAll("\u0001", host);
 }
 
 /** 当前对局的阵容（mode_options 首选；旧后端按座位构成无法可靠推断，返回空串）。 */
@@ -573,9 +585,11 @@ export function seatKindLabel(seat, practice) {
 export function delegatedTurnStatus({ mine, delegated, myTurn, act } = {}) {
   if (!mine || !delegated) return null;
   const word = String(act || "") === "代打" ? "代打" : "代下";
+  // Delegation is done by the host agent (it drives the notice turn).
+  const who = getHostAgentName();
   return myTurn
-    ? { kind: "delegated", text: `${personaName}${word}中…` }
-    : { kind: "wait", text: `${word}已开启：轮到你时${personaName}接手` };
+    ? { kind: "delegated", text: `${who}${word}中…` }
+    : { kind: "wait", text: `${word}已开启：轮到你时${who}接手` };
 }
 
 /* ---------------- 载荷构造 ---------------- */
