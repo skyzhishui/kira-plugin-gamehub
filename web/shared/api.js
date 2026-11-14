@@ -17,10 +17,12 @@ export const WS_BASE = `/ws/plugin/${PLUGIN_ID}`;
 export const HOST_TOKEN_KEY = "jwt_token";
 
 export class ApiError extends Error {
-  constructor(message, status = 0) {
+  constructor(message, status = 0, code = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    /** 稳定错误码（服务端信封的 code），供 shared/i18n.js 本地化。 */
+    this.code = code || "";
   }
 }
 
@@ -71,7 +73,7 @@ export async function api(path, { method = "GET", body, token, timeoutMs = 12000
     }
     if (!resp.ok || !payload || payload.ok === false) {
       const msg = payload && payload.error ? payload.error : `请求失败（HTTP ${resp.status}）`;
-      throw new ApiError(msg, resp.status);
+      throw new ApiError(msg, resp.status, (payload && payload.code) || "");
     }
     return payload.data;
   } catch (err) {
@@ -225,7 +227,7 @@ export class MatchConnection {
       this.attempt = 0;
       if (this._status !== "live") this._setStatus("live");
     } else if (frame.type === "error") {
-      this.onError(new Error(frame.message || "服务器返回错误"));
+      this.onError(new ApiError(frame.message || "服务器返回错误", 0, frame.code || ""));
     }
     // 其余帧类型忽略（向前兼容）
   }

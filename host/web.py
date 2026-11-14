@@ -106,8 +106,12 @@ def envelope(data: Any = None, error: str = "") -> dict[str, Any]:
 
 
 def error_envelope(exc: ApiError) -> dict[str, Any]:
-    """Failure envelope for :class:`ApiError` (``main.py`` pairs it with status)."""
-    return {"ok": False, "data": None, "error": exc.message}
+    """Failure envelope for :class:`ApiError` (``main.py`` pairs it with status).
+
+    ``error`` keeps the Chinese message as the server-side fallback; ``code``
+    is the stable machine-readable key the WebUI localises (``web/shared/i18n.js``).
+    """
+    return {"ok": False, "data": None, "error": exc.message, "code": exc.code}
 
 
 def _fail(message: str, status: int = 400, code: str = "") -> ApiError:
@@ -121,7 +125,7 @@ def _raise_room_error(exc: BaseException) -> None:
         message = str(getattr(exc, "message", "") or exc)
         raise _fail(message, _STATUS_BY_CODE.get(code, 400), code=code) from exc
     if isinstance(exc, (KeyError, ValueError, TypeError)):
-        raise _fail(str(exc) or "请求不合法", 400) from exc
+        raise _fail(str(exc) or "请求不合法", 400, code="bad_request") from exc
     raise exc
 
 
@@ -289,7 +293,7 @@ class GamehubApi:
                     json.dumps(payload, ensure_ascii=False), encoding="utf-8"
                 )
             except OSError as exc:
-                raise _fail(f"身份保存失败：{exc}", 500) from exc
+                raise _fail(f"身份保存失败：{exc}", 500, code="internal") from exc
         return payload
 
     def _display_name(self) -> str:
@@ -968,24 +972,26 @@ async def serve_ws(
         return None
 
     if rooms is None:
-        await send({"type": "error", "message": "对局服务不可用"})
+        await send({"type": "error", "code": "not_ready", "message": "对局服务不可用"})
         return
 
     room = await rooms.get_or_load(match_id)
     if room is None:
-        await send({"type": "error", "message": "对局不存在"})
+        await send({"type": "error", "code": "not_found", "message": "对局不存在"})
         return
 
     seat = _seat_for_token(room.match, token) if token else None
     if token and seat is None:
-        await send({"type": "error", "message": "座位口令无效，已转为观战"})
+        await send(
+            {"type": "error", "code": "bad_token", "message": "座位口令无效，已转为观战"}
+        )
 
     ws_hub.subscribe(room.match.id, websocket)
     try:
         await send({"type": "match", "match": room.view(seat)})
         while True:
             if getattr(plugin, "stopping", False):
-                await send({"type": "error", "message": "插件正在停止"})
+                await send({"type": "error", "code": "not_ready", "message": "插件正在停止"})
                 break
             data = await receive()
             if data is None:

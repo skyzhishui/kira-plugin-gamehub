@@ -11,6 +11,7 @@
  */
 
 import { api, ApiError, MatchConnection, readSessionToken, writeSessionToken, PAGE_BASE } from "./shared/api.js";
+import { errorText } from "./shared/i18n.js";
 import { toast } from "./shared/toast.js";
 import { confettiBurst } from "./shared/confetti.js";
 import { loadGameModule } from "./games/registry.js";
@@ -703,7 +704,7 @@ async function onLevelChange(level) {
     if (merged) view = { ...view, mode_options: { ...(view.mode_options || {}), ...merged } };
     toast(`难度已改为${LEVEL_LABELS[level]}`, "ok");
   } catch (err) {
-    toast((err && err.message) || "难度切换失败，请重试", "error");
+    toast(errorText(err, "难度切换失败，请重试"), "error");
   } finally {
     busy = false;
     if (view) {
@@ -783,10 +784,10 @@ async function act(body) {
       toast("版本已更新，已同步最新棋局", "info");
       await resnapshot();
     } else if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-      toast(err.message || "没有权限执行这个操作", "error");
+      toast(errorText(err, "没有权限执行这个操作"), "error");
       await resnapshot();
     } else {
-      toast((err && err.message) || "操作失败，请重试", "error");
+      toast(errorText(err, "操作失败，请重试"), "error");
     }
     return false;
   } finally {
@@ -803,7 +804,7 @@ async function resnapshot() {
   try {
     await conn.pullSnapshot();
   } catch (err) {
-    toast((err && err.message) || "刷新棋局失败", "error");
+    toast(errorText(err, "刷新棋局失败"), "error");
   }
 }
 
@@ -875,7 +876,7 @@ async function newMatch() {
     writeSessionToken(m.id, data.token || "");
     location.href = `./match.html?id=${encodeURIComponent(m.id)}`;
   } catch (err) {
-    toast((err && err.message) || "开局失败，请稍后再试", "error");
+    toast(errorText(err, "开局失败，请稍后再试"), "error");
   } finally {
     busy = false;
     if (view) renderActions(view);
@@ -1164,7 +1165,7 @@ function bootstrap() {
     getToken,
     onMatch: applyView,
     onStatus: renderConn,
-    onError: (err) => toast((err && err.message) || "连接出现问题", "error"),
+    onError: (err) => toast(errorText(err, "连接出现问题"), "error"),
     onNotice: (msg) => toast(msg, "info"),
   });
   conn.start();
@@ -1174,7 +1175,7 @@ function bootstrap() {
 /* 全局兜底：任何漏网的异步异常都给 toast，不让页面静默坏掉 */
 window.addEventListener("unhandledrejection", (e) => {
   const reason = e && e.reason;
-  toast((reason && reason.message) || "出现了一个小问题，请重试", "error");
+  toast(errorText(reason, "出现了一个小问题，请重试"), "error");
 });
 
 $("rename-cancel").addEventListener("click", () => $("rename-dlg").close());

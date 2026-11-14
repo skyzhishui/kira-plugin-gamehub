@@ -343,7 +343,7 @@ class GamehubPlugin(BasePlugin):
 
             return JSONResponse(
                 status_code=500,
-                content={"ok": False, "data": None, "error": "插件内部错误"},
+                content={"ok": False, "data": None, "error": "插件内部错误", "code": "internal"},
             )
 
     @register.api(method="GET", path="/page-session")

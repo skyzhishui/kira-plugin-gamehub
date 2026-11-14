@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PLUGIN_ID, API_BASE, PAGE_BASE, WS_BASE, HOST_TOKEN_KEY, localToken, matchWsUrl } from "../shared/api.js";
+import { PLUGIN_ID, API_BASE, PAGE_BASE, WS_BASE, HOST_TOKEN_KEY, localToken, matchWsUrl, api, ApiError } from "../shared/api.js";
 
 const withGlobals = (globals, fn) => {
   const saved = {};
@@ -104,4 +104,73 @@ test("主题：深色选择器与宿主一致用 html.dark（两个样式表）"
   assert.ok(appCss.includes("html.dark"), "app.css 深色调色板挂在 html.dark 上");
   assert.ok(dzCss.includes("html.dark"), "牌桌样式同样跟随 html.dark");
   assert.ok(!/\[data-theme/.test(appCss + dzCss), "不得残留 data-theme 选择器");
+});
+
+/* ---------------- 错误码透传（shared/i18n.js 依赖） ---------------- */
+
+const withGlobalsAsync = async (globals, fn) => {
+  const saved = {};
+  for (const [k, v] of Object.entries(globals)) {
+    saved[k] = globalThis[k];
+    globalThis[k] = v;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) globalThis[k] = v;
+  }
+};
+
+const fakeResp = (status, payload) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  json: async () => payload,
+});
+
+const catchErr = async (fn) => {
+  try {
+    await fn();
+    return null;
+  } catch (err) {
+    return err;
+  }
+};
+
+test("api：HTTP 失败信封把 code 透传到 ApiError", async () => {
+  const err = await withGlobalsAsync(
+    {
+      localStorage: { getItem: () => null },
+      fetch: async () => fakeResp(403, { ok: false, data: null, error: "座位口令无效", code: "bad_token" }),
+    },
+    () => catchErr(() => api("/matches/m1"))
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 403);
+  assert.equal(err.code, "bad_token");
+  assert.equal(err.message, "座位口令无效");
+});
+
+test("api：2xx + ok:false 也透传 code；成功信封返回 data", async () => {
+  const err = await withGlobalsAsync(
+    {
+      localStorage: { getItem: () => null },
+      fetch: async () => fakeResp(200, { ok: false, data: null, error: "对局不存在", code: "not_found" }),
+    },
+    () => catchErr(() => api("/matches/none"))
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.code, "not_found");
+
+  const data = await withGlobalsAsync(
+    {
+      localStorage: { getItem: () => null },
+      fetch: async () => fakeResp(200, { ok: true, data: { a: 1 }, error: "" }),
+    },
+    () => api("/games")
+  );
+  assert.deepEqual(data, { a: 1 });
+
+  const bare = new ApiError("x", 409);
+  assert.equal(bare.code, "", "旧的两参构造仍兼容");
+  assert.equal(new ApiError("x").status, 0);
 });

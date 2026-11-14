@@ -159,6 +159,8 @@ class FakeRouter:
         self.active = 0
         self.max_active = 0
         self.release = asyncio.Event()
+        # Emulate a host with no default LLM client (empty model list).
+        self.no_default = False
 
     def _make_calls(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -194,6 +196,9 @@ class FakeRouter:
         stream: bool = True,
         model_list: Any = None,
     ):
+        if self.no_default and not any(str(m).strip() for m in (model_list or [])):
+            # Mirrors host.llm._clients_for when no default client exists.
+            raise RuntimeError("no default LLM client is configured")
         self.calls.append(
             {
                 "system_prompt": system_prompt,
@@ -798,13 +803,31 @@ async def test_runtime_defaults_when_new_config_fields_absent(tmp_path) -> None:
     assert _log_entries(tmp_path)[-1]["fallback"] == "no_tool_call"
 
 
-async def test_empty_models_only_bot(tmp_path) -> None:
-    router = FakeRouter([])
+async def test_empty_models_follow_the_host_default_llm(tmp_path) -> None:
+    """Empty ``ai_models`` = host default LLM (locked decision), not the bot."""
+    router = FakeRouter([{"type": "tool", "move": "J9"}])
     _, agent, _manager, room = await _setup(tmp_path, router, _cfg(ai_models=[]))
 
     await agent.run(room, 1)
 
-    assert router.calls == []
+    assert len(router.calls) == 1  # the model played on the first round
+    # An empty entry tells host.llm to resolve the host default client.
+    assert router.calls[0]["model_list"] == [""]
+    assert room.match.state["moves"] == 2  # the model move landed
+    entry = _log_entries(tmp_path)[-1]
+    assert entry["source"] == "agent"
+    assert entry["fallback"] == ""
+    assert entry["model"] == "default"
+
+
+async def test_empty_models_without_host_client_falls_back_to_bot(tmp_path) -> None:
+    """No configured models *and* no host default client → rule bot."""
+    router = FakeRouter([])
+    router.no_default = True  # emulate a host without a default LLM
+    _, agent, _manager, room = await _setup(tmp_path, router, _cfg(ai_models=[]))
+
+    await agent.run(room, 1)
+
     assert room.match.state["moves"] == 2
     entry = _log_entries(tmp_path)[-1]
     assert entry["source"] == "bot"

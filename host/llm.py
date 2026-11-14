@@ -197,6 +197,16 @@ async def _chat_one(client: Any, request: Any) -> AsyncGenerator[dict[str, Any],
     )
 
 
+NO_DEFAULT_MODEL_MESSAGE = "no default LLM client is configured"
+
+
+class NoDefaultModel(RuntimeError):
+    """The host has no default LLM client, so the rule bot must take over."""
+
+    def __init__(self) -> None:
+        super().__init__(NO_DEFAULT_MODEL_MESSAGE)
+
+
 def _clients_for(plugin: Any, model_list: list[str] | None) -> list[tuple[str, Any]]:
     """Resolve ordered ``(label, client)`` pairs; empty list = host default."""
     ctx = getattr(plugin, "ctx", None)
@@ -210,7 +220,7 @@ def _clients_for(plugin: Any, model_list: list[str] | None) -> list[tuple[str, A
     if not models:
         client = ctx.get_default_llm_client()
         if client is None:
-            raise RuntimeError("no default LLM client is configured")
+            raise NoDefaultModel()
         return [("default", client)]
     pairs: list[tuple[str, Any]] = []
     for model in models:

@@ -10,6 +10,7 @@
  */
 
 import { api, localToken, readSessionToken, writeSessionToken, PLUGIN_ID, API_BASE } from "./shared/api.js";
+import { errorText } from "./shared/i18n.js";
 import { toast } from "./shared/toast.js";
 import { fetchIdentity, saveIdentity } from "./shared/chat.js";
 import {
@@ -230,7 +231,7 @@ function renderError(err) {
   grid.textContent = "";
   const card = el("div", "game-card error-card");
   card.appendChild(el("p", "big", "棋室暂时打不开"));
-  card.appendChild(el("p", null, (err && err.message) || "加载游戏列表失败"));
+  card.appendChild(el("p", null, errorText(err, "加载游戏列表失败")));
   const retry = el("button", "btn primary", "重试");
   retry.type = "button";
   retry.addEventListener("click", () => {
@@ -439,7 +440,7 @@ async function onControl(btn, matchId) {
     });
     // 成功路径：页面即将跳转 match，无需恢复按钮
   } catch (err) {
-    toast((err && err.message) || "获取操作权限失败，请重试", "error");
+    toast(errorText(err, "获取操作权限失败，请重试"), "error");
     btn.disabled = false;
     btn.textContent = prev;
     refreshGamesQuietly();
@@ -874,7 +875,7 @@ async function createMatch({ kind, mode, difficulty, level, opponent = "ai", lin
     writeSessionToken(m.id, data.token || "");
     location.href = `./match.html?id=${encodeURIComponent(m.id)}`;
   } catch (err) {
-    toast((err && err.message) || "开局失败，请稍后再试", "error");
+    toast(errorText(err, "开局失败，请稍后再试"), "error");
     btn.disabled = false;
     btn.textContent = prev;
   }
@@ -897,8 +898,8 @@ function bindDiag() {
       try {
         await fn();
       } catch (err) {
-        dlog(`失败: ${(err && err.message) || err}`);
-        toast((err && err.message) || "诊断请求失败", "error");
+        dlog(`失败: ${errorText(err, String(err))}`);
+        toast(errorText(err, "诊断请求失败"), "error");
       } finally {
         b.disabled = false;
       }
@@ -995,7 +996,7 @@ async function uploadAvatar(file) {
     applyAvatar((res && res.agent_avatar) || "", { bust: true });
     toast("头像已更新", "ok");
   } catch (err) {
-    avatarErr((err && err.message) || "头像上传失败，请稍后再试");
+    avatarErr(errorText(err, "头像上传失败，请稍后再试"));
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1010,7 +1011,7 @@ async function resetAvatar() {
     applyAvatar((res && res.agent_avatar) || AGENT_AVATAR_URL, { bust: true });
     toast("已恢复默认头像", "ok");
   } catch (err) {
-    avatarErr((err && err.message) || "恢复默认头像失败，请稍后再试");
+    avatarErr(errorText(err, "恢复默认头像失败，请稍后再试"));
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1052,13 +1053,13 @@ async function init() {
     render(data || {});
   } catch (err) {
     renderError(err);
-    toast((err && err.message) || "加载游戏列表失败", "error");
+    toast(errorText(err, "加载游戏列表失败"), "error");
   }
 }
 
 window.addEventListener("unhandledrejection", (e) => {
   const reason = e && e.reason;
-  toast((reason && reason.message) || "出现了一个小问题，请重试", "error");
+  toast(errorText(reason, "出现了一个小问题，请重试"), "error");
 });
 
 if (!window.location.pathname.includes(`/page/plugin/${PLUGIN_ID}`)) {
@@ -1150,7 +1151,7 @@ async function saveIdentityForm() {
       /* 大厅刷新失败不影响保存结果 */
     }
   } catch (err) {
-    toast((err && err.message) || "保存失败，请稍后再试", "error");
+    toast(errorText(err, "保存失败，请稍后再试"), "error");
   } finally {
     btn.disabled = false;
     btn.textContent = prev;

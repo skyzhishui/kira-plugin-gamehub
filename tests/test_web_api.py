@@ -16,8 +16,17 @@ from typing import Any
 import pytest
 from engine.match import Match
 from host.settings import Settings
-from host.web import ApiError, GamehubApi, envelope, error_envelope, serve_ws, ws_hub
-from room import RoomManager
+from host.web import (
+    ApiError,
+    GamehubApi,
+    _fail,
+    _raise_room_error,
+    envelope,
+    error_envelope,
+    serve_ws,
+    ws_hub,
+)
+from room import RoomError, RoomManager
 
 
 class FakeRepo:
@@ -161,7 +170,27 @@ async def test_ping_and_page_session(tmp_path):
 def test_envelopes_are_symmetric():
     assert envelope({"a": 1}) == {"ok": True, "data": {"a": 1}, "error": ""}
     failure = error_envelope(ApiError(403, "bad token"))
-    assert failure == {"ok": False, "data": None, "error": "bad token"}
+    assert failure == {"ok": False, "data": None, "error": "bad token", "code": ""}
+
+
+def test_error_envelope_carries_code():
+    """The envelope exposes the stable code so the WebUI can localise it."""
+    failure = error_envelope(_fail("座位口令无效", 403, code="bad_token"))
+    assert failure["ok"] is False
+    assert failure["error"] == "座位口令无效", "error stays the Chinese message"
+    assert failure["code"] == "bad_token"
+
+    # Room/engine codes survive the mapping (with their status).
+    with pytest.raises(ApiError) as excinfo:
+        _raise_room_error(RoomError("stale_version", "版本已更新"))
+    assert excinfo.value.code == "stale_version"
+    assert excinfo.value.status == 409
+    assert error_envelope(excinfo.value)["code"] == "stale_version"
+
+    # Every _fail site carries a code; the unmapped-type fallback is bad_request.
+    with pytest.raises(ApiError) as excinfo:
+        _raise_room_error(ValueError("boom"))
+    assert excinfo.value.code == "bad_request"
 
 
 async def test_identity_read_and_update(tmp_path):
@@ -685,13 +714,13 @@ async def test_ws_spectator_invalid_token_and_missing_match(tmp_path):
     invalid = FakeWS()
     await invalid.queue.put(None)
     await asyncio.wait_for(serve_ws(plugin, invalid, match_id, "nope"), timeout=2.0)
-    assert invalid.sent[0] == {"type": "error", "message": "座位口令无效，已转为观战"}
+    assert invalid.sent[0] == {"type": "error", "code": "bad_token", "message": "座位口令无效，已转为观战"}
     assert invalid.sent[1]["type"] == "match"
     assert invalid.sent[1]["match"]["me"] is None
 
     missing = FakeWS()
     await asyncio.wait_for(serve_ws(plugin, missing, "missing", ""), timeout=2.0)
-    assert missing.sent == [{"type": "error", "message": "对局不存在"}]
+    assert missing.sent == [{"type": "error", "code": "not_found", "message": "对局不存在"}]
 
 
 async def test_ws_without_rooms_reports_error(tmp_path):
@@ -699,4 +728,4 @@ async def test_ws_without_rooms_reports_error(tmp_path):
     plugin.rooms = None
     ws = FakeWS()
     await asyncio.wait_for(serve_ws(plugin, ws, "any", ""), timeout=2.0)
-    assert ws.sent == [{"type": "error", "message": "对局服务不可用"}]
+    assert ws.sent == [{"type": "error", "code": "not_ready", "message": "对局服务不可用"}]

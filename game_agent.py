@@ -81,6 +81,18 @@ DEFAULT_HISTORY_ROUNDS = 10
 DEFAULT_AGENT_NAME = "nori"
 DEFAULT_AGENT_PERSONA = "调皮爱吐槽的猫娘，玩游戏时会认真+毒舌"
 
+# ``host.llm.NoDefaultModel`` when the host adapter is importable; the message
+# match keeps the same behaviour for a fake/adapter-less host in tests.
+_NO_DEFAULT_MODEL_EXC = getattr(host_llm, "NoDefaultModel", None) if host_llm else None
+_NO_DEFAULT_MODEL_TEXT = "no default LLM client"
+
+
+def _is_no_default_model(exc: BaseException) -> bool:
+    """True when the failure means "no host LLM is configured"."""
+    if _NO_DEFAULT_MODEL_EXC is not None and isinstance(exc, _NO_DEFAULT_MODEL_EXC):
+        return True
+    return _NO_DEFAULT_MODEL_TEXT in str(exc)
+
 
 def build_play_tool_def(module: Any = None) -> dict[str, object]:
     """通用 play 工具定义：只有必填 ``move``，不暴露任何台词参数。
@@ -414,8 +426,11 @@ class GameAgent:
             await self._fallback(room, seat, snap, "mode_bot", started)
             return
         if not models:
-            await self._fallback(room, seat, snap, "no_model", started)
-            return
+            # Locked decision: an empty model list follows the host default LLM.
+            # ``host.llm`` resolves ``ctx.get_default_llm_client()`` for an empty
+            # entry, and only when the host has no default client at all does the
+            # rule bot take over (``no_model``).
+            models = [""]
 
         acquired = False
         retries = 0
@@ -444,7 +459,11 @@ class GameAgent:
                         break
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        if _is_no_default_model(exc):
+                            # The host has no default LLM: the rule bot takes over.
+                            last_reason = "no_model"
+                            break
                         logger.warning(
                             "game_agent 模型 %s 决策异常（继续 failover）: %s",
                             model,
@@ -1103,7 +1122,8 @@ class GameAgent:
             "match_id": str(getattr(snap.match, "id", "")),
             "seat": snap.seat,
             "move_count": snap.move_count,
-            "model": str(model or ""),
+            # An empty model id means "host default LLM"; label it for the log.
+            "model": str(model or "default"),
             "plan_seq": snap.plan_seq,
             "move": str(move or ""),
             "source": str(source or ""),
