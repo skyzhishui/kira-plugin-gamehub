@@ -299,6 +299,53 @@ async def test_submit_within_grace_wins_and_watchdog_never_double_moves():
     await director.stop()
 
 
+async def test_watchdog_never_fills_a_turn_that_is_still_progressing():
+    """A slow but live host turn must not be overwritten by the rule bot.
+
+    The watchdog deadline is a *silence* window: every observed host step
+    (``note_progress`` from the ON_STEP_RESULT/ON_TOOL_RESULT hooks) pushes it
+    forward, so a turn that keeps producing steps outlives the window.
+    """
+    rooms, _plugin, _recorder, director = _harness_bound(
+        turn_play_timeout_s=0.6, turn_fallback_delay_s=0.05
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+
+    # Host is working: report a step every 0.2s for ~2s (well past the 0.6s
+    # silence window) while the turn stays unresolved.
+    for _ in range(10):
+        director.note_progress(grant.session_id)
+        await asyncio.sleep(0.2)
+
+    assert director.grant_of(room.match.id).state == "active", "live turn must stay open"
+    assert len(room.match.log) == 1, "no bot move while the host is progressing"
+
+    # Once the host goes quiet, the watchdog fills as before.
+    await _wait(lambda: director.grant_of(room.match.id).state == "filled", timeout=5.0)
+    assert room.match.log[-1].seat == 1
+    await director.stop()
+
+
+async def test_note_progress_ignores_sessions_without_a_grant():
+    """A step result for an unrelated session must not touch other grants."""
+    rooms, _plugin, _recorder, director = _harness_bound(
+        turn_play_timeout_s=0.6, turn_fallback_delay_s=0.05
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    deadline = grant.deadline
+
+    director.note_progress("private-unrelated")
+    assert grant.deadline == deadline
+    assert director.grant_of(room.match.id).state == "active"
+    await director.stop()
+
+
 async def test_watchdog_fills_delegated_human_seat_once():
     rooms, _plugin, _recorder, director = _harness_bound()
     room, _seat, _token = await _create(rooms, mode_options=dict(DELEGATED))

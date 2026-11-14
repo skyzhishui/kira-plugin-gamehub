@@ -285,6 +285,33 @@ class GamehubPlugin(BasePlugin):
 
         inject_into_request(self, event, request, tag_set)
 
+    @on.step_result(priority=Priority.LOW)
+    async def note_turn_progress(self, event, step_result=None, *args, **kwargs):
+        """Tell the turn director the host is still working on the notice turn.
+
+        Without this, a slow model or a multi-step turn can look "silent" to the
+        turn watchdog, which then overwrites the host's move with a rule-bot
+        move. The hook is a cheap no-op when no grant is live for the session.
+        """
+        director = self._director
+        note = getattr(director, "note_progress", None)
+        if not callable(note):
+            return
+        sid = str(getattr(event, "sid", "") or "")
+        if sid:
+            note(sid)
+
+    @on.tool_result(priority=Priority.LOW)
+    async def note_turn_tool_progress(self, event, *args, **kwargs):
+        """Same refresh for the tool stage (a running tool is progress)."""
+        director = self._director
+        note = getattr(director, "note_progress", None)
+        if not callable(note):
+            return
+        sid = str(getattr(event, "sid", "") or "")
+        if sid:
+            note(sid)
+
     # ------------------------------------------------------------------
     #  WebUI
     # ------------------------------------------------------------------

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -138,6 +139,8 @@ class TurnGrant:
     move_count: int = 0
     # Monotonic hard deadline (``turn_play_timeout_s``).
     deadline: float = 0.0
+    # Last observed host-side progress (step/tool results); 0 = never.
+    last_progress: float = 0.0
     reason: str = ""
     created: float = field(default_factory=time.monotonic)
     state: str = ST_ACTIVE
@@ -536,6 +539,24 @@ class TurnDirector:
         )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def note_progress(self, sid: str) -> None:
+        """Record host-side activity for a session holding a live grant.
+
+        Called from the plugin's ``@on.step_result`` / ``@on.tool_result`` hooks:
+        the host is demonstrably working on the notice turn, so the watchdog
+        must not treat the turn as stalled. Cheap, synchronous, never raises.
+        """
+        target = str(sid or "").strip()
+        if not target or self._stopping:
+            return
+        now = time.monotonic()
+        for grant in list(self._grants.values()):
+            if grant.state != ST_ACTIVE or str(grant.session_id or "") != target:
+                continue
+            timeout_s = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
+            grant.deadline = max(grant.deadline, now + max(0.5, timeout_s))
+            grant.last_progress = now
 
     async def _handle_event(self, room: Any, event: dict[str, Any]) -> None:
         match = event.get("match") or getattr(room, "match", None)
@@ -986,13 +1007,28 @@ class TurnDirector:
             )
 
     async def _watchdog(self, grant: TurnGrant, room: Any) -> None:
-        """Hard timeout + grace, then let the rule bot fill the seat once."""
+        """Wait for the turn to resolve; fill with the rule bot only if it stalls.
+
+        The deadline is a **silence timeout**, not a hard cap: a turn that is
+        visibly progressing (the host is still streaming, tools are running)
+        is not a stalled turn and must never be overwritten by a bot move.
+        """
         try:
             await self._wait_deadline(grant)
             if not self._is_current(grant):
                 return
             if self._stopping or getattr(self._plugin, "stopping", False):
                 return
+            if await self._turn_in_flight(grant):
+                # Progress observed: extend the silence window and keep waiting.
+                grant.deadline = time.monotonic() + float(
+                    _cfg(self._plugin, "turn_play_timeout_s", 90.0)
+                )
+                logger.info(
+                    "turn director: turn still in flight, extending (%s seat %s)",
+                    grant.match_id, grant.seat,
+                )
+                return await self._watchdog(grant, room)
             snap = await room.turn_snapshot(grant.seat)
             if not self._is_current(grant):
                 return
@@ -1032,8 +1068,49 @@ class TurnDirector:
             with contextlib.suppress(Exception):
                 self._finish(grant, ST_CANCELLED, "watchdog_error")
 
+    async def _turn_in_flight(self, grant: TurnGrant) -> bool:
+        """True while the host is visibly still working on this turn.
+
+        Signals, cheapest first:
+
+        - ``grant.last_progress``: a host step/tool result was observed within
+          the silence window (``note_progress`` from the plugin's hooks);
+        - the host pipeline still reports the notice turn as running
+          (``ctx.session_mgr.is_busy(sid)`` when the host exposes it).
+
+        A turn that is visibly progressing must never be overwritten by a bot
+        move; only real silence (no step, no tool, no busy flag) counts.
+        """
+        window = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
+        last = float(getattr(grant, "last_progress", 0.0) or 0.0)
+        if last and time.monotonic() - last < window:
+            return True
+        sid = str(getattr(grant, "session_id", "") or "")
+        if not sid:
+            return False
+        ctx = getattr(self._plugin, "ctx", None)
+        if ctx is None:
+            return False
+        manager = getattr(ctx, "session_mgr", None)
+        checker = getattr(manager, "is_busy", None)
+        if callable(checker):
+            try:
+                busy = checker(sid)
+                if inspect.isawaitable(busy):
+                    busy = await busy
+            except Exception:  # noqa: BLE001 - optional host capability
+                busy = False
+            if busy is True:
+                return True
+        return False
+
     async def _wait_deadline(self, grant: TurnGrant) -> None:
-        """Sleep until the hard deadline, then apply the configured grace."""
+        """Sleep until the turn resolves or the silence window elapses.
+
+        ``grant.deadline`` is a *silence* deadline: ``note_progress`` pushes it
+        forward whenever the host does real work on the turn, and the watchdog
+        loop re-arms itself instead of filling a live turn.
+        """
         while True:
             if self._stopping or getattr(self._plugin, "stopping", False):
                 return
