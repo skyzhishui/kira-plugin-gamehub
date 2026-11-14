@@ -1804,6 +1804,304 @@ a.go:hover::after { transform: translateX(2px); }
   box-shadow: 0 0 6px var(--glow-soft);
 }
 
+/* ---------------- 对局聊天窗口 ---------------- */
+
+/* chat-panel.js 的对局聊天窗口：与座位 say 气泡（match.chat）无关的第二块面板。
+ * 桌面：右栏走子记录下方（.side-chat → .chat-win），折叠只留标题行；
+ * 窄屏（<720px）：入口 .chat-dock 在动作行下，面板改贴底抽屉（max-height 65vh，
+ * 从不全屏），点「对局聊天」chip 开合。折叠状态由 sessionStorage 记忆。
+ * 配色/圆角/阴影全部复用既有变量，不新增色板。 */
+
+.side-chat { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; min-width: 0; }
+/* 折叠时右栏让位给走子记录：聊天窗只剩标题行 */
+.side-chat.folded { flex: 0 0 auto; }
+.side-col:has(.side-chat.folded) .log-panel { flex: 1 1 auto; }
+
+.chat-win {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 140px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card-bg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* 折叠：只剩标题行（高度自然收缩，不占右栏余量） */
+.chat-win.folded { flex: none; min-height: 0; }
+.chat-win.folded .chat-win-body { display: none; }
+
+.chat-win-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px 8px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.chat-win.folded .chat-win-head { border-bottom: none; }
+
+.chat-win-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: none;
+  animation: breathe 2s ease-in-out infinite;
+}
+.chat-win.is-off .chat-win-dot { background: var(--faint); animation: none; }
+
+.chat-win-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-win-unread {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--pink);
+  background: var(--pink-soft);
+  color: var(--pink-deep);
+  font: 700 10.5px/16px var(--font-mono);
+  text-align: center;
+}
+
+.chat-win-fold {
+  margin-left: auto;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.2s ease;
+}
+.chat-win-fold:hover { background: var(--sky-pale); color: var(--ink); }
+.chat-win-fold:focus-visible { outline: 2px solid var(--sky); outline-offset: 1px; }
+.chat-win-fold-ic { display: block; font-size: 12px; transition: transform 0.2s ease; }
+.chat-win.folded .chat-win-fold-ic { transform: rotate(-90deg); }
+
+.chat-win-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+.chat-win-list-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+
+.chat-win-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
+}
+
+.chat-win-empty {
+  margin: auto;
+  padding: 12px 8px;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+/* 消息：player 靠右（粉紫），agent 靠左（白卡浅蓝边） */
+.chat-win-msg { display: flex; min-width: 0; }
+.chat-win-msg.mine { justify-content: flex-end; }
+.chat-win-msg.theirs { justify-content: flex-start; }
+
+.chat-win-msg-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-width: 84%;
+}
+.chat-win-msg.mine .chat-win-msg-main { align-items: flex-end; }
+
+.chat-win-meta { display: flex; align-items: baseline; gap: 6px; padding: 0 2px; min-width: 0; }
+.chat-win-msg.mine .chat-win-meta { flex-direction: row-reverse; }
+
+.chat-win-who {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-win-time { font-size: 10px; color: var(--faint); font-family: var(--font-mono); flex: none; }
+
+.chat-win-bubble {
+  padding: 6px 10px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  min-width: 0;
+}
+/* 入场只给「新到」的那条：回填整屏不集体淡入 */
+.chat-win-msg.is-new .chat-win-bubble { animation: chat-line-in 0.22s ease-out both; }
+
+.chat-win-msg.theirs .chat-win-bubble {
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-top-left-radius: 4px;
+  box-shadow: 0 2px 7px rgba(116, 160, 200, 0.14);
+}
+.chat-win-msg.mine .chat-win-bubble {
+  background: var(--pink-soft);
+  border: 1px solid var(--pink);
+  border-top-right-radius: 4px;
+}
+
+@keyframes chat-line-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+/* 「回到最新」浮标：用户向上滚动后出现，点一下贴底并清零未读 */
+.chat-win-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 11px;
+  border: 1px solid var(--line-hover);
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--sky-dark);
+  font: 600 11px/1.2 var(--font-body);
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--btn-shadow), 0 2px 10px var(--glow-soft);
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.chat-win-jump:hover { border-color: var(--sky); transform: translateX(-50%) translateY(-1px); box-shadow: var(--shadow-hover); }
+.chat-win-jump:focus-visible { outline: 2px solid var(--sky); outline-offset: 1px; }
+.chat-win-jump-ic { font-size: 11px; }
+
+.chat-win-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-top: 1px solid var(--line);
+  flex: none;
+}
+
+.chat-win-field { position: relative; flex: 1; min-width: 0; }
+
+.chat-win-text {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--sky-pale);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  box-shadow: var(--inset);
+  transition: border-color 0.15s ease;
+}
+.chat-win-text::placeholder { color: var(--faint); }
+.chat-win-text:focus { border-color: var(--sky); outline: none; }
+.chat-win-text:disabled { opacity: 0.6; cursor: not-allowed; }
+/* 计数出现时给输入框右侧留位，文字不钻到计数下面 */
+.chat-win-field:has(.chat-win-count:not(.hidden)) .chat-win-text { padding-right: 58px; }
+
+/* 实时计数（>400 才出现）：贴在输入框右侧内沿，不改变行高 */
+.chat-win-count {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font: 10.5px/1 var(--font-mono);
+  color: var(--faint);
+  pointer-events: none;
+  background: var(--sky-pale);
+  padding: 2px 0 2px 6px;
+}
+.chat-win-count.is-full { color: var(--bad); }
+
+.chat-win-send { min-height: 36px; padding: 6px 14px; flex: none; }
+
+/* 禁用/错误提示条（对局聊天未开放 / 发送失败） */
+.chat-win-hint {
+  flex: none;
+  padding: 7px 12px 9px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.chat-win-hint.is-error { color: var(--bad); }
+
+/* 窄屏入口：桌面隐藏；<720px 显示在动作行下方 */
+.chat-dock { display: none; justify-content: center; }
+.chat-win-chip { gap: 6px; }
+
+@media (max-width: 880px) {
+  /* 侧栏竖排：日志在上，聊天窗在下（与桌面同序） */
+  .side-chat { flex: none; }
+  .chat-win { flex: none; height: 330px; }
+  .chat-win.folded { height: auto; }
+}
+
+@media (max-width: 719px) {
+  /* 窄屏：右栏聊天窗改为动作行下的抽屉；入口 chip 常驻 */
+  .chat-dock { display: flex; justify-content: center; }
+  /* 抽屉宿主容器脱离右栏流（隐藏 .side-col 会连带藏掉面板本身） */
+  #side-chat { display: block; flex: none; }
+  /* 抽屉关闭时：面板本身与右栏宿主都不占位（不隐藏 .side-col，走子记录要留着） */
+  .chat-win.folded { display: none; }
+  #side-chat.folded { display: none; }
+  .chat-win {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    z-index: 40;
+    height: auto;
+    max-height: 65vh;
+    min-height: 0;
+    box-shadow: var(--shadow-hover);
+    animation: chat-drawer-in 0.28s cubic-bezier(0.16, 0.7, 0.3, 1) both;
+  }
+  .chat-win-list { max-height: calc(65vh - 130px); }
+  .chat-win-input { position: sticky; bottom: 0; background: var(--card-bg); }
+}
+
+@keyframes chat-drawer-in {
+  from { opacity: 0; transform: translateY(24px); }
+}
+
 /* ---------------- 聊天富媒体（segments：表情包图片 / TTS 语音） ---------------- */
 
 /* 图片：尺寸自适应 + 纵横比 contain，气泡/聊天窗都不挤爆布局 */

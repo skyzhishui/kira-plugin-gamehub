@@ -29,6 +29,7 @@ from engine import (
     status_of,
 )
 from host.store import (
+    CHAT_KEEP_LINES,
     GamehubMatch,
     MatchStore,
     match_to_row,
@@ -367,3 +368,29 @@ def test_match_to_row_accepts_room_status_string():
     row = match_to_row(over.match, "over")
     assert row["status"] == "over"
     assert json.loads(row["winner_seats"]) == [0]
+
+async def test_chat_lines_append_recent_and_prune(tmp_path):
+    """Chat-window read model: ascending order, bounded retention."""
+    store = MatchStore(tmp_path)
+    await store.init()
+    try:
+        first = await store.chat_append("player", "小白", "你好")
+        second = await store.chat_append("agent", "汐祈（Seki）", "要来一局吗？")
+        assert first["role"] == "player" and second["role"] == "agent"
+        assert int(second["ts"]) >= int(first["ts"]) > 0
+
+        lines = await store.chat_recent(10)
+        assert [line["text"] for line in lines] == ["你好", "要来一局吗？"]
+
+        limited = await store.chat_recent(1)
+        assert [line["text"] for line in limited] == ["要来一局吗？"]
+
+        # Retention: writing past the cap prunes the oldest lines.
+        for i in range(CHAT_KEEP_LINES + 5):
+            await store.chat_append("player", "小白", f"m{i}")
+        kept = await store.chat_recent(200)
+        assert len(kept) <= CHAT_KEEP_LINES
+        assert kept[-1]["text"] == f"m{CHAT_KEEP_LINES + 4}"
+        assert kept[0]["text"] != "你好"
+    finally:
+        await store.close()

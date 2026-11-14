@@ -38,6 +38,9 @@ except ImportError:  # standalone tests import ``host.store`` as top-level
 
 DB_FILENAME = "gamehub.sqlite3"
 
+# The chat window keeps a bounded read model; older lines are pruned on write.
+CHAT_KEEP_LINES = 500
+
 # Match states: running / finished / archived (archived never loads as active)
 STATUS_ACTIVE = "active"
 STATUS_OVER = "over"
@@ -126,6 +129,34 @@ class GamehubMatch(Base):
     __table_args__ = (
         # Main filter/sort path for load_active / archive_stale / cleanup
         Index("idx_gamehub_status_updated", "status", "updated_at"),
+    )
+
+
+class GamehubChatLine(Base):
+    """One line of the match-page chat window (player <-> host agent).
+
+    The window is session-level: lines from every match of the plugin-owned
+    ``gamehub`` session share this table, newest last. Kept plugin-private on
+    purpose — the core's ``messages`` archive belongs to the host, and the
+    page needs a cheap, trimmed, read-model it can backfill from.
+    """
+
+    __tablename__ = "gamehub_chat_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="player | agent"
+    )
+    sender: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", comment="Display name"
+    )
+    text: Mapped[str] = mapped_column(Text, nullable=False, comment="Message text")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, comment="Created (UTC)"
+    )
+
+    __table_args__ = (
+        Index("idx_gamehub_chat_created", "created_at"),
     )
 
 
@@ -474,3 +505,69 @@ class MatchStore:
         self._session_maker = None
         if engine is not None:
             await engine.dispose()
+
+    # ------------------------------------------------------------------
+    #  Match-page chat window (gamehub_chat_lines)
+    # ------------------------------------------------------------------
+
+    async def chat_append(
+        self, role: str, sender: str, text: str, *, ts_ms: int | None = None
+    ) -> dict[str, Any]:
+        """Append one chat line; returns the public line dict."""
+        line = GamehubChatLine(
+            role=str(role or "player")[:16],
+            sender=str(sender or "")[:64],
+            text=str(text or ""),
+            created_at=(
+                epoch_to_datetime(ts_ms)
+                if ts_ms
+                else datetime.now(timezone.utc)
+            ),
+        )
+        async with self.session() as session:
+            session.add(line)
+            await session.commit()
+            row_id = int(line.id)
+            created = line.created_at
+        # Hygiene: the chat window is a read model, not an archive — keep the
+        # most recent lines only (cheap PK-range delete, runs per append).
+        try:
+            async with self.session() as session:
+                result = await session.execute(
+                    delete(GamehubChatLine).where(
+                        GamehubChatLine.id < row_id - CHAT_KEEP_LINES
+                    )
+                )
+                await session.commit()
+                _ = result.rowcount
+        except Exception:  # noqa: BLE001 - pruning must never break a send
+            logger.debug("gamehub: chat prune failed", exc_info=True)
+        return {
+            "id": str(row_id),
+            "ts": datetime_to_epoch(created),
+            "role": line.role,
+            "sender": line.sender,
+            "text": line.text,
+        }
+
+    async def chat_recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Most recent chat lines, oldest first (page render order)."""
+        limit = max(1, min(int(limit), 200))
+        stmt = (
+            select(GamehubChatLine)
+            .order_by(GamehubChatLine.id.desc())
+            .limit(limit)
+        )
+        async with self.session() as session:
+            rows = list((await session.execute(stmt)).scalars().all())
+        rows.reverse()
+        return [
+            {
+                "id": str(row.id),
+                "ts": datetime_to_epoch(row.created_at),
+                "role": row.role,
+                "sender": row.sender,
+                "text": row.text,
+            }
+            for row in rows
+        ]

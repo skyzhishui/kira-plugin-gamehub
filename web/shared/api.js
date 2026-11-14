@@ -103,13 +103,15 @@ export function matchWsUrl(matchId, seatToken) {
  * close 4001 = 座位口令无效（降级观战），4003 = 宿主鉴权失败/插件停用。
  */
 export class MatchConnection {
-  constructor({ matchId, getToken, onMatch, onStatus, onError, onNotice } = {}) {
+  constructor({ matchId, getToken, onMatch, onStatus, onError, onNotice, onAgentMessage } = {}) {
     this.matchId = String((matchId || "")).trim();
     this.getToken = typeof getToken === "function" ? getToken : () => "";
     this.onMatch = onMatch || (() => {});
     this.onStatus = onStatus || (() => {});
     this.onError = onError || (() => {});
     this.onNotice = onNotice || (() => {});
+    /** 对局聊天窗口的 agent 回复帧（{type:"agent_message", sid, text}）。 */
+    this.onAgentMessage = onAgentMessage || (() => {});
     this.ws = null;
     this.attempt = 0;
     this.stopped = false;
@@ -228,6 +230,9 @@ export class MatchConnection {
       if (this._status !== "live") this._setStatus("live");
     } else if (frame.type === "error") {
       this.onError(new ApiError(frame.message || "服务器返回错误", 0, frame.code || ""));
+    } else if (frame.type === "agent_message") {
+      // 对局聊天窗口的 agent 回复：与座位气泡（match.chat）互不影响
+      this.onAgentMessage(frame);
     }
     // 其余帧类型忽略（向前兼容）
   }

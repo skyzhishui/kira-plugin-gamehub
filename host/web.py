@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,10 @@ except ImportError:  # standalone tests: keep the same literal constants
 
 # Single-admin WebUI: the page actor is fixed.
 PAGE_ACTOR = PAGE_USER_ID
+
+# Match-page chat window limits (kept in sync with the WebUI front end).
+CHAT_MAX_CHARS = 500
+CHAT_MIN_INTERVAL_S = 1.0
 
 IDENTITY_FILE = "identity.json"
 DEFAULT_DISPLAY_NAME = "Human"
@@ -167,6 +172,9 @@ class GamehubApi:
         self._plugin = plugin
         # Fallback when the plugin has no data dir yet (tests / early boot).
         self._identity_cache: str | None = None
+        # Chat-window state: lazy store (when no runtime yet) + send pacing.
+        self._own_store: Any = None
+        self._chat_last_send: float = -1e9
 
     # ------------------------------------------------------------------
     #  Shared helpers
@@ -517,6 +525,71 @@ class GamehubApi:
                 "dispatched": True,
             }
         )
+
+    # ------------------------------------------------------------------
+    #  Match-page chat window
+    # ------------------------------------------------------------------
+
+    def _chat_enabled(self) -> bool:
+        settings = getattr(self._plugin, "settings", None)
+        return bool(getattr(settings, "page_chat_enabled", True))
+
+    async def _chat_store(self) -> Any:
+        """The live runtime store, or a lazy private one (tests / early boot)."""
+        runtime = getattr(self._plugin, "_runtime", None)
+        store = getattr(runtime, "store", None)
+        if store is None:
+            if self._own_store is None:
+                from .store import MatchStore
+
+                self._own_store = MatchStore(self._plugin.data_dir)
+            store = self._own_store
+        if getattr(store, "engine", None) is None:
+            await store.init()
+        return store
+
+    async def chat_history(self, limit: int = 100) -> dict[str, Any]:
+        """Recent chat-window lines (oldest first) + the enabled flag."""
+        store = await self._chat_store()
+        return envelope(
+            {
+                "enabled": self._chat_enabled(),
+                "messages": await store.chat_recent(limit),
+            }
+        )
+
+    async def chat_send(self, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Publish one player line into the game session and record it.
+
+        The line rides the same notice channel as the turn notices, so the
+        host model answers it in persona with the live board context injected;
+        its reply reaches the page through the existing outbound bridge
+        (``agent_message`` WS frame) and is recorded by the runtime.
+        """
+        if not self._chat_enabled():
+            raise _fail("对局聊天未开放", 403, code="chat_disabled")
+        text = str((body or {}).get("text") or "").strip()
+        if not text:
+            raise _fail("说点什么再发送吧", 400, code="text_empty")
+        if len(text) > CHAT_MAX_CHARS:
+            raise _fail(f"一条消息最多 {CHAT_MAX_CHARS} 字", 400, code="text_too_long")
+        now = time.monotonic()
+        if now - self._chat_last_send < CHAT_MIN_INTERVAL_S:
+            raise _fail("发得太快了，稍等一下再发", 429, code="rate_limited")
+
+        sender = self._display_name()
+        delivered = await send_notice(
+            self._plugin,
+            GAME_SID,
+            f"[玩家发言] {sender}：{text}",
+        )
+        if not delivered:
+            raise _fail("消息未能送达对局会话", 503, code="not_ready")
+        self._chat_last_send = now
+
+        store = await self._chat_store()
+        message = await store.chat_append("player", sender, text)
+        return envelope({"message": message, "enabled": True})
 
     async def set_avatar(self, body: Any = None) -> dict[str, Any]:
         """Replace (or reset) the ``game_agent`` avatar from the WebUI.

@@ -176,6 +176,16 @@ class GamehubRuntime:
         text = self._chain_text(chain)
         if not text:
             return
+        # Record the reply for the match-page chat window read model (the
+        # player line is recorded by the POST /chat endpoint; this is the
+        # agent side). Cosmetic on failure: the WS broadcast still goes out.
+        if self.store is not None:
+            try:
+                await self.store.chat_append(
+                    "agent", self.plugin.host_agent_name or "AI", text
+                )
+            except Exception:  # noqa: BLE001 - history must not break delivery
+                logger.debug("gamehub: chat record failed", exc_info=True)
         for room in self.rooms.active_rooms() if self.rooms is not None else []:
             await ws_hub.broadcast(room.match.id, {
                 "type": "agent_message",

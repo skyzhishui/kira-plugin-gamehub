@@ -487,6 +487,16 @@ class GamehubPlugin(BasePlugin):
             raise HTTPException(status_code=404, detail="宿主没有自拍参考图")
         return FileResponse(str(path))
 
+    @register.api(method="GET", path="/chat")
+    async def api_chat_history(self, limit: int = 100):
+        """Match-page chat window: recent lines + enabled flag."""
+        return await self._call(self.api.chat_history(limit))
+
+    @register.api(method="POST", path="/chat")
+    async def api_chat_send(self, body: dict[str, Any] | None = None):
+        """Match-page chat window: publish one player line to the game session."""
+        return await self._call(self.api.chat_send(body))
+
     @register.ws(path="/matches/{match_id}/ws")
     async def match_ws(self, websocket):
         """Live match channel (seat token in ``?t=``, host JWT in ``?token=``)."""

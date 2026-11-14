@@ -15,6 +15,7 @@ import { errorText } from "./shared/i18n.js";
 import { toast } from "./shared/toast.js";
 import { confettiBurst } from "./shared/confetti.js";
 import { loadGameModule } from "./games/registry.js";
+import { createChatPanel } from "./chat-panel.js";
 import {
   fetchUiConfig,
   isChatReadOnly,
@@ -88,6 +89,7 @@ let gameCtl = null; // 游戏模块控制器
 let moduleReady = null;
 let resignArmed = false;
 let resignTimer = 0;
+let chatWin = null; // 对局聊天窗口（chat-panel.js；座位气泡仍由下方 chat 对象负责）
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -1141,12 +1143,30 @@ async function initUiConfig() {
   chat.readOnly = isChatReadOnly(cfg);
   chat.statusError = noticeTargetFromConfig(cfg).error;
   applyChatNotice();
+  // 对局聊天窗口：聊天开关（chat_enabled）与宿主主 agent 名（agent 行 sender）
+  if (chatWin) chatWin.applyUiConfig(cfg);
   // 人设名可能晚于首帧到达：重绘一次座位/状态文案
   if (view) {
     renderSeats(view);
     renderMateZone(view);
     renderStatus(view);
   }
+}
+
+/* ---------------- 对局聊天窗口（chat-panel.js 接线） ----------------
+ * 独立的第二块聊天面板：GET /chat 回填 + POST /chat 发送 + WS agent_message。
+ * 桌面挂在右栏走子记录下方；窄屏入口挂在动作行下方（CSS 切抽屉）。
+ * match.js 只做接线：构造 / 初始化 / 喂 ui-config 与 agent_message 帧。 */
+
+function initChatPanel() {
+  chatWin = createChatPanel({
+    panelHost: $("side-chat"),
+    chipHost: $("chat-dock"),
+    getAgentName: () => getHostAgentName(),
+    onError: (err, text) => toast(text || errorText(err, "发送失败，请重试"), "error"),
+  });
+  chatWin.mount();
+  chatWin.load().catch((err) => console.warn("聊天记录加载失败", err));
 }
 
 /* ---------------- 缺参 / 启动 ---------------- */
@@ -1172,6 +1192,10 @@ function renderMissing(msg) {
 /* 离页清理：销毁气泡排队器（清计时器与排队条目，避免离页后定时器继续跑） */
 function disposeChat() {
   hideAllSeatBubbles();
+  if (chatWin) {
+    chatWin.destroy();
+    chatWin = null;
+  }
 }
 window.addEventListener("pagehide", disposeChat);
 
@@ -1180,6 +1204,7 @@ function bootstrap() {
     renderMissing();
     return;
   }
+  initChatPanel();
   conn = new MatchConnection({
     matchId,
     getToken,
@@ -1187,6 +1212,10 @@ function bootstrap() {
     onStatus: renderConn,
     onError: (err) => toast(errorText(err, "连接出现问题"), "error"),
     onNotice: (msg) => toast(msg, "info"),
+    // 对局聊天的 agent 回复帧：交给聊天窗口追加（座位气泡不受影响）
+    onAgentMessage: (frame) => {
+      if (chatWin) chatWin.onAgentMessage(frame);
+    },
   });
   conn.start();
   initUiConfig().catch((err) => console.warn("ui-config 初始化失败", err));

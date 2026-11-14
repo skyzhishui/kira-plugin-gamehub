@@ -76,6 +76,14 @@ _BLOCK_INSTRUCTION = (
 _SNAPSHOT_UNAVAILABLE = (
     "未提供完整局面，请调用 game_state 查看；不要凭最近几手推测本局盘面。"
 )
+# Later-turn rules pointer: the full text is in the session history (first
+# action notice of this match) and behind game_state; never resend it every
+# turn — every notice is persisted verbatim, so a per-turn copy would pile up
+# in the rolling context window.
+_RULES_POINTER = (
+    "规则：未变化，完整规则见本局首条行动通知；"
+    "记不清时调用 game_state 查看，不要凭印象违反规则。"
+)
 
 
 def build_game_state_context(plugin: Any, session_id: str) -> str:
@@ -134,14 +142,20 @@ def build_action_notice_context(
     *,
     threat_analysis: bool | None = None,
     recent: int = 6,
+    include_rules: bool = True,
 ) -> str:
     """Generic context block for a turn notice (S2/S4; reused by director).
 
     Read-only, synchronous, memory-only; no locks, no await, no writes. Fixed
     output order:
 
-    1. **Full** ``module.rules`` (never truncated);
-    2. optional ``module.move_help`` (one-line action format);
+    1. **Full** ``module.rules`` (never truncated) — **only when
+       ``include_rules``**. Rules are static, and every notice is persisted
+       verbatim into the session history, so the director sends them with the
+       first action notice of a match only; later turns get a one-line pointer
+       instead (the full text is still in history and in ``game_state``);
+    2. optional ``module.move_help`` (one-line action format — every turn,
+       the action format is what keeps ``play_<match>`` calls well-formed);
     3. **Full** ``module.chat_context(state, seat, names)`` (same read-only
        snapshot: board / coordinate constraints / immediate threats; explicit
        "no full board" when absent);
@@ -172,9 +186,12 @@ def build_action_notice_context(
     if getattr(match, "kind", "") in ("gomoku", "reversi"):
         threat_analysis = analysis_enabled(match, seat)
     sections: list[str] = []
-    rules = str(getattr(module, "rules", "") or "").strip() if module else ""
-    if rules:
-        sections.append("规则（完整）：\n" + rules)
+    if include_rules:
+        rules = str(getattr(module, "rules", "") or "").strip() if module else ""
+        if rules:
+            sections.append("规则（完整）：\n" + rules)
+    else:
+        sections.append(_RULES_POINTER)
     move_help = (
         str(getattr(module, "move_help", "") or "").strip() if module else ""
     )

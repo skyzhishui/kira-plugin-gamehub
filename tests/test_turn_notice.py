@@ -75,3 +75,54 @@ def test_gomoku_notice_keeps_its_coordinate_contract():
     # The coordinate format comes from the game's own move_help / rules.
     assert "H8" in text
     assert "bid" not in text
+
+
+def test_gomoku_subsequent_turn_notice_swaps_rules_for_a_pointer():
+    """方案1：规则只随首条行动通知下发，后续回合换一行指针。
+
+    规则是静态文本而每条通知都会逐字进会话历史——每轮重复会堆满滚动
+    上下文窗口；盘面/动作格式/威胁分析仍是每轮的当前事实，必须保留。
+    """
+    module = games.get("gomoku")
+    state = module.create(SimpleNamespace(seed=1, options={}))
+    match = Match(
+        id="m3", kind="gomoku", created_at=0, updated_at=0, version=1,
+        state=state,
+        seats=[
+            SeatInfo(kind="human", name="Human", token=""),
+            SeatInfo(kind="ai", name="汐祈（Seki）", token=""),
+        ],
+    )
+    first = build_turn_notice(
+        match, seat=1, kind="nori_turn", move_count=1, tool_name="play_m3",
+        plugin=_plugin(),
+    )
+    later = build_turn_notice(
+        match, seat=1, kind="nori_turn", move_count=2, tool_name="play_m3",
+        plugin=_plugin(), include_rules=False,
+    )
+    assert "规则（完整）" in first
+    assert "规则（完整）" not in later
+    assert "完整规则见本局首条行动通知" in later
+    # Per-turn facts survive the slimming.
+    assert "动作格式" in later and "H8" in later
+    assert "完整局面" in later
+    # The mandatory-tool guidance is untouched by the slimming.
+    assert "play_m3" in later and "一次回复只调用一次" in later
+
+
+def test_doudizhu_subsequent_turn_notice_keeps_action_formats():
+    later = build_turn_notice(
+        _doudizhu_match(),
+        seat=1,
+        kind="nori_turn",
+        move_count=1,
+        tool_name="play_m1",
+        plugin=_plugin(),
+        include_rules=False,
+    )
+    assert "规则（完整）" not in later
+    assert "完整规则见本局首条行动通知" in later
+    # The bid/play formats stay literal on every turn: a missing format is
+    # what makes the model answer with plain text and stall the turn.
+    assert "bid 1" in later and "pass" in later and "牌面字符串" in later

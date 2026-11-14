@@ -286,6 +286,7 @@ def build_turn_notice(
     tool_name: str = "play",
     plugin: Any = None,
     threat_analysis: bool | None = None,
+    include_rules: bool | None = None,
 ) -> str:
     """Action-turn notice: rules + full board + recent moves, never the plan.
 
@@ -296,11 +297,17 @@ def build_turn_notice(
     - a same-seat continuation (reversi auto-pass) says "you just played X;
       the opponent has no legal move" instead of blaming the opponent.
 
+    ``include_rules``: ``None`` (default) keeps the full rules block for
+    direct callers/tests; the director passes ``False`` after the match's
+    first action notice was delivered (rules are static and notices are
+    persisted verbatim — see ``TurnDirector._run_turn``).
+
     The guidance asks for **one** ``play_<match>`` call in this reply and
     explicitly allows talking in the same reply (KiraAI has no separate
     envelope lane), so the model never invents an extra "say" tool call.
     """
     agent = _agent_name(plugin)
+    send_rules = True if include_rules is None else bool(include_rules)
 
     if getattr(match, "kind", "") == "doudizhu":
         seats = list(getattr(match, "seats", ()) or ())
@@ -326,7 +333,8 @@ def build_turn_notice(
             "但禁止透露自己的未出手牌或私有策略。"
             "不得代替其他席位行动，不得沿用其他局的名字。注意你是玩家，不是解说。]\n\n"
             + action_context.build_action_notice_context(
-                plugin, match, seat, threat_analysis=False
+                plugin, match, seat, threat_analysis=False,
+                include_rules=send_rules,
             )
         )
 
@@ -403,7 +411,8 @@ def build_turn_notice(
         )
 
     body = action_context.build_action_notice_context(
-        plugin, match, seat, threat_analysis=threat_analysis
+        plugin, match, seat, threat_analysis=threat_analysis,
+        include_rules=send_rules,
     )
     lines = [head, ""]
     if body:
@@ -491,6 +500,9 @@ class TurnDirector:
         # concurrent duplicates, and a failed send can be retried.
         self._stage_seen: dict[tuple[str, str], None] = {}
         self._stage_inflight: set[tuple[str, str]] = set()
+        # Match ids whose first action notice (with the full rules block) was
+        # delivered. Ordered set; bounded so a long-lived process cannot leak.
+        self._rules_sent: dict[str, None] = {}
 
     # ------------------------------------------------------------------
     #  Queries
@@ -791,6 +803,11 @@ class TurnDirector:
     async def _run_turn(self, grant: TurnGrant, room: Any) -> None:
         """Build and publish the mandatory action notice (no gate, no cooldown)."""
         match = getattr(room, "match", None)
+        # Rules ride the FIRST delivered action notice of a match only: every
+        # notice is persisted verbatim into the session history, so per-turn
+        # copies would pile up in the rolling context window. A failed send
+        # leaves the match unsent, and the next turn carries the rules again.
+        include_rules = grant.match_id not in self._rules_sent
         try:
             text = build_turn_notice(
                 match,
@@ -799,6 +816,7 @@ class TurnDirector:
                 move_count=grant.move_count,
                 tool_name=play_tool_name(grant.match_id),
                 plugin=self._plugin,
+                include_rules=include_rules,
             )
         except Exception:  # noqa: BLE001 - no text → the watchdog still fills
             logger.warning(
@@ -822,6 +840,11 @@ class TurnDirector:
                 "turn director: action notice delivery failed (%s → %s)",
                 grant.match_id, grant.session_id,
             )
+            return
+        if include_rules:
+            self._rules_sent[grant.match_id] = None
+            if len(self._rules_sent) > 128:  # hygiene: drop the oldest entry
+                self._rules_sent.pop(next(iter(self._rules_sent)), None)
 
     # ------------------------------------------------------------------
     #  play submission (the only backend of the request-scoped play tool)

@@ -246,6 +246,18 @@
           }
         }
       },
+      "page_chat_enabled": {
+        "type": "boolean",
+        "name": "WebUI Match Chat",
+        "default": true,
+        "hint": "Show the chat window on the match page so the player can talk to the host agent during a game (notices still work when off).",
+        "locales": {
+          "zh": {
+            "name": "对局页聊天窗口",
+            "hint": "对局页显示聊天窗口，玩家可以在对局中和宿主 AI 说话；关闭后仅隐藏输入（通知不受影响）。"
+          }
+        }
+      },
       "page_chat_talk_default": {
         "type": "string",
         "name": "WebUI Page Tier",

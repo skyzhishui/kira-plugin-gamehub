@@ -983,3 +983,69 @@ async def test_no_agent_name_falls_back_to_nori():
         )
         == "nori"
     )
+
+
+async def test_full_rules_ride_the_first_notice_only():
+    """方案1：完整规则只随本局首条已送达的行动通知下发。
+
+    每条通知都会逐字写入会话历史并留在滚动窗口里——后续回合的通知必须
+    换成一行指针；盘面快照与动作格式仍每轮携带。送达失败不记数，下一
+    手重新带全量规则。
+    """
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=5.0, turn_fallback_delay_s=0.3
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+
+    # Turn 1: the human opens, the first action notice carries the rules.
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+    first = _notice_text(recorder)
+    assert "规则（完整）" in first
+
+    result = await director.submit_play(room.match.id, grant.key, "J9")
+    assert result.ok
+
+    # Turn 2 (human moves again): a new grant, rules swapped for the pointer.
+    await room.apply(
+        0, {"type": "move", "move": "K10"}, client_version=room.match.version
+    )
+    await _wait(lambda: len(recorder.sent) >= 2)
+    later = _notice_text(recorder)
+    assert "规则（完整）" not in later
+    assert "完整规则见本局首条行动通知" in later
+    assert "完整局面" in later and "H8" in later  # per-turn facts stay
+    await director.stop()
+
+
+async def test_failed_notice_delivery_resends_rules_next_turn():
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=0.6, turn_fallback_delay_s=0.05
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+
+    # First delivery fails: the model never saw the rules.
+    original = director_module.send_notice
+
+    async def failing(plugin, sid, text):
+        return False
+
+    director_module.send_notice = failing
+    try:
+        await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+        await _wait(lambda: director.grant_of(room.match.id) is not None)
+        grant = director.grant_of(room.match.id)
+        await _wait(lambda: grant.state == "filled")
+    finally:
+        director_module.send_notice = original
+
+    # The bot fallback moved for the host; the NEXT turn must carry the rules
+    # again because the first notice never landed.
+    await room.apply(
+        0, {"type": "move", "move": "J10"}, client_version=room.match.version
+    )
+    await _wait(lambda: len(recorder.sent) >= 1)
+    assert "规则（完整）" in _notice_text(recorder)
+    await director.stop()

@@ -890,3 +890,77 @@ async def test_games_payload_carries_the_host_name(tmp_path):
     assert labels, "doudizhu exposes lineup labels"
     assert all("AI" not in label or "汐祈" in label for label in labels), labels
     assert any("汐祈（Seki）" in label for label in labels), labels
+
+
+# ----------------------------------------------------------------------
+#  Match-page chat window
+# ----------------------------------------------------------------------
+
+
+async def test_chat_send_publishes_and_records_the_player_line(tmp_path):
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+
+    sent = await data_of(api.chat_send({"text": "这把我该怎么走？"}))
+    message = sent["message"]
+    assert message["role"] == "player"
+    assert message["text"] == "这把我该怎么走？"
+
+    # The line rides the notice channel into the dedicated game session, in
+    # the player's voice — not a [System:] notice the model would answer as
+    # an operator.
+    assert plugin.ctx.published, "notice must be published"
+    session, chain, mentioned = plugin.ctx.published[-1]
+    assert getattr(session, "sid", session) == "gamehub:dm:admin"
+    assert mentioned is True
+    text = "".join(e.text for e in chain.message_list if hasattr(e, "text"))
+    assert "[玩家发言]" in text and "这把我该怎么走？" in text
+
+    history = await data_of(api.chat_history())
+    assert history["enabled"] is True
+    assert [m["text"] for m in history["messages"]] == ["这把我该怎么走？"]
+    assert history["messages"][0]["role"] == "player"
+
+
+async def test_chat_send_validates_and_paces(tmp_path):
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+
+    empty = await error_of(api.chat_send({"text": "   "}), 400)
+    assert empty.code == "text_empty"
+    long = await error_of(api.chat_send({"text": "字" * 501}), 400)
+    assert long.code == "text_too_long"
+
+    ok = await data_of(api.chat_send({"text": "你好"}))
+    assert ok["message"]["text"] == "你好"
+    paced = await error_of(api.chat_send({"text": "又来了"}), 429)
+    assert paced.code == "rate_limited"
+    assert not plugin.ctx.published or len(plugin.ctx.published) == 1
+
+
+async def test_chat_disabled_and_undeliverable(tmp_path, monkeypatch):
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+
+    plugin.settings.page_chat_enabled = False
+    disabled = await error_of(api.chat_send({"text": "在吗"}), 403)
+    assert disabled.code == "chat_disabled"
+    history = await data_of(api.chat_history())
+    assert history["enabled"] is False
+
+    plugin.settings.page_chat_enabled = True
+    import host.web as web_module
+
+    async def failing_send(plugin, sid, text):
+        return False
+
+    monkeypatch.setattr(web_module, "send_notice", failing_send)
+    unreachable = await error_of(api.chat_send({"text": "喂"}), 503)
+    assert unreachable.code == "not_ready"
+
+
+async def test_chat_send_is_length_capped_and_trimmed(tmp_path):
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+    boundary = await data_of(api.chat_send({"text": "字" * 500}))
+    assert len(boundary["message"]["text"]) == 500
