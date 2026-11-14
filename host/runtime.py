@@ -50,6 +50,10 @@ class GamehubRuntime:
         except Exception as e:  # noqa: BLE001 - persona is cosmetic
             logger.warning(f"gamehub: failed to read active persona: {e}")
 
+        # The turn-driven seat is played by the host AI itself, so the UI must
+        # be able to tell it apart from the plugin-owned game_agent identity.
+        plugin.host_agent_name = bot_name
+
         self.rooms = RoomManager(
             repository=self.store,
             config=settings,

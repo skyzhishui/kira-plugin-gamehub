@@ -530,7 +530,7 @@ function gameCard(g, i, active) {
 
   if (active) {
     // 单 actor 单局：已有未结束对局时，开局入口收敛到顶部「继续对局」卡，
-    // 避免「进入对局」与「与诺里对战」指向同一局造成重复入口。
+    // 避免「进入对局」与「与人设对战」指向同一局造成重复入口。
     const actions = el("div", "card-actions");
     const same = active.kind === g.kind;
     const locked = el("button", "btn", same ? "对局进行中" : "先结束当前对局");
@@ -543,7 +543,7 @@ function gameCard(g, i, active) {
 
   if (supportsModes(g) && ready) {
     // 三人桌（斗地主等）：目录声明 lineups → 阵容 + 局数选择器；
-    // 两座位棋类：对手三选一（诺里 / 当前 agent / 陪练）+ 三档等级。
+    // 两座位棋类：对手三选一（人设本人 / 进阶对手 / 陪练）+ 三档等级。
     if (hasLineups(g)) {
       card.appendChild(lineupBlock(g));
       return card;
@@ -570,13 +570,13 @@ function gameCard(g, i, active) {
   return card;
 }
 
-/* ---------------- S2 开局方式选择（回合棋种：诺里 / 当前 agent / 陪练 + 三档） ---------------- */
+/* ---------------- S2 开局方式选择（回合棋种：人设本人 / 进阶对手 / 陪练 + 三档） ---------------- */
 
 const MODE_STORE_KEY = "gamehub_hub_mode";
 
 /** 选择器状态按游戏类型存本页会话：刷新后保持上次的对手与等级。
  * 旧版本存的是 { mode:"practice"|"nori", difficulty:"easy"|"advanced" }：
- * 这里按驱动兼容映射（advanced=当前 agent、easy=陪练）。 */
+ * 这里按驱动兼容映射（advanced=进阶对手、easy=陪练）。 */
 function readModeChoice(kind) {
   try {
     const all = JSON.parse(sessionStorage.getItem(MODE_STORE_KEY) || "{}");
@@ -641,7 +641,7 @@ function modeBlock(g) {
   }
   block.appendChild(modeSeg);
 
-  // 三档等级：只对诺里 / 当前 agent 显示；陪练是按规则走子的，不摆三档。
+  // 三档等级：只对人设本人 / 进阶对手显示；陪练是按规则走子的，不摆三档。
   const levelSeg = el("div", "seg level-seg");
   levelSeg.setAttribute("role", "group");
   levelSeg.setAttribute("aria-label", "对手等级");

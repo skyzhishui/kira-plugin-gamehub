@@ -354,6 +354,7 @@ class GamehubApi:
             "page_session": GAME_SID,
             "actor": PAGE_ACTOR,
             "agent_name": self._agent_name(),
+            "host_agent_name": str(getattr(self._plugin, "host_agent_name", "") or ""),
             "agent_avatar": await self._agent_avatar(),
             "practice_name": self._practice_name(),
             "games": [

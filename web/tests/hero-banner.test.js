@@ -76,3 +76,28 @@ test("窄屏换 2:1 竖切裁图；深色主题压暗插画并换深色柔光", 
   assert.ok(rgbs.length > 0);
   for (const [r, , b] of rgbs) assert.ok(b - r >= 40, `柔光 ${r}..${b} 偏黑`);
 });
+/* ---------------- 素材引用（KiraAI：只允许公共通用素材 + 无角色） ---------------- */
+
+const matchHtml = fs.readFileSync(new URL("../match.html", import.meta.url), "utf8");
+const matchJs = fs.readFileSync(new URL("../match.js", import.meta.url), "utf8");
+const modeJs = fs.readFileSync(new URL("../shared/mode.js", import.meta.url), "utf8");
+
+test("贴纸/底图/头像引用都指向真实存在的公共素材", () => {
+  const fsmod = fs;
+  const exists = (rel) => fsmod.existsSync(new URL(`../${rel.replace(/^\.\//, "")}`, import.meta.url));
+  assert.match(matchJs, /"\.\/assets\/sticker-win\.png"/);
+  assert.match(matchJs, /"\.\/assets\/sticker-lose\.png"/);
+  assert.ok(exists("./assets/sticker-win.png"));
+  assert.ok(exists("./assets/sticker-lose.png"));
+  assert.match(css, /url\("\.\/assets\/bg-lobby\.png"\)/);
+  assert.ok(exists("./assets/bg-lobby.png"));
+  assert.match(modeJs, /export const AGENT_AVATAR_URL = "\.\/assets\/agent-avatar\.png"/);
+  assert.ok(exists("./assets/agent-avatar.png"));
+});
+
+test("对局页只引用公共头像，不再引用角色立绘或其它插画", () => {
+  assert.doesNotMatch(matchJs, /hero-/);
+  assert.doesNotMatch(matchHtml, /assets\/(?!agent-avatar)/);
+  // 人设/进阶对手座位都用同一个公共头像
+  assert.match(matchJs, /seatAvatarEl\(AGENT_AVATAR_URL, name, thinking\)/);
+});

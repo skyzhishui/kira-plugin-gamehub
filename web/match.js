@@ -476,6 +476,13 @@ function renderStatus(match) {
  * （-1）的单例队列展示。 */
 const COACH_SEAT = -1;
 
+/** 队列键 = 座位号；人设不占座（教练/队友阵容）时统一用 COACH_SEAT。
+ * 否则 match.chat 里人设的 say（seat=null/-1）会被归一到座位 0，
+ * 落到「人类座位」上、被 isTalkSeat 过滤掉而永不展示。 */
+function talkSeatKey(match, seatIndex) {
+  return noriSeatOf(match) == null ? COACH_SEAT : seatIndex;
+}
+
 function renderMateZone(match) {
   const zone = $("mate-zone");
   if (!zone) return;
@@ -1066,11 +1073,11 @@ function applyMatchChat(match, first) {
     allowSeat: (seatIndex) => isTalkSeat(match, seatIndex),
   });
   chat.saySeen = nextSeen;
-  entries.forEach((e) => showSeatSays(e.seat, e.text, matchSayKey(e)));
+  entries.forEach((e) => showSeatSays(talkSeatKey(match, e.seat), e.text, matchSayKey(e)));
 }
 
 /* 只读/诊断提示：ui-config 的 chat_read_only 与 notice_target_error。
- * 对局页没有输入框，只把提示落在座位条下方（#status-note 不存在时静默）。 */
+ * 对局页没有输入框，提示条落在棋盘与动作行之间（元素缺席时静默）。 */
 function applyChatNotice() {
   const note = $("chat-readonly");
   if (note) {

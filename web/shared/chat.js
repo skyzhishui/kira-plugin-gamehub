@@ -2,8 +2,10 @@
  *
  * KiraAI 宿主差异（相对 nori 原版）：
  * - 本插件没有宿主 webchat 面板：牌桌旁白走插件自己的 notice 通道
- *   （host/notices.py → ctx.publish_notice），因此这里不再有 SSE 事件流、
- *   历史拉取与发送入口；对局页只渲染 match 视图 / WS 帧里的气泡。
+ *   （host/notices.py → ctx.publish_notice），因此这里没有 SSE 事件流与
+ *   发送入口；对局页只渲染 match 视图 / WS 帧里的气泡。宿主只读历史
+ *   （fetchHistory → /api/messages）与 /ui-config 的聊天目标字段保留为
+ *   纯解析接口，供将来接入只读面板或单测使用。
  * - 身份是插件自己的 identity.json，只有一个显示名：
  *   GET /identity → { actor, name, effective_name, page_session }
  *   POST /identity { name } → 同上（无 user_id、无会话切换）。

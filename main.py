@@ -375,8 +375,9 @@ class GamehubPlugin(BasePlugin):
         return await self._call(self.api.create_match(body))
 
     @register.api(method="GET", path="/matches/{match_id}")
-    async def api_get_match(self, match_id: str, token: str = ""):
-        return await self._call(self.api.get_match(match_id, token))
+    async def api_get_match(self, match_id: str, t: str = ""):
+        # The seat token travels as ``?t=`` (never in the Authorization header).
+        return await self._call(self.api.get_match(match_id, t))
 
     @register.api(method="GET", path="/matches/{match_id}/control")
     async def api_control(self, match_id: str, seat: int | None = None):
@@ -386,10 +387,10 @@ class GamehubPlugin(BasePlugin):
     async def api_actions(
         self,
         match_id: str,
-        token: str = "",
+        t: str = "",
         body: dict[str, Any] | None = None,
     ):
-        return await self._call(self.api.actions(match_id, token, body))
+        return await self._call(self.api.actions(match_id, t, body))
 
     @register.api(method="GET", path="/matches/{match_id}/mode")
     async def api_get_mode(self, match_id: str):
