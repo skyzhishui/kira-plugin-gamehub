@@ -159,7 +159,7 @@ function render({ games, current, active_matches: rawActive } = {}) {
   if (!list.length) {
     const empty = el("div", "empty");
     empty.appendChild(el("p", "big", "棋室还没有上架游戏"));
-    empty.appendChild(el("p", null, `等${getPersonaName()}把棋盘摆好，这里就会出现第一张卡片。`));
+    empty.appendChild(el("p", null, `等${getHostAgentName()}把棋盘摆好，这里就会出现第一张卡片。`));
     grid.appendChild(empty);
     return;
   }
@@ -336,7 +336,7 @@ function renderActiveMatches(rawActive, current) {
 function activeSeatLabel(p, m) {
   if (m && m.lineup) {
     if (p.human) return "";
-    if (p.driver === "turn") return getPersonaName();
+    if (p.driver === "turn") return getHostAgentName();
     if (p.driver === "agent") return "对手";
     if (p.driver === "bot") return "陪练";
     return "";
@@ -481,7 +481,7 @@ function turnText(match) {
     const verb = isCardGame(match) ? (String(v && v.phase) === "bid" ? "叫分中…" : "出牌中…") : "思考中…";
     // 陪练局/教练阵容的座位不是诺里本人（advanced 的 ai 座位也一样）
     const noriSeat = noriSeatOf(match);
-    if (noriSeat != null && wo === noriSeat) return `${getPersonaName()}${verb}`;
+    if (noriSeat != null && wo === noriSeat) return `${getHostAgentName()}${verb}`;
     return `${seatDisplay(seat, wo, practice)} ${verb}`;
   }
   return "等待中";
@@ -559,7 +559,7 @@ function gameCard(g, i, active) {
   }
 
   const actions = el("div", "card-actions");
-  const vsAi = el("button", "btn primary", `与${getPersonaName()}对弈`);
+  const vsAi = el("button", "btn primary", `与${getHostAgentName()}对弈`);
   vsAi.type = "button";
   vsAi.disabled = !ready;
   vsAi.addEventListener("click", () => createMatch({ kind: g.kind, opponent: "ai" }, vsAi));
@@ -623,8 +623,8 @@ function opponentLabel(m, agentName) {
 function modeBlock(g) {
   const kind = g.kind;
   const choice = readModeChoice(kind);
-  // agent_name 就是可配置人设名（默认 "nori" → 渲染「诺里」）
-  const agentName = g && g.agent_name ? personaNameText(g.agent_name) : getPersonaName();
+  // agent_name 就是 game_agent 人设名（默认 "nori" → 渲染「诺里」）
+  const agentName = personaNameText(g && g.agent_name);
   const practiceName = practiceNameText(g && g.practice_name);
 
   const block = el("div", "mode-block");
@@ -699,7 +699,7 @@ function modeBlock(g) {
       levelBtns[lv].setAttribute("aria-pressed", String(on));
     }
     hint.textContent = showLevel
-      ? levelHint(choice.level, choice.opponent === "nori" ? getPersonaName() : agentName)
+      ? levelHint(choice.level, choice.opponent === "nori" ? getHostAgentName() : agentName)
       : levelHint("beginner", practiceName);
   }
   sync();
@@ -757,7 +757,7 @@ function handsChoices(g) {
 function lineupBlock(g) {
   const kind = g.kind;
   const choice = readLineupChoice(kind);
-  const agentName = g && g.agent_name ? personaNameText(g.agent_name) : getPersonaName();
+  const agentName = personaNameText(g && g.agent_name);
   const options = lineupsOf(g, agentName);
   if (!options.some((o) => o.value === choice.lineup)) choice.lineup = options[0].value;
 

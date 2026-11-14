@@ -75,6 +75,10 @@ class FakeCtx:
     def _resolve(self, sid: str) -> Any:
         return SimpleNamespace(sid=sid) if self.session_ok else None
 
+    async def resolve_session(self, sid: str) -> Any:
+        """Mirror ``SessionManager.resolve_session`` (async in the host)."""
+        return self._resolve(sid)
+
     async def publish_notice(self, session: Any, chain: Any, *, is_mentioned: bool = False) -> None:
         self.published.append((session, chain, is_mentioned))
 
@@ -275,6 +279,30 @@ async def test_ui_config_notice_target_override(tmp_path):
     config = await data_of(api.ui_config())
     assert config["notice_target_status"] == "invalid"
     assert config["notice_target_error"]
+
+
+async def test_notice_target_awaits_the_async_resolver(tmp_path):
+    """``SessionManager.resolve_session`` is async: a bare call must not pass."""
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+
+    sid, status, error = await api._notice_target()
+    assert (sid, status, error) == ("gamehub:dm:admin", "default", "")
+
+    # A resolver returning None (no session) is reported as invalid, not usable.
+    plugin.ctx.session_ok = False
+    sid, status, error = await api._notice_target()
+    assert status == "invalid" and error
+
+
+async def test_notice_target_tolerates_a_sync_resolver(tmp_path):
+    """Older/simple hosts may expose a sync resolver; awaiting must still work."""
+    plugin = make_plugin(tmp_path)
+    plugin.ctx.session_mgr = SimpleNamespace(
+        resolve_session=lambda sid: SimpleNamespace(sid=sid)
+    )
+    api = GamehubApi(plugin)
+    assert (await api._notice_target())[1] == "default"
 
 
 async def test_ui_config_avatar_is_plugin_owned(tmp_path):

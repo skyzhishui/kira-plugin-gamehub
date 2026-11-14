@@ -19,12 +19,14 @@ import {
   AGENT_AVATAR_URL,
   driverOf,
   getAgentAvatar,
+  getHostAgentName,
   getPersonaName,
   isAgentOpponent,
   personaNameText,
   personaText,
   resolveAgentAvatar,
   setAgentAvatar,
+  setHostAgentName,
   setPersonaName,
 } from "../shared/mode.js";
 
@@ -83,6 +85,17 @@ test("人设本人局 / 人类座位 / 缺数据一律不配进阶头像", () =>
   assert.equal(isAgentOpponent(null, { kind: "ai" }), false);
   assert.equal(isAgentOpponent(PRACTICE_ADV, null), false);
   assert.equal(isAgentOpponent({}, { kind: "ai" }), false, "旧对局无模式信息按人设本人局回填");
+});
+
+test("头像归属口径：只有 game_agent 座位（agent 驱动）用 agent-avatar；宿主主 agent 座位不用", () => {
+  // 宿主主 agent 的座位（turn 驱动 / nori 模式）不是 game_agent：不配头像。
+  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "汐祈（Seki）" }), false);
+  // 只有 agent 驱动的座位才配。
+  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "诺里" }), true);
+  // 名字/人设名不参与判定：宿主名不会让 turn 座位“变成”game_agent 座位。
+  setHostAgentName("汐祈（Seki）");
+  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "诺里" }), false);
+  setHostAgentName("");
 });
 
 test("人设名可配置：留空或 nori 渲染默认「诺里」，其它取值原样渲染", () => {

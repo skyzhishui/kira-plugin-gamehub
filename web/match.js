@@ -183,10 +183,10 @@ function statusInfo(match) {
     const identity = seatIdentity(match, seat, index);
     if (isCardGame(match)) {
       const verb = String(match.view && match.view.phase) === "bid" ? "叫分中…" : "出牌中…";
-      if (identity === "nori") return { kind: "thinking", text: `${getPersonaName()}${verb}` };
+      if (identity === "nori") return { kind: "thinking", text: `${getHostAgentName()}${verb}` };
       return { kind: "thinking", text: `${seatDisplay(seat, index, practice)} ${verb}` };
     }
-    if (identity === "nori") return { kind: "thinking", text: `${getPersonaName()}思考中…` };
+    if (identity === "nori") return { kind: "thinking", text: `${getHostAgentName()}思考中…` };
     return { kind: "thinking", text: `${seatDisplay(seat, index, practice)} 思考中…` };
   }
   return { kind: "wait", text: "等待开局…" };
@@ -352,12 +352,13 @@ function renderSeats(match) {
     tile.dataset.seat = String(i);
     tile.dataset.identity = identity;
 
-    // KiraAI 不随插件分发角色立绘：非人类座位统一用公共 agent-avatar.png，
-    // 人类/规则陪练座位用名字首字占位（不冒充任何人设）。
+    // 头像口径：game_agent 座位（进阶对手/教练席）用插件自有 agent-avatar
+    // （默认 nori 头像，可上传替换）；宿主主 agent 座位与陪练/人类座位用
+    // 名字首字占位，不冒充任何人设。
     let avatar = null;
-    if (identity === "nori" || identity === "agent") {
-      avatar = seatAvatarEl(getAgentAvatar(), name, thinking, { agent: identity === "agent" });
-    } else if (three && (identity === "human" || identity === "bot")) {
+    if (identity === "agent") {
+      avatar = seatAvatarEl(getAgentAvatar(), name, thinking, { agent: true });
+    } else if (three && (identity === "human" || identity === "bot" || identity === "nori")) {
       avatar = seatAvatarFallback(name, thinking, false);
     }
 
@@ -408,7 +409,7 @@ function renderSeats(match) {
     if (seat.kind === "human" && !seat.joined) chips.appendChild(chipsPill("pill warn", "等待加入"));
     // S3 代下 pill：所有视角可见（观战也知道这手由人设代下），只读不可切换
     if (!over && delegatedOf(match) && seat.kind === "human") {
-      const who = getPersonaName();
+      const who = getHostAgentName();
       chips.appendChild(chipsPill("pill accent delegate-pill", isCardGame(match) ? `${who}代打` : `${who}代下`));
     }
     if (thinking && !isMine) {
@@ -430,7 +431,7 @@ function renderSeats(match) {
     // 人设/进阶对手座位都挂公共头像 + 各自的 say 气泡（per-seat 单例，
     // 座位每次重渲染时重新挂载，不重建、不打断计时）。
     if (!three && identity === "nori") {
-      tile.appendChild(seatAvatarEl(getAgentAvatar(), name, thinking));
+      tile.appendChild(seatAvatarFallback(name, thinking, false));
       const bubble = seatBubbleEl(i);
       bubble.classList.remove("bubble-top");
       tile.appendChild(bubble);
@@ -504,14 +505,13 @@ function renderMateZone(match) {
   const delegated = delegatedOf(match);
   const w = waitingOnSeat(match);
   const noriActing = delegated && !over && mine && !!(w && w.index === match.me);
-  const persona = getPersonaName();
+  // The teammate/coach seat is the host agent (it does the delegating).
+  const persona = getHostAgentName();
 
+  // 教练/队友席是宿主主 agent：用名字首字占位，不套 game_agent 头像。
   const avWrap = el("span", "mate-avatar-wrap");
-  const av = document.createElement("img");
-  av.className = "mate-avatar" + (noriActing ? " wiggle" : "");
-  av.src = getAgentAvatar();
-  av.alt = `队友${persona}`;
-  av.addEventListener("error", () => av.remove());
+  const av = seatAvatarFallback(persona, noriActing, false);
+  av.className = "mate-avatar mate-avatar-fallback" + (noriActing ? " wiggle" : "");
   avWrap.appendChild(av);
   // 人设发言气泡挂头像包裹层内（侧向气泡，尾巴指向头像）。只挂一次：
   // 之前的重复 append 会把气泡移到 zone，导致脱离头像锚点。
@@ -735,7 +735,7 @@ function renderActions(match) {
     const delegated = delegatedOf(match);
     const word = isCardGame(match) ? "代打" : "代下";
     row.appendChild(actionBtn({
-      label: delegated ? `停止${word}` : `让${getPersonaName()}${word}`,
+      label: delegated ? `停止${word}` : `让${getHostAgentName()}${word}`,
       cls: delegated ? "delegate on" : "delegate",
       disabled: busy,
       onClick: onToggleDelegate,
@@ -840,7 +840,7 @@ async function onToggleDelegate() {
   const ok = await act(delegateAction(next));
   if (!ok) return;
   const word = isCardGame(view) ? "代打" : "代下";
-  const who = getPersonaName();
+  const who = getHostAgentName();
   if (next) {
     const w = waitingOnSeat(view);
     if (w && w.index === view.me) toast(`已开启${word}，${who}正在替你走这一手`, "ok");

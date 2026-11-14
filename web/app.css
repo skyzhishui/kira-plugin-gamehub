@@ -2459,6 +2459,20 @@ html.dark .speak-badge { border-color: var(--pink); }
 }
 .mate-avatar.wiggle { animation: avatar-sway 1.5s ease-in-out infinite; }
 
+/* 教练/队友席（宿主主 agent）用名字首字占位：同尺寸、同圆框、同描边，
+ * 不套 game_agent 头像。 */
+.mate-avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(150deg, var(--sky-soft), var(--sky-pale));
+  color: var(--sky-dark);
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+}
+
 .mate-name-box {
   display: inline-flex;
   align-items: center;

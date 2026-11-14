@@ -54,10 +54,13 @@ class GamehubRuntime:
         # be able to tell it apart from the plugin-owned game_agent identity.
         plugin.host_agent_name = bot_name
 
+        # ``opponent_name`` names the agent-driven seat; keep it identical to
+        # the configured game_agent name so the lobby and the seat agree.
+        agent_name = str(getattr(settings, "agent_name", "") or "").strip() or "nori"
         self.rooms = RoomManager(
             repository=self.store,
             config=settings,
-            opponent_name=settings.agent_name,
+            opponent_name=agent_name,
             bot_name=bot_name,
             practice_name=settings.practice_name,
         )

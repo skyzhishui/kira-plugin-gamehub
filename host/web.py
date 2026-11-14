@@ -20,6 +20,7 @@ KiraAI differences from nori:
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -347,7 +348,7 @@ class GamehubApi:
         """Light UI config; ``match_id`` adds the effective per-match context."""
         settings = self._settings
         talk_mode = str(getattr(settings, "page_chat_talk_default", "judge") or "judge")
-        target_sid, target_status, target_error = self._notice_target()
+        target_sid, target_status, target_error = await self._notice_target()
         base = {
             "chat_enabled": bool(getattr(settings, "page_chat_enabled", True)),
             "chat_session": GAME_SID,
@@ -431,7 +432,7 @@ class GamehubApi:
         """
         return avatar_url(self._plugin)
 
-    def _notice_target(self) -> tuple[str, str, str]:
+    async def _notice_target(self) -> tuple[str, str, str]:
         """``(session_id, status, error)`` for the effective notice target.
 
         Status is ``default`` (dedicated game session), ``override`` (plugin
@@ -447,7 +448,12 @@ class GamehubApi:
         if not callable(resolver):
             return sid, "unknown", "session manager unavailable"
         try:
+            # ``SessionManager.resolve_session`` is async; awaiting the call is
+            # mandatory (a bare call leaks a coroutine and reports every target
+            # as usable). Unstored SIDs still resolve to a synthetic session.
             session = resolver(sid)
+            if inspect.isawaitable(session):
+                session = await session
             if session is None:
                 return sid, "invalid", f"会话不存在：{sid}"
         except Exception as exc:  # noqa: BLE001 - diagnostics only
@@ -473,7 +479,7 @@ class GamehubApi:
 
     async def notice_test(self) -> dict[str, Any]:
         """Publish one synthetic notice into the effective notice target."""
-        sid, status, error = self._notice_target()
+        sid, status, error = await self._notice_target()
         if status in ("invalid", "unknown"):
             raise _fail(f"通知目标不可用：{error or status}", 503, code="not_ready")
         sent = await send_notice(self._plugin, sid, NOTICE_TEST_TEXT)
@@ -538,9 +544,9 @@ class GamehubApi:
             key=lambda room: int(getattr(room.match, "updated_at", 0) or 0),
             reverse=True,
         )
-        return [self._match_summary(room) for room in active]
+        return [await self._match_summary(room) for room in active]
 
-    def _match_summary(self, room: Any) -> dict[str, Any]:
+    async def _match_summary(self, room: Any) -> dict[str, Any]:
         match = room.match
         try:
             game_name = games.get(match.kind).name["zh"]
@@ -560,7 +566,7 @@ class GamehubApi:
         can_control = str(getattr(room, "status", "") or "") == "active" and any(
             s.kind == "human" and s.token for s in match.seats
         )
-        target_sid, status_text, status_error = self._notice_target()
+        target_sid, status_text, status_error = await self._notice_target()
         return {
             "id": match.id,
             "kind": match.kind,
@@ -651,7 +657,10 @@ class GamehubApi:
         self, body: dict[str, Any], nested: Any, kind: str
     ) -> tuple[dict[str, Any], str]:
         """Apply nori's ``mode_options`` normalization/validation for creation."""
-        bot_name = self._agent_name()
+        # User-facing copy must name the host AI (the `nori` mode opponent) and
+        # the configured game_agent (`agent` mode) separately.
+        host_name = str(getattr(self._plugin, "host_agent_name", "") or "").strip()
+        host_name = host_name or self._agent_name()
         if isinstance(nested, dict) and nested:
             mode = str(nested.get("mode") or "").strip().lower()
             difficulty = str(nested.get("difficulty") or "").strip().lower()
@@ -689,7 +698,7 @@ class GamehubApi:
             opponent = "advanced" if difficulty == modes.DIFF_ADVANCED else "bot"
         elif mode:
             raise _fail(
-                f"不支持的模式：{mode}（nori=对{bot_name}本人，bot=对战陪练）",
+                f"不支持的模式：{mode}（nori=对{host_name}本人，bot=对战陪练）",
                 400,
                 code="bad_request",
             )
@@ -711,7 +720,7 @@ class GamehubApi:
             opponent = "advanced" if difficulty == modes.DIFF_ADVANCED else "bot"
         else:
             raise _fail(
-                f"对手只能是{bot_name}本人（nori/ai）或陪练（bot）",
+                f"对手只能是{host_name}本人（nori/ai）或陪练（bot）",
                 400,
                 code="bad_opponent",
             )

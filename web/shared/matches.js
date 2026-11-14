@@ -25,7 +25,7 @@
  * 本模块零浏览器全局依赖（Node --test 直测）；IO 一律由调用方注入。
  */
 
-import { normalizeMode, driverOf, getPersonaName } from "./mode.js";
+import { normalizeMode, driverOf, getHostAgentName } from "./mode.js";
 
 export const GAME_NAMES = { gomoku: "五子棋", reversi: "黑白棋", doudizhu: "斗地主", chess: "国际象棋" };
 
@@ -82,7 +82,7 @@ export function normalizeActiveMatch(raw) {
   const shownPlayers = players.map((p) => {
     if (p.human || p.named) return p;
     const driver = p.driver || fallbackDriver;
-    if (driver === "turn") return { ...p, name: getPersonaName() };
+    if (driver === "turn") return { ...p, name: getHostAgentName() };
     if (driver === "agent") return { ...p, name: "对手" };
     if (driver === "bot") return { ...p, name: "陪练" };
     return { ...p, name: practice ? "陪练" : p.name };
@@ -165,7 +165,7 @@ function normalizeNotice(nt) {
 /* ---------------- 展示文案 ---------------- */
 
 export function kindLabel(kind, practice = false) {
-  if (kind === "ai") return practice ? "对手" : getPersonaName();
+  if (kind === "ai") return practice ? "对手" : getHostAgentName();
   return kind === "bot" ? "陪练" : "";
 }
 

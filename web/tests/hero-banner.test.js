@@ -98,8 +98,11 @@ test("贴纸/底图/头像引用都指向真实存在的公共素材", () => {
 test("对局页只引用公共头像，不再引用角色立绘或其它插画", () => {
   assert.doesNotMatch(matchJs, /hero-/);
   assert.doesNotMatch(matchHtml, /assets\/(?!agent-avatar)/);
-  // 人设/进阶对手座位都用同一个插件自有头像（地址来自共享状态，即 /ui-config）
-  assert.match(matchJs, /seatAvatarEl\(getAgentAvatar\(\), name, thinking\)/);
+  // 头像归属：只有 game_agent 座位（进阶对手/教练席）挂插件自有头像；
+  // 宿主主 agent 座位与陪练/人类座位用名字首字占位。
+  assert.match(matchJs, /identity === "agent"\) \{\n\s+avatar = seatAvatarEl\(getAgentAvatar\(\), name, thinking, \{ agent: true \}\);/);
+  assert.match(matchJs, /identity === "nori"\) \{\n\s+tile\.appendChild\(seatAvatarFallback\(name, thinking, false\)\);/);
+  assert.match(matchJs, /mate-avatar-fallback/);
   assert.doesNotMatch(matchJs, /AGENT_AVATAR_URL/);
 });
 
