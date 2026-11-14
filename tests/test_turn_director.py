@@ -46,6 +46,7 @@ class _Recorder:
     def __init__(self, delay: float = 0.0) -> None:
         self.sent: list[tuple[str, str]] = []
         self.stage: list[tuple[str, str]] = []
+        self.nudges: list[tuple[str, str]] = []
         self.delay = delay
 
     async def __call__(self, plugin: Any, sid: str, text: str) -> bool:
@@ -55,6 +56,9 @@ class _Recorder:
             "[System: 对局结束"
         ):
             self.stage.append((str(sid), str(text)))
+        elif "还没有提交动作" in text:
+            # Reminder before the rule bot takes an unanswered turn.
+            self.nudges.append((str(sid), str(text)))
         else:
             self.sent.append((str(sid), str(text)))
         return True
@@ -326,6 +330,53 @@ async def test_watchdog_never_fills_a_turn_that_is_still_progressing():
     # Once the host goes quiet, the watchdog fills as before.
     await _wait(lambda: director.grant_of(room.match.id).state == "filled", timeout=5.0)
     assert room.match.log[-1].seat == 1
+    await director.stop()
+
+
+async def test_stalled_turn_gets_one_reminder_before_the_bot_fill():
+    """A host that answers the notice with text only is asked once, then filled.
+
+    Real symptom: the model replied "10，继续顶。" without calling
+    ``play_<match>``; the watchdog silently played a rule-bot move and the
+    table looked like the opponent timed out. One explicit reminder first.
+    """
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=0.4, turn_fallback_delay_s=0.05
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+
+    # The reminder arrives while the grant is still open.
+    await _wait(lambda: bool(recorder.nudges), timeout=3.0)
+    assert director.grant_of(room.match.id).state == "active"
+    assert len(room.match.log) == 1, "a reminder must not play for the host"
+    nudge = recorder.nudges[0][1]
+    assert play_tool_name(room.match.id) in nudge
+    assert "还没有提交动作" in nudge
+
+    # Still no move → the bot fills, and only one reminder was ever sent.
+    await _wait(lambda: director.grant_of(room.match.id).state == "filled", timeout=5.0)
+    assert room.match.log[-1].seat == 1
+    assert len(recorder.nudges) == 1
+    await director.stop()
+
+
+async def test_reminder_is_skipped_when_the_host_plays_in_time():
+    """No reminder noise when the host uses the tool: only the action notice."""
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=5.0, turn_fallback_delay_s=0.3
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+
+    result = await director.submit_play(room.match.id, grant.key, "J9")
+    assert result.ok
+    await asyncio.sleep(0.6)
+    assert recorder.nudges == []
+    assert len(recorder.sent) == 1
     await director.stop()
 
 

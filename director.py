@@ -147,6 +147,8 @@ class TurnGrant:
     resolved_at: float = 0.0
     notice_sent: bool = False
     notice_session_id: str = ""
+    # One explicit "you have not acted yet" reminder before the bot fill.
+    nudged: bool = False
     turn_task: asyncio.Task[Any] | None = None
     watchdog: asyncio.Task[Any] | None = None
 
@@ -315,8 +317,11 @@ def build_turn_notice(
         )
         return (
             f"[System: 斗地主行动回合：{players}。{identity}。地主独战、农民同队；"
-            f"叫分前阵营待定。请在本轮回复里调用 {tool_name} 提交本座位的动作"
-            "（叫分用 bid 1 / bid 2 / bid 3 或 pass；出牌用牌面字符串或 pass），"
+            f"叫分前阵营待定。这是你的对局回合：必须在本轮回复里调用 {tool_name} "
+            "工具提交动作——只在正文里写出牌不算数，没有这次调用就等于你没有行动，"
+            "系统会替你随手打一张。"
+            "move 参数的格式：叫分用 bid 1 / bid 2 / bid 3 / pass；"
+            "出牌用牌面字符串（如 3 3 3 4、10 J Q K A、BJ RJ）或 pass。"
             "一次回复只调用一次；同一次回复里可以聊公开牌型、调侃与局势气氛，"
             "但禁止透露自己的未出手牌或私有策略。"
             "不得代替其他席位行动，不得沿用其他局的名字。注意你是玩家，不是解说。]\n\n"
@@ -351,8 +356,10 @@ def build_turn_notice(
     )
     identity_line = "注意你是棋手，不是解说。"
     call_line = (
-        f"请在本轮回复里调用 {tool_name} 工具落子，一次回复只调用一次；"
-        "同一次回复可以照常说一两句玩家口吻的短话，"
+        f"必须在本轮回复里调用 {tool_name} 工具落子——"
+        "只在正文里写出坐标不算数，没有这次调用就等于你没有落子，"
+        "系统会替你随手下一手。"
+        "一次回复只调用一次；同一次回复可以照常说一两句玩家口吻的短话，"
         "关键赛点/高光时刻/情绪激动时可搭配表情包、语音等非文本消息。"
     )
 
@@ -441,6 +448,27 @@ def build_stage_notice(match: Any, stage: str, *, plugin: Any = None) -> str:
     return (
         f"[System: 对局结束 · {title}：{result}。{seat_desc}。"
         "请用一两句玩家口吻自然回应；不用调用对局工具。]"
+    )
+
+
+def build_nudge_notice(
+    match: Any, *, seat: int, tool_name: str, plugin: Any = None
+) -> str:
+    """Short reminder for a turn the host answered without acting.
+
+    The model sometimes replies to the action notice with plain text (e.g.
+    "10，继续顶。") instead of calling ``play_<match>``. The grant is still
+    live, so one explicit reminder is far better than silently letting the
+    rule bot take the move — which is what players perceived as "the opponent
+    timed out".
+    """
+    agent = _agent_name(plugin)
+    labels = _seat_labels(match)
+    seat_label = _label(labels, seat)
+    return (
+        f"[System: 你（{agent}，座位{seat}，{seat_label}）还没有提交动作。"
+        f"请立刻在这一次回复里调用 {tool_name} 工具提交，move 格式见上一条通知；"
+        "只在正文里写结果不算行动。如果这次仍不调用，系统会替你随手出一手。]"
     )
 
 
@@ -981,6 +1009,28 @@ class TurnDirector:
     # ------------------------------------------------------------------
     #  Watchdog (rule-bot fallback)
     # ------------------------------------------------------------------
+    async def _nudge(self, grant: TurnGrant, match: Any) -> bool:
+        """Send one "you have not acted yet" reminder; ``False`` if impossible."""
+        sid = str(getattr(grant, "session_id", "") or "")
+        if not sid or not grant.notice_sent:
+            return False
+        if not self._is_current(grant):
+            return False
+        try:
+            text = build_nudge_notice(
+                match,
+                seat=grant.seat,
+                tool_name=play_tool_name(grant.match_id),
+                plugin=self._plugin,
+            )
+        except Exception:  # noqa: BLE001 - a failed reminder must not block the fill
+            logger.warning(
+                "turn director: nudge build failed (%s seat %s)",
+                grant.match_id, grant.seat, exc_info=True,
+            )
+            return False
+        return await send_notice(self._plugin, sid, text)
+
     async def _recover_without_bot(self, room: Any, grant: TurnGrant) -> None:
         """Manual recovery when the game has no rule bot to fill with.
 
@@ -1041,6 +1091,17 @@ class TurnDirector:
             if module is None:
                 self._finish(grant, ST_CANCELLED, "no_module")
                 return
+            # The host went quiet without acting: ask once, explicitly, before
+            # the rule bot takes the move. Bounded to one reminder per grant.
+            if not grant.nudged and await self._nudge(grant, match):
+                grant.nudged = True
+                window = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
+                grant.deadline = time.monotonic() + window
+                logger.info(
+                    "turn director: turn stalled without a move, reminded (%s seat %s)",
+                    grant.match_id, grant.seat,
+                )
+                return await self._watchdog(grant, room)
             if type(module).bot is GameModule.bot:
                 self._finish(grant, ST_CANCELLED, "no_bot_module")
                 await self._recover_without_bot(room, grant)
