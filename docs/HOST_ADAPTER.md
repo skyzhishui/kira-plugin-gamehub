@@ -127,6 +127,28 @@ to `req.user_prompt`, so the system-prompt cache prefix stays stable.
   streaming is optional and only needed for perceived latency.
 - `game_agent.py` keeps nori's rounds/timeout/concurrency/fallback semantics.
 
+## Identity split (KiraAI)
+
+Two identities coexist and must not be conflated:
+
+- **Host agent** (e.g. Seki) — plays `driver=turn` seats and speaks the table
+  talk. Its display name comes from the active persona
+  (`ctx.persona_mgr.get_active_persona()`), exposed as `plugin.host_agent_name`
+  and `ui_config.host_agent_name`.
+- **`game_agent`** (default `nori`) — plays `driver=agent` seats with its own
+  LLM loop; configured by `agent_name` / `agent_persona` / `ai_models`.
+
+Consequences: turn notices and talk prompts self-reference the host agent;
+`game_agent` prompts use the plugin persona; seat names follow the driver
+(`turn` → host name, `agent` → `agent_name`, `bot` → `practice_name`).
+
+## i18n
+
+- Menus, manifest and the whole config schema are bilingual (zh + en).
+- The page body is Chinese (recorded exception).
+- REST/WS failures carry a stable `code`; the WebUI maps it to zh/en through
+  `web/shared/i18n.js` (`localStorage["language"]` selects the language).
+
 ## WebUI contract
 
 - Page: `main.py` registers `@register.page("/hub", ...)` →

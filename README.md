@@ -43,10 +43,15 @@ The plugin then appears in the WebUI sidebar as **游戏中心 / Game Hub**.
   - `driver=turn` — the host agent is driven by an action notice and answers with
     the request-scoped `play_<match>` tool (the notice arrives in the session the
     match belongs to).
-  - `driver=agent` — the plugin's `game_agent` plays with a configured LLM.
+  - `driver=agent` — the plugin's `game_agent` plays with a configured LLM
+    (empty `ai_models` = the host default LLM).
   - `driver=bot` — the rule bot plays.
 - **Teammate seat**: the host agent may take over the human seat (delegation) and
   only comment on the game.
+
+Two identities are kept apart: the **host agent** (the persona KiraAI runs,
+e.g. Seki) plays `driver=turn` seats and speaks the table talk; the plugin's
+**`game_agent`** (default `nori`) plays `driver=agent` seats with its own model.
 
 ## Configuration
 
@@ -54,10 +59,17 @@ All options live in the plugin config form (`schema.json`, Chinese + English).
 The most relevant ones:
 
 - `agent_name` / `agent_persona` — who the game agent is.
-- `ai_models` — ordered LLM failover list (`provider:model_id`).
+- `ai_models` — ordered LLM failover list (`provider:model_id`); empty = the
+  host default LLM.
 - `ai_mode` — `agent` (LLM) or `bot` (rules only).
 - `notice_target_session_id` — where table talk and turn notices are delivered.
 - `agent_avatar` — optional local avatar file; the WebUI can also upload one.
+
+## i18n
+
+Menus, manifest and the config form are bilingual (zh + en); the page body is
+Chinese by decision. REST/WS errors carry a code that the WebUI renders in the
+host language (`localStorage["language"]`).
 
 ## Tests
 
