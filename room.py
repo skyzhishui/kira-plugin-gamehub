@@ -655,6 +655,9 @@ class GameRoom:
             self._refresh_status_locked()
             if saved:
                 self._broadcast_locked()
+            # 代打落子与手动/AI 落子同等对待：重新登记 AI 驱动，否则对手席
+            # （agent/bot 驱动）永远等不到下一次决策任务，对局就此卡死。
+            follow = self._check_ai_locked()
             applied_say = ""
             if persist_say and len(self.match.chat) > before_chat:
                 applied_say = str(self.match.chat[-1].text or "")
@@ -671,6 +674,7 @@ class GameRoom:
                 "delegated": bool(grant_key),
             }
             match = self.match
+        self._spawn_drive(follow)
         if event is not None:
             self.notify_event(event)
         return match, ""

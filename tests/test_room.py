@@ -672,6 +672,41 @@ async def test_delegated_atomic_say_and_stale_guard() -> None:
     assert len(room.match.chat) == before
 
 
+async def test_delegated_move_drives_the_waiting_agent_seat() -> None:
+    """代打落子后必须重新登记 AI 驱动：对手 agent 席（kind=ai）要被唤醒。
+
+    回归背景：apply_delegated_move 原本只广播事件、从不 _spawn_drive——
+    队友代打模式下宿主主 AI 替人类席落子后，agent 驱动的对手席永远等
+    不到下一次决策任务，对局卡死（手动走子路径 apply 会唤醒，代打不会）。
+    """
+    manager = make_manager()
+    calls: list[int] = []
+
+    async def hook(room: GameRoom, seat: int) -> None:
+        calls.append(seat)
+
+    manager.drive_ai_hook = hook
+    room, _, _ = await create_gomoku(manager, "alice")
+
+    # 引擎绝不自动步进 kind=ai 座位（陪练 easy 的 bot 席才会内嵌应手），
+    # 代打后轮到它时只能靠 drive 唤醒。
+    assert room.match.seats[1].kind == "ai"
+    moved, error = await room.apply_delegated_move(0, "H8", expected_move_count=0)
+    assert moved is not None and error == ""
+    assert [e.seat for e in moved.log] == [0]  # 对手席未被引擎代走
+
+    await wait_until(lambda: calls == [1])
+
+    # 失败的代打（过期手数）不得误触发驱动。
+    calls.clear()
+    failed, _ = await room.apply_delegated_move(
+        0, "J9", expected_move_count=0
+    )
+    assert failed is None
+    await asyncio.sleep(0)
+    assert calls == []
+
+
 async def test_prune_rooms_evicts_over_rooms_but_keeps_connected_and_active() -> None:
     repo = FakeRepo()
     manager = make_manager(repo, now=1000)
