@@ -985,48 +985,53 @@ async def test_no_agent_name_falls_back_to_nori():
     )
 
 
-async def test_full_rules_ride_the_first_notice_only():
-    """方案1：完整规则只随本局首条已送达的行动通知下发。
+async def test_notice_is_header_only_and_points_to_the_injected_block():
+    """通知只发回合头：规则/盘面改由每轮请求的 gamehub_context 注入块承载。
 
-    每条通知都会逐字写入会话历史并留在滚动窗口里——后续回合的通知必须
-    换成一行指针；盘面快照与动作格式仍每轮携带。送达失败不记数，下一
-    手重新带全量规则。
+    每条通知都会逐字写入会话历史并留在滚动窗口里——首条带规则、后续带
+    盘面的旧方案会让陈旧盘面（以及斗地主的私牌）堆积在历史中。现在通知
+    只保留触发事实与调用纪律，并以兜底行指向注入块与 state_<match>。
     """
     rooms, _plugin, recorder, director = _harness_bound(
         turn_play_timeout_s=5.0, turn_fallback_delay_s=0.3
     )
     room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
 
-    # Turn 1: the human opens, the first action notice carries the rules.
+    # Turn 1: the human opens; the notice is a header with the fallback line.
     await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
     await _wait(lambda: director.grant_of(room.match.id) is not None)
     grant = director.grant_of(room.match.id)
     await _wait(lambda: bool(recorder.sent))
     first = _notice_text(recorder)
-    assert "规则（完整）" in first
+    assert "规则（完整）" not in first
+    assert "完整局面" not in first
+    assert "gamehub_context" in first
+    assert f"state_{room.match.id}" in first
+    assert "一次回复只调用一次" in first
 
     result = await director.submit_play(room.match.id, grant.key, "J9")
     assert result.ok
 
-    # Turn 2 (human moves again): a new grant, rules swapped for the pointer.
+    # Turn 2 (human moves again): identical header-only shape.
     await room.apply(
         0, {"type": "move", "move": "K10"}, client_version=room.match.version
     )
     await _wait(lambda: len(recorder.sent) >= 2)
     later = _notice_text(recorder)
     assert "规则（完整）" not in later
-    assert "完整规则见本局首条行动通知" in later
-    assert "完整局面" in later and "H8" in later  # per-turn facts stay
+    assert "完整局面" not in later
+    assert "gamehub_context" in later
     await director.stop()
 
 
-async def test_failed_notice_delivery_resends_rules_next_turn():
+async def test_failed_notice_delivery_still_fills_with_the_watchdog():
+    """送达失败时授权保留、看门狗照常兜底（规则不再有重发语义）。"""
     rooms, _plugin, recorder, director = _harness_bound(
         turn_play_timeout_s=0.6, turn_fallback_delay_s=0.05
     )
     room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
 
-    # First delivery fails: the model never saw the rules.
+    # First delivery fails: the model never saw the notice.
     original = director_module.send_notice
 
     async def failing(plugin, sid, text):
@@ -1036,18 +1041,17 @@ async def test_failed_notice_delivery_resends_rules_next_turn():
     try:
         await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
         await _wait(lambda: director.grant_of(room.match.id) is not None)
-        grant = director.grant_of(room.match.id)
-        await _wait(lambda: grant.state == "filled")
+        await _wait(lambda: director.grant_of(room.match.id).state == "filled")
     finally:
         director_module.send_notice = original
 
-    # The bot fallback moved for the host; the NEXT turn must carry the rules
-    # again because the first notice never landed.
+    # The bot fallback moved for the host; the match proceeds regardless of
+    # notice delivery, and no notice carried rules either way.
     await room.apply(
         0, {"type": "move", "move": "J10"}, client_version=room.match.version
     )
     await _wait(lambda: len(recorder.sent) >= 1)
-    assert "规则（完整）" in _notice_text(recorder)
+    assert "规则（完整）" not in _notice_text(recorder)
     await director.stop()
 
 

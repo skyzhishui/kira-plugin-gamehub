@@ -680,6 +680,11 @@ def describe_match(
             for i, s in enumerate(match.seats)
         )
     )
+    rules = str(getattr(mod, "rules", "") or "").strip()
+    if rules:
+        out.append("")
+        out.append("Rules:")
+        out.append(rules)
     if status.result_text:
         out.append(f"GAME OVER: {status.result_text}.")
     elif seat in status.waiting_on:

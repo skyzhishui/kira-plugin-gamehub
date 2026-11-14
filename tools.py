@@ -103,7 +103,7 @@ PLUGIN_ID = "kira-plugin-gamehub"
 MATCH_PAGE_PATH = f"page/plugin/{PLUGIN_ID}/hub/match.html"
 
 GAME_STATE_DESCRIPTION = (
-    "查看当前对局的完整局面：完整盘面/棋盘、已发生落子与最近走子、"
+    "查看当前对局的完整局面：完整盘面/棋盘、完整规则、已发生落子与最近走子、"
     "轮到谁、你的执色与可用走法，以及当前打法（plan）与剩余 TTL。"
     "用户问「现在什么局面」「轮到谁了」时使用；回答具体落点、"
     "复盘或任何棋子坐标前，先调用 game_state 读取当前完整局面，"

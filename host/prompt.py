@@ -13,13 +13,16 @@ except ImportError:  # standalone tests import plugin-root modules directly
 
 
 def inject_into_request(plugin: Any, event: Any, request: Any, tag_set: Any = None) -> None:
-    """Attach the board context and any turn-scoped tools to one request.
+    """Attach the context block and any turn-scoped tools to one request.
 
     - ``req.tool_set`` receives ``play_<match>`` / ``state_<match>`` only while
       a notice-driven turn grant is active for this session; grants are
       request-scoped, so not adding them on the next request revokes them.
-    - The board block is appended to ``user_prompt`` with ``persist=False`` so
-      it never enters memory and never invalidates the system-prompt cache.
+    - The context block (full rules / move syntax / board snapshot / recent
+      moves / assistance — the single carrier of rules and board state; turn
+      notices carry only the header) is appended to ``user_prompt`` with
+      ``persist=False`` so it never enters memory and never shifts the
+      cacheable prompt prefix.
     """
     sid = str(getattr(event, "sid", "") or "")
     if not sid:

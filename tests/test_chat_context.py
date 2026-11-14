@@ -23,6 +23,7 @@ from engine import (
     from_gtp,
     games,
 )
+from engine.match import Match, SeatInfo
 
 _COLUMNS = "ABCDEFGHJKLMNOPQRST"
 _BOARD_HEADER = "    A B C D E F G H J K L M N O P"
@@ -296,33 +297,105 @@ def test_active_and_expired_plan_semantics_are_preserved() -> None:
 
 
 # ----------------------------------------------------------------------
-#  Action notice context: rules + full snapshot + last 6 + optional analysis
+#  Full payload: rules + snapshot + recent turns + optional assistance
 # ----------------------------------------------------------------------
-def test_action_notice_context_has_full_rules_snapshot_recent_and_analysis() -> None:
+def test_full_payload_carries_rules_snapshot_recent_and_analysis() -> None:
     match = _match("m-action", _THREAT_MOVES)
-    plugin = SimpleNamespace(settings=SimpleNamespace(turn_threat_analysis_enabled=True))
+    plugin = _Plugin([_room(match)])
+    plugin.settings = SimpleNamespace(turn_threat_analysis_enabled=True)
 
-    block = game_context.build_action_notice_context(plugin, match, 1)
+    block = game_context.build_game_state_context(plugin, "s1")
 
     module = games.get("gomoku")
     assert module.rules in block
-    assert "完整局面（本轮通知同源快照）" in block
+    assert "动作格式：" + module.move_help in block
+    assert "完整局面（match m-action · version" in block
     assert "五子棋完整局面" in block
     assert "最近 6 手：" in block
     assert "局面分析（仅信息参考" in block
     assert "当前即可成五" in block
     recent_line = next(line for line in block.splitlines() if line.startswith("最近 6 手："))
+    # The eight threat moves exceed the six-turn window: the first two drop.
     assert "H8" not in recent_line and "H10" not in recent_line
     assert "L10" in recent_line
 
 
-def test_action_notice_context_threat_toggle_is_independent() -> None:
+def test_full_payload_threat_toggle_is_independent() -> None:
     match = _match("m-action-off", _THREAT_MOVES)
     match.mode_options["level"] = "beginner"
-    plugin = SimpleNamespace(settings=SimpleNamespace(turn_threat_analysis_enabled=False))
+    plugin = _Plugin([_room(match)])
+    plugin.settings = SimpleNamespace(turn_threat_analysis_enabled=False)
 
-    block = game_context.build_action_notice_context(plugin, match, 1)
+    block = game_context.build_game_state_context(plugin, "s1")
 
     assert "局面分析（仅信息参考" not in block
     assert games.get("gomoku").rules in block
     assert "最近 6 手：" in block
+
+
+# ----------------------------------------------------------------------
+#  Grant authority: full payload priority + viewer seat
+# ----------------------------------------------------------------------
+class _Grant:
+    def __init__(self, match_id: str, seat: int) -> None:
+        self.match_id = match_id
+        self.seat = seat
+
+
+class _Director:
+    def __init__(self, grant: _Grant | None) -> None:
+        self._grant = grant
+
+    def active_grant_for(self, sid: str):
+        return self._grant
+
+
+class _GrantPlugin(_Plugin):
+    def __init__(self, rooms, grant: _Grant | None, target: str | None = "s1") -> None:
+        super().__init__(rooms, target)
+        self._director = _Director(grant)
+
+
+def test_grant_match_wins_the_full_payload_slot() -> None:
+    older = _match("m-old", [(0, "H8")], now=1000)
+    latest = _match("m-latest", _THREAT_MOVES, now=2000)
+    plugin = _GrantPlugin(
+        [_room(older), _room(latest)], _Grant("m-old", 1)
+    )
+
+    block = game_context.build_game_state_context(plugin, "s1")
+
+    # The granted (older) match takes the full payload; the newest degrades
+    # to a summary without a snapshot.
+    assert "完整局面（match m-old · version" in block
+    assert "完整局面（match m-latest" not in block
+    assert games.get("gomoku").rules in block
+    assert "规则（完整）" in block
+
+
+def test_doudizhu_teammate_block_shows_the_human_private_view() -> None:
+    """The doudizhu special case is gone: the block stands with the human.
+
+    The block is ephemeral (persist=False) and its only reader is this
+    session's host AI, so the user's private hand may appear here — while
+    the persisted history keeps none of it.
+    """
+    module = games.get("doudizhu")
+    state = module.create(SimpleNamespace(seed=1, options={"hands": "1"}))
+    match = Match(
+        id="m-ddz", kind="doudizhu", created_at=0, updated_at=0, version=1,
+        seats=[
+            SeatInfo(kind="human", name="Alice", token=""),
+            SeatInfo(kind="bot", name="陪练A", token=""),
+            SeatInfo(kind="bot", name="陪练B", token=""),
+        ],
+        state=state,
+    )
+    # Doudizhu options normalize through the lineup table; bot_bot is the
+    # coach/teammate lineup (the host AI stands beside the human).
+    match.mode_options = {"lineup": "bot_bot"}
+
+    block = game_context.build_game_state_context(_Plugin([_room(match)]), "s1")
+
+    assert "Your PRIVATE hand" in block
+    assert "规则（完整）" in block

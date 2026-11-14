@@ -43,19 +43,14 @@ try:  # production: plugin package (``<plugin>.director``)
     from .engine.match import status_of
     from .engine.types import GameModule
     from .tools import NOTICE_ACTOR
-    from .tools_turn import build_turn_tools, play_tool_name
+    from .tools_turn import build_turn_tools, play_tool_name, state_tool_name
 except ImportError:  # standalone tests import these modules as top-level
     import modes
     from engine import games
     from engine.match import status_of
     from engine.types import GameModule
     from tools import NOTICE_ACTOR
-    from tools_turn import build_turn_tools, play_tool_name
-
-try:  # production: plugin package
-    from . import context as action_context
-except ImportError:  # standalone tests import modules as top-level
-    import context as action_context
+    from tools_turn import build_turn_tools, play_tool_name, state_tool_name
 
 try:  # production: plugin package
     from .host import notices as notice_channel
@@ -246,15 +241,6 @@ def _mover_of(event: dict[str, Any], match: Any) -> int:
         return -1
 
 
-def _rival_seat(match: Any, seat: int) -> int | None:
-    """Opponent seat of ``seat``: the first other seat, no count assumption."""
-    seats = list(getattr(match, "seats", ()) or ())
-    for index in range(len(seats)):
-        if index != seat:
-            return index
-    return None
-
-
 def _label(labels: list[str], seat: int | None, fallback: str = "棋手") -> str:
     if seat is None or not 0 <= seat < len(labels) or not labels[seat]:
         return fallback
@@ -298,14 +284,17 @@ def build_turn_notice(
     move_count: int,
     tool_name: str = "play",
     plugin: Any = None,
-    threat_analysis: bool | None = None,
-    include_rules: bool | None = None,
 ) -> str:
-    """Action-turn notice: full board + recent moves, never the plan.
+    """Action-turn notice: the turn header only.
 
-    The full rules block rides the match's FIRST delivered action notice
-    only (``include_rules``); later turns carry a one-line pointer instead
-    (see ``TurnDirector._run_turn`` and ``context._RULES_POINTER``).
+    The notice is the turn trigger and carries only per-turn instructions:
+    who moved, whose turn it is, the mandatory ``play_<match>`` call and the
+    behavioral boundaries. The board snapshot, full rules, move syntax,
+    recent moves and threat analysis ride the per-request
+    ``gamehub_context`` block instead (``context.build_game_state_context``),
+    so the persisted session history never accumulates stale boards or
+    private cards. The header ends with a fallback pointer: if the injected
+    block is missing, the model must call ``state_<match>`` before acting.
 
     - ``nori_turn``: the AI's own seat ("the opponent just played X; you are
       up");
@@ -314,17 +303,16 @@ def build_turn_notice(
     - a same-seat continuation (reversi auto-pass) says "you just played X;
       the opponent has no legal move" instead of blaming the opponent.
 
-    ``include_rules``: ``None`` (default) keeps the full rules block for
-    direct callers/tests; the director passes ``False`` after the match's
-    first action notice was delivered (rules are static and notices are
-    persisted verbatim — see ``TurnDirector._run_turn``).
-
     The guidance asks for **one** ``play_<match>`` call in this reply and
     explicitly allows talking in the same reply (KiraAI has no separate
     envelope lane), so the model never invents an extra "say" tool call.
     """
     agent = _agent_name(plugin)
-    send_rules = True if include_rules is None else bool(include_rules)
+    state_tool = state_tool_name(str(getattr(match, "id", "") or ""))
+    fallback_line = (
+        "盘面与规则见本轮 gamehub_context 注入块；"
+        f"若缺失，先调用 {state_tool} 查看局面再行动。"
+    )
 
     if getattr(match, "kind", "") == "doudizhu":
         seats = list(getattr(match, "seats", ()) or ())
@@ -340,19 +328,14 @@ def build_turn_notice(
             else f"你是座位{seat}「{human_name}」"
         )
         return (
-            f"[System: 斗地主行动回合：{players}。{identity}。地主独战、农民同队；"
-            f"叫分前阵营待定。这是你的对局回合：必须在本轮回复里调用 {tool_name} "
-            "工具提交动作——只在正文里写出牌不算数，没有这次调用就等于你没有行动，"
+            f"[System: 斗地主行动回合：{players}。{identity}。"
+            "这是你的对局回合：必须在本轮回复里调用 " + tool_name + " 工具提交动作"
+            "——只在正文里写出牌不算数，没有这次调用就等于你没有行动，"
             "系统会替你随手打一张。"
-            "move 参数的格式：叫分用 bid 1 / bid 2 / bid 3 / pass；"
-            "出牌用牌面字符串（如 3 3 3 4、10 J Q K A、BJ RJ）或 pass。"
-            "一次回复只调用一次；同一次回复里可以聊公开牌型、调侃与局势气氛，"
+            "一次回复只调用一次；同一次回复可以聊公开牌型、调侃与局势气氛，"
             "但禁止透露自己的未出手牌或私有策略。"
-            "不得代替其他席位行动，不得沿用其他局的名字。注意你是玩家，不是解说。]\n\n"
-            + action_context.build_action_notice_context(
-                plugin, match, seat, threat_analysis=False,
-                include_rules=send_rules,
-            )
+            "不得代替其他席位行动，不得沿用其他局的名字。注意你是玩家，不是解说。"
+            f"{fallback_line}]"
         )
 
     seats = list(getattr(match, "seats", ()) or ())
@@ -366,14 +349,6 @@ def build_turn_notice(
         move = str(getattr(log[-1], "move", "") or "")
     mover_name = names[mover] if 0 <= mover < len(names) else "对手"
     seat_label = _label(labels, seat)
-    rival = _rival_seat(match, seat)
-    rival_name = names[rival] if rival is not None and rival < len(names) else "对手"
-    rival_label = _label(labels, rival, "对方颜色")
-    rival_ref = f"座位 {rival} 的" if rival is not None else ""
-    rival_line = (
-        f"本局对手是{rival_ref}「{rival_name}」（执{rival_label}）；"
-        "不要沿用其他对局或陪练的名字称呼对手。"
-    )
     same_seat = mover == seat
     auto_pass = bool((getattr(match, "state", None) or {}).get("passed"))
     continuation = (
@@ -381,7 +356,7 @@ def build_turn_notice(
     )
     identity_line = "注意你是棋手，不是解说。"
     call_line = (
-        f"必须在本轮回复里调用 {tool_name} 工具落子——"
+        f"这是你的对局回合：必须在本轮回复里调用 {tool_name} 工具落子——"
         "只在正文里写出坐标不算数，没有这次调用就等于你没有落子，"
         "系统会替你随手下一手。"
         "一次回复只调用一次；同一次回复可以照常说一两句玩家口吻的短话，"
@@ -395,50 +370,43 @@ def build_turn_notice(
                 f"[System: 对局通知 · {move_count} 手：你（{agent}，代 {human_name} "
                 f"执{seat_label}）刚落子 {move or '一手'}；{continuation}，"
                 "这一手仍由你代下。"
-                f"{rival_line}"
                 f"{call_line}"
                 f"{identity_line}"
-                "不要代替对手落子。]"
+                "不要代替对手落子。"
+                f"{fallback_line}]"
             )
         else:
             head = (
                 f"[System: 对局通知 · {move_count} 手：对手 {mover_name} 刚落子 "
                 f"{move or '一手'}。{human_name} 已把这一局的人类座位委托给你"
                 f"（{agent}），这一手由你代下（执{seat_label}）。"
-                f"{rival_line}"
                 f"{call_line}"
                 f"{identity_line}"
-                "不要代替对手落子。]"
+                "不要代替对手落子。"
+                f"{fallback_line}]"
             )
     elif same_seat:
         head = (
             f"[System: 对局通知 · {move_count} 手：你（{agent}）刚落子 "
             f"{move or '一手'}（执{seat_label}）；{continuation}。"
-            f"{rival_line}"
-            f"这是你的对局回合：{call_line}"
-            f"{identity_line}]"
+            f"{call_line}"
+            f"{identity_line}"
+            f"{fallback_line}]"
         )
     else:
         head = (
             f"[System: 对局通知 · {move_count} 手：{mover_name} 刚落子 "
             f"{move or '一手'}，现在轮到你（{agent}，执{seat_label}）。"
-            f"{rival_line}"
-            f"这是你的对局回合：{call_line}"
-            f"{identity_line}]"
+            f"{call_line}"
+            f"{identity_line}"
+            f"{fallback_line}]"
         )
 
-    body = action_context.build_action_notice_context(
-        plugin, match, seat, threat_analysis=threat_analysis,
-        include_rules=send_rules,
-    )
-    lines = [head, ""]
-    if body:
-        lines.append(body)
-    else:  # the helper is never empty, but never let a turn lose its header
-        lines.append("未提供完整局面：落子前不要凭最近几手或聊天历史猜测盘面。")
     if status.outcome is not None:
-        lines.append(f"对局已结束：{status.result_text or status.outcome.text}")
-    return "\n".join(lines)
+        head += (
+            "\n对局已结束：" + str(status.result_text or status.outcome.text)
+        )
+    return head
 
 
 def build_stage_notice(match: Any, stage: str, *, plugin: Any = None) -> str:
@@ -561,9 +529,6 @@ class TurnDirector:
         # concurrent duplicates, and a failed send can be retried.
         self._stage_seen: dict[tuple[str, str], None] = {}
         self._stage_inflight: set[tuple[str, str]] = set()
-        # Match ids whose first action notice (with the full rules block) was
-        # delivered. Ordered set; bounded so a long-lived process cannot leak.
-        self._rules_sent: dict[str, None] = {}
         # F3: per-session LLM run tracking (request vs last response) so the
         # watchdog can tell "a run is in flight" without any host-side busy
         # API (the core SessionManager exposes none).
@@ -603,6 +568,21 @@ class TurnDirector:
                 self._plugin, grant, match_kind=self._match_kind(grant.match_id)
             )
         return []
+
+    def active_grant_for(self, sid: str) -> "TurnGrant | None":
+        """The live grant announced to ``sid`` (context-block viewer authority).
+
+        Read-only helper for ``context.build_game_state_context``: the granted
+        match gets the full payload and its seat decides the block's viewer.
+        ``None`` when this session holds no live grant.
+        """
+        target = str(sid or "").strip()
+        if not target or self._stopping:
+            return None
+        for grant in list(self._grants.values()):
+            if grant.state == ST_ACTIVE and str(grant.session_id or "") == target:
+                return grant
+        return None
 
     def owns(self, match: Any) -> bool:
         """Whether talk/judge must yield this match to the turn director."""
@@ -1048,13 +1028,15 @@ class TurnDirector:
             self._reservations.discard(match_id)
 
     async def _run_turn(self, grant: TurnGrant, room: Any) -> None:
-        """Build and publish the mandatory action notice (no gate, no cooldown)."""
+        """Build and publish the mandatory action notice (no gate, no cooldown).
+
+        The notice is header-only: rules / board / move syntax ride the
+        per-request ``gamehub_context`` block
+        (``context.build_game_state_context``), so persisted history never
+        accumulates stale boards or private cards. A failed send leaves the
+        grant to the watchdog.
+        """
         match = getattr(room, "match", None)
-        # Rules ride the FIRST delivered action notice of a match only: every
-        # notice is persisted verbatim into the session history, so per-turn
-        # copies would pile up in the rolling context window. A failed send
-        # leaves the match unsent, and the next turn carries the rules again.
-        include_rules = grant.match_id not in self._rules_sent
         try:
             text = build_turn_notice(
                 match,
@@ -1063,7 +1045,6 @@ class TurnDirector:
                 move_count=grant.move_count,
                 tool_name=play_tool_name(grant.match_id),
                 plugin=self._plugin,
-                include_rules=include_rules,
             )
         except Exception:  # noqa: BLE001 - no text → the watchdog still fills
             logger.warning(
@@ -1089,10 +1070,6 @@ class TurnDirector:
             )
             return
         grant.notice_sent_at = time.monotonic()
-        if include_rules:
-            self._rules_sent[grant.match_id] = None
-            if len(self._rules_sent) > 128:  # hygiene: drop the oldest entry
-                self._rules_sent.pop(next(iter(self._rules_sent)), None)
 
     # ------------------------------------------------------------------
     #  play submission (the only backend of the request-scoped play tool)
