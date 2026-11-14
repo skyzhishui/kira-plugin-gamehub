@@ -184,11 +184,11 @@
         "type": "float",
         "name": "Turn Play Timeout (s)",
         "default": 90.0,
-        "hint": "Hard timeout for a notice-driven turn: if authorized but no legal move arrives, the watchdog fills in with the rule bot.",
+        "hint": "Silence-window timeout for a notice-driven turn: visible progress (steps, tools, an open LLM run) keeps extending it; on real silence the host is reminded once, then the watchdog fills with the rule bot.",
         "locales": {
           "zh": {
-            "name": "回合落子超时（秒）",
-            "hint": "行动通知回合的硬超时：授权在途却没有合法落子时，watchdog 以规则 bot 代该座位补一手。覆盖通知投递挂死与管线异常。"
+            "name": "回合静默超时（秒）",
+            "hint": "行动通知回合的静默窗口：有进展（模型步骤/工具/在途请求）会持续续期；真正静默时先提醒一次，仍无动作由规则 bot 代补一手。"
           }
         }
       },
@@ -201,6 +201,54 @@
           "zh": {
             "name": "威胁分析",
             "hint": "行动通知回合是否附带当前盘面的威胁分析。五子棋/黑白棋已改由每局难度控制，该项仅用于其他游戏。"
+          }
+        }
+      },
+      "turn_text_retry_s": {
+        "type": "float",
+        "name": "Text-Only Retry Window (s)",
+        "default": 25.0,
+        "hint": "After a reply that only talks (no play tool call), a corrective nudge shortens the watchdog deadline to this window instead of waiting the full turn timeout.",
+        "locales": {
+          "zh": {
+            "name": "只说不做重试窗口（秒）",
+            "hint": "宿主回复了文字但没调用对局工具时，立刻定向催一次并把倒计时缩短到该窗口，而不是空等整个回合超时。"
+          }
+        }
+      },
+      "turn_text_grace_s": {
+        "type": "float",
+        "name": "Text-Only Grace (s)",
+        "default": 4.0,
+        "hint": "How long to wait after a text-only reply before sending the corrective nudge — lets an accompanying play tool call land first.",
+        "locales": {
+          "zh": {
+            "name": "只说不做宽限（秒）",
+            "hint": "回复完成到发出定向催促之间的宽限：随回复一起发出的 play 调用会在这段时间内落地并自动取消催促。"
+          }
+        }
+      },
+      "turn_fallback_delay_s": {
+        "type": "float",
+        "name": "Fallback Delay (s)",
+        "default": 1.0,
+        "hint": "Extra grace between the silence window elapsing and the rule-bot fill, so a last-moment submission still wins.",
+        "locales": {
+          "zh": {
+            "name": "兜底延迟（秒）",
+            "hint": "静默窗口耗尽到规则 bot 补手之间的最后宽限，压哨提交仍能获胜。"
+          }
+        }
+      },
+      "turn_text_retry_max": {
+        "type": "int",
+        "name": "Text-Only Retry Max",
+        "default": 2,
+        "hint": "Maximum corrective nudges per turn when replies keep coming back text-only; afterwards the normal watchdog deadline applies.",
+        "locales": {
+          "zh": {
+            "name": "只说不做催促上限",
+            "hint": "同一回合最多定向催几次（每次回复都是纯文字时）；用完之后回到普通超时/watchdog 流程。"
           }
         }
       }
@@ -250,7 +298,7 @@
         "type": "boolean",
         "name": "WebUI Match Chat",
         "default": true,
-        "hint": "Show the chat window on the match page so the player can talk to the host agent during a game (notices still work when off).",
+        "hint": "Enable the match-page chat input so the player can talk to the host agent during a game; history stays visible and notices are unaffected when off.",
         "locales": {
           "zh": {
             "name": "对局页聊天窗口",

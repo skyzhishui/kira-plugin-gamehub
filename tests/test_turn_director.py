@@ -1049,3 +1049,265 @@ async def test_failed_notice_delivery_resends_rules_next_turn():
     await _wait(lambda: len(recorder.sent) >= 1)
     assert "规则（完整）" in _notice_text(recorder)
     await director.stop()
+
+
+# ----------------------------------------------------------------------
+#  F1/F2/F3: text-only replies, corrective nudges, in-flight detection
+# ----------------------------------------------------------------------
+
+
+async def test_text_only_reply_gets_corrective_nudge_and_fast_fill():
+    """F1：回复完成却没落子 → 定向催促 + 缩短倒计时 → 快速兜底。
+
+    事件复盘（18:15 斗地主）：flash 级模型把「叫3」写成正文后，旧逻辑
+    只把它当进展续命 90 秒才兜底。现在：grace 后立即催促，deadline 切到
+    turn_text_retry_s，静默则迅速由规则 bot 补手。
+    """
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0,
+        turn_fallback_delay_s=0.05,
+        turn_text_grace_s=0.05,
+        turn_text_retry_s=0.3,
+        turn_text_retry_max=2,
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+    sid = grant.session_id
+
+    # A run that started AFTER the notice completes with plain text only
+    # (no play submission) — the F1 arming precondition.
+    director.note_llm_request(sid)
+    director.note_response(sid)
+    await _wait(lambda: any("刚才只发了文字" in t for _s, t in recorder.sent))
+    corrective = next(t for _s, t in recorder.sent if "刚才只发了文字" in t)
+    assert play_tool_name(room.match.id) in corrective
+    assert "move 参数填" in corrective  # F2: concrete call syntax
+
+    # The shortened deadline fills the turn quickly (the watchdog's sleep
+    # granularity caps wake-up at 5s, so "fast" means << the 30s timeout).
+    await _wait(lambda: director.grant_of(room.match.id).state == "filled", timeout=8.0)
+    assert grant.text_nudges == 1
+    await director.stop()
+
+
+async def test_submitting_during_the_grace_window_cancels_the_corrective_nudge():
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0,
+        turn_fallback_delay_s=0.05,
+        turn_text_grace_s=0.3,  # long enough to submit first
+        turn_text_retry_s=0.4,
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+
+    director.note_llm_request(grant.session_id)
+    director.note_response(grant.session_id)
+    result = await director.submit_play(room.match.id, grant.key, "J9")
+    assert result.ok
+    await asyncio.sleep(0.6)  # past grace + retry window
+    assert not any("刚才只发了文字" in t for _s, t in recorder.sent)
+    await director.stop()
+
+
+async def test_corrective_nudge_is_capped_per_grant():
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=60.0,
+        turn_fallback_delay_s=0.05,
+        turn_text_grace_s=0.02,
+        turn_text_retry_s=50.0,  # long: keep the grant alive across nudges
+        turn_text_retry_max=2,
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+    sid = grant.session_id
+
+    for _ in range(5):
+        director.note_llm_request(sid)
+        director.note_response(sid)
+        await asyncio.sleep(0.08)
+
+    await _wait(lambda: grant.text_nudges >= 1)
+    await asyncio.sleep(0.2)
+    assert grant.text_nudges == 2  # capped at turn_text_retry_max
+    corrective = [t for _s, t in recorder.sent if "刚才只发了文字" in t]
+    assert len(corrective) == 2
+    await director.stop()
+
+
+async def test_llm_request_without_response_marks_the_turn_in_flight():
+    """F3：请求已发出、还没有任何回复 → 视作在途，不判静默。
+
+    旧代码探测核心不存在的 ``session_mgr.is_busy``（永远 False），导致
+    18:17:35 明明有 101s 的 run 在跑却被判静默、催促被提前浪费。
+    """
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+    sid = grant.session_id
+
+    assert not await director._turn_in_flight(grant)
+    director.note_llm_request(sid)
+    assert await director._turn_in_flight(grant), "open run must count as busy"
+    director.note_response(sid)  # answered → no longer in flight per se
+    await asyncio.sleep(0.05)
+    await director.stop()
+
+
+async def test_response_predating_the_notice_never_arms_the_corrective():
+    """F1 守卫：通知还在排队时完成的历史 run 不算「只说不做」。
+
+    事件复盘：开场白 run（101s）完成时，行动通知还没被模型看到——
+    此时催「你刚才只发了文字」既冤枉又浪费预算，还会提前开短窗。
+    """
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05,
+        turn_text_grace_s=0.05, turn_text_retry_s=0.3,
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+    sid = grant.session_id
+
+    # A run that started BEFORE the notice (e.g. the opening-line run).
+    before = grant.notice_sent_at - 10.0
+    director._llm_req[sid] = before
+    director.note_response(sid)
+    await asyncio.sleep(0.3)  # past grace + retry
+    assert not any("刚才只发了文字" in t for _s, t in recorder.sent)
+    assert grant.text_nudges == 0
+    assert grant.short_deadline == 0.0
+    await director.stop()
+
+
+async def test_tool_activity_during_grace_stands_the_corrective_down():
+    """F1 守卫：多步回合（工具在跑）不是「只说不做」，不消耗预算。"""
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05,
+        turn_text_grace_s=0.3, turn_text_retry_s=0.4,
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+    sid = grant.session_id
+
+    director.note_llm_request(sid)
+    director.note_response(sid)  # step 1 done (say a state_ call, no play yet)
+    await asyncio.sleep(0.05)  # enter the grace window
+    director.note_tool_progress(sid)  # the tool result lands mid-grace
+    await asyncio.sleep(0.5)  # past grace + retry
+    assert not any("刚才只发了文字" in t for _s, t in recorder.sent)
+    assert grant.text_nudges == 0
+    await director.stop()
+
+
+async def test_open_run_past_short_deadline_gets_bounded_extensions_then_fills():
+    """F2：短窗耗尽但 run 仍在跑 → 分段续命到 short_ceiling，然后兜底。
+
+    事件里的故障切换模型 25 token 也要 100s：一刀切在 25s 兜底会把
+    模型正确的 play 弹掉；但不设上限又会被挂死的 run 楔死。折中：
+    open run 每次只买一个 retry 窗口，天花板是纠正时刻+完整静默窗。
+    """
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=1.2,
+        turn_fallback_delay_s=0.05,
+        turn_text_grace_s=0.05,
+        turn_text_retry_s=0.6,
+        turn_text_retry_max=1,
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+    sid = grant.session_id
+
+    director.note_llm_request(sid)
+    director.note_response(sid)
+    await _wait(lambda: grant.text_nudges == 1)  # corrective sent
+    ceiling = grant.short_ceiling
+
+    # The corrective triggers a NEW slow run that never answers.
+    director.note_llm_request(sid)
+    await _wait(
+        lambda: director.grant_of(room.match.id).state == "filled",
+        timeout=ceiling - time.monotonic() + 5.0,
+    )
+    # The fill happened no earlier than the short deadline and no later than
+    # the ceiling (bounded extensions, then the rule bot takes over).
+    assert grant.short_deadline > 0
+    await director.stop()
+
+
+async def test_dead_run_mark_expires_and_cannot_wedge_the_turn():
+    """F3 TTL：只发过 request、永不回复的死 run 标记 5 分钟后失效。"""
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+    sid = grant.session_id
+
+    director._llm_req[sid] = time.monotonic() - 301.0  # older than the TTL
+    assert not await director._turn_in_flight(grant)
+    director._llm_req[sid] = time.monotonic()  # fresh mark counts
+    assert await director._turn_in_flight(grant)
+    await director.stop()
+
+
+async def test_shared_session_nudges_only_the_grant_whose_tools_were_offered():
+    """F4 守卫：同一会话多 grant 时，只有拿到 play 工具的 grant 会被催。
+
+    ``tools_for`` 每个请求只暴露一个 grant 的工具——另一个 grant 的
+    模型根本无法提交，催它「只说不做」既错误又烧预算。
+    """
+    rooms, plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05,
+        turn_text_grace_s=0.05, turn_text_retry_s=0.5,
+    )
+    plugin.target_override = "shared-sid"  # both matches target one session
+    room_a, _s, _t = await _create(rooms, actor="u1", mode_options=dict(NORI))
+    room_b, _s, _t = await _create(rooms, actor="u2", mode_options=dict(NORI))
+    await room_a.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await room_b.apply(0, {"type": "move", "move": "J9"}, client_version=1)
+    await _wait(lambda: len(director._grants) >= 2)
+    await _wait(lambda: len(recorder.sent) >= 2)
+    grant_a = director.grant_of(room_a.match.id)
+    grant_b = director.grant_of(room_b.match.id)
+    assert grant_a is not None and grant_b is not None
+    sid = grant_a.session_id
+    assert sid == grant_b.session_id == "shared-sid"
+
+    # The request layer offered grant A's tools for this session.
+    director.tools_for(sid)
+    offered = director._tools_grant.get(sid)
+    nudged = grant_a if offered == grant_a.match_id else grant_b
+    other = grant_b if nudged is grant_a else grant_a
+
+    director.note_llm_request(sid)
+    director.note_response(sid)
+    await _wait(lambda: nudged.text_task is not None and nudged.text_task.done())
+    await asyncio.sleep(0.2)
+    assert nudged.text_nudges == 1, "the offered grant gets the corrective"
+    assert other.text_nudges == 0, "the grant without tools is never blamed"
+    await director.stop()

@@ -115,6 +115,9 @@ class GamehubPlugin(BasePlugin):
         self.settings = Settings(cfg)
         self.data_dir = None
         self.runtime = None
+        # Set only after a successful runtime start; the hooks below read it
+        # via getattr, so None (runtime failed to start) degrades safely.
+        self._director = None
         self._rooms = None
         self._api = None
         self._adapter_ready = False
@@ -191,15 +194,25 @@ class GamehubPlugin(BasePlugin):
 
     async def _start_runtime(self) -> None:
         """Assemble rooms/talk/judge/director; fail-soft like the adapter."""
+        runtime = None
         try:
             from .host.runtime import GamehubRuntime
 
-            self.runtime = GamehubRuntime(self)
-            await self.runtime.start()
-            self._rooms = self.runtime.rooms
+            runtime = GamehubRuntime(self)
+            await runtime.start()
+            self.runtime = runtime
+            self._rooms = runtime.rooms
         except Exception as e:  # noqa: BLE001 - a broken runtime must not block boot
             self.runtime = None
             self._rooms = None
+            if runtime is not None:
+                # A partially started runtime may already hold the SQLite
+                # engine; dispose it so nothing keeps a second writer away
+                # (the WebUI chat endpoints lazily open their own store).
+                try:
+                    await runtime.stop()
+                except Exception:  # noqa: BLE001 - cleanup best effort
+                    pass
             logger.error(f"{PLUGIN_ID}: runtime start failed: {e}", exc_info=True)
 
     async def terminate(self) -> None:
@@ -284,21 +297,35 @@ class GamehubPlugin(BasePlugin):
         from .host.prompt import inject_into_request
 
         inject_into_request(self, event, request, tag_set)
+        # F3: the run is now open for this session; until its first response
+        # lands, the turn watchdog must treat the session as busy.
+        sid = str(getattr(event, "sid", "") or "")
+        if sid:
+            director = self._director
+            marker = getattr(director, "note_llm_request", None)
+            if callable(marker):
+                marker(sid)
 
     @on.llm_response(priority=Priority.LOW)
     async def note_turn_llm_response(self, event, response=None, *args, **kwargs):
         """A model step finished: the notice turn is making real progress.
 
-        This is the per-step signal the turn watchdog needs — ``ON_STEP_RESULT``
-        only fires after a text delivery, so a tool-only step would otherwise
-        look like silence.
+        ``ON_STEP_RESULT`` only fires after a text delivery, so a tool-only
+        step would otherwise look like silence. A *completed* response also
+        feeds F1: if the reply came back text-only, the director sends a
+        corrective nudge with a shortened deadline instead of idling out the
+        full silence window.
         """
         director = self._director
-        note = getattr(director, "note_progress", None)
-        if not callable(note):
-            return
         sid = str(getattr(event, "sid", "") or "")
-        if sid:
+        if not sid:
+            return
+        responder = getattr(director, "note_response", None)
+        if callable(responder):
+            responder(sid)
+            return
+        note = getattr(director, "note_progress", None)
+        if callable(note):
             note(sid)
 
     @on.step_result(priority=Priority.LOW)
@@ -319,14 +346,22 @@ class GamehubPlugin(BasePlugin):
 
     @on.tool_result(priority=Priority.LOW)
     async def note_turn_tool_progress(self, event, *args, **kwargs):
-        """Same refresh for the tool stage (a running tool is progress)."""
+        """Tool stage: real tool activity (progress + the F1 arming guard).
+
+        Marks both channels: the silence window (a running tool is progress)
+        and the tool-activity timestamp that stands a pending corrective
+        nudge down (a mid multi-step turn is not "only talking").
+        """
         director = self._director
-        note = getattr(director, "note_progress", None)
-        if not callable(note):
-            return
         sid = str(getattr(event, "sid", "") or "")
-        if sid:
+        if not sid:
+            return
+        note = getattr(director, "note_progress", None)
+        if callable(note):
             note(sid)
+        tool_note = getattr(director, "note_tool_progress", None)
+        if callable(tool_note):
+            tool_note(sid)
 
     # ------------------------------------------------------------------
     #  WebUI
@@ -499,7 +534,7 @@ class GamehubPlugin(BasePlugin):
 
     @register.ws(path="/matches/{match_id}/ws")
     async def match_ws(self, websocket):
-        """Live match channel (seat token in ``?t=``, host JWT in ``?token=``)."""
+        """Live match channel. The handler only reads the seat token ``?t=``; the host JWT travels in ``?token=`` and is checked by the host framework during the WS handshake (``auth=True``)."""
         from .host.web import serve_ws
 
         match_id = str(websocket.path_params.get("match_id") or "")

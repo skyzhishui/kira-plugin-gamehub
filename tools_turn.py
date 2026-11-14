@@ -3,7 +3,8 @@
 KiraAI has no ``ctx.session_tools``; a turn grant is expressed as a
 ``BaseTool`` pair added to ``req.tool_set`` for one request only
 (``main.py``'s ``@on.llm_request`` handler calls
-``req.tool_set.add(*build_turn_tools(plugin, grant))``).
+``director.tools_for(sid)``, which builds the pair for the session's
+active grant).
 
 - ``play_<match_id>`` — the actual move of this turn. Bound to one grant
   (match / seat / grant key), never registered globally, never reused across
@@ -298,8 +299,8 @@ class PlayTool(BaseTool):
         director = getattr(self._plugin, "_director", None)
         submit = getattr(director, "submit_play", None)
         if callable(submit):
-            # KiraAI has no host-chat panel on the match page, so the optional
-            # one-line remark is persisted with the move (atomic: only a legal
+            # The one-line remark rides the same atomic write as the move so
+            # the seat bubble and the match page can never disagree (atomic: only a legal
             # move writes it) and shows up as the opponent bubble.
             if say:
                 result = await submit(match_id, grant_key, move, say, persist_say=True)

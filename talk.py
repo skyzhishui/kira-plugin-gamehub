@@ -57,7 +57,6 @@ if TYPE_CHECKING:  # pragma: no cover - type hints only
 DEFAULT_LANE_HINT = "只用一两句玩家口吻的话回应，别做别的事。"
 # Reserved notice sender id: keeps table-talk notices distinguishable from real
 # users if a renderer surfaces the source id.
-_NOTICE_USER_ID = "nori_notice"
 _QUEUE_MAX = 4
 _SEEN_TTL_S = 600.0
 _SEEN_MAX = 256

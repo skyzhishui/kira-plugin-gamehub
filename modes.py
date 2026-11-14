@@ -181,7 +181,6 @@ def normalize_mode_options(
     has_bot = _has_kind(seat_list, "bot")
     has_ai = _has_kind(seat_list, "ai")
     source = raw if isinstance(raw, dict) and raw else None
-    legacy = source is None
     # S2（turn 驱动/行动通知回合）按能力声明生效，不写死具体棋种。
     s2_kind = _supports_turn_driver(kind)
 

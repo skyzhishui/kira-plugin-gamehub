@@ -358,7 +358,7 @@ class NoticeJudge:
         match = event.get("match") or getattr(room, "match", None)
         if match is None:
             return Judgment(False, reason="no_match")
-        mode = str(_cfg(self._plugin, "notice_judge_mode", "key") or "key")
+        mode = str(_cfg(self._plugin, "notice_judge_mode", "off") or "key")
         if getattr(self._plugin, "stopping", False):
             return Judgment(False, reason="stopping")
         if mode == "off":

@@ -15,8 +15,9 @@ What changed from nori:
 - **Notices go through ``host.notices.send_notice``** (``ctx.publish_notice``),
   so there is no dispatcher to wait for: the notice is published and the host
   chat pipeline replies on its own.
-- **Identity** comes from ``plugin.settings.agent_name`` (default ``nori``);
-  no host bot nickname is required.
+- **Identity**: the host persona name wins (``plugin.host_agent_name``, read
+  from the active persona by the runtime); ``plugin.settings.agent_name``
+  (default ``nori``, the game_agent identifier) is only the fallback.
 
 Discipline (unchanged):
 
@@ -31,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -88,6 +88,9 @@ DELEGATED = "delegated_human"
 # Retention of resolved grants in memory (no scheduler; normal path replaces
 # them on the next event).
 _GRANT_RETENTION_S = 300.0
+# A request mark older than this without any response counts as a dead run
+# (failed/aborted) and stops marking the session busy (F3 TTL).
+_LLM_RUN_TTL_S = 300.0
 _STAGE_SEEN_LIMIT = 2048
 
 DEFAULT_AGENT_NAME = "nori"
@@ -137,10 +140,17 @@ class TurnGrant:
     # Synthetic author of the notice turn; matches ``tools.NOTICE_ACTOR``.
     actor: str = NOTICE_ACTOR
     move_count: int = 0
-    # Monotonic hard deadline (``turn_play_timeout_s``).
+    # Monotonic silence deadline (``turn_play_timeout_s`` window; extended
+    # by host progress, capped in F1 short-window mode).
     deadline: float = 0.0
     # Last observed host-side progress (step/tool results); 0 = never.
     last_progress: float = 0.0
+    # Last observed *tool* result for the session; distinguishes a mid
+    # multi-step turn from a finished text-only reply (F1 arming guard).
+    last_tool_progress: float = 0.0
+    # When the action notice was delivered (monotonic); responses belonging
+    # to runs started before this never saw the notice (F1 arming guard).
+    notice_sent_at: float = 0.0
     reason: str = ""
     created: float = field(default_factory=time.monotonic)
     state: str = ST_ACTIVE
@@ -149,13 +159,16 @@ class TurnGrant:
     notice_session_id: str = ""
     # One explicit "you have not acted yet" reminder before the bot fill.
     nudged: bool = False
+    # F1: corrective nudges for text-only replies (capped, shortened window).
+    text_nudges: int = 0
+    text_task: asyncio.Task[Any] | None = None
+    # F1 short-window mode: once a corrective nudge fired, progress signals
+    # can no longer push the deadline past ``short_deadline`` — only an open
+    # LLM run still can, and never past ``short_ceiling``. 0 = normal mode.
+    short_deadline: float = 0.0
+    short_ceiling: float = 0.0
     turn_task: asyncio.Task[Any] | None = None
     watchdog: asyncio.Task[Any] | None = None
-
-    @property
-    def expires_at(self) -> float:
-        """nori spelling kept for readers that still use it."""
-        return self.deadline
 
 
 def _cfg(plugin: Any, name: str, default: Any) -> Any:
@@ -288,7 +301,11 @@ def build_turn_notice(
     threat_analysis: bool | None = None,
     include_rules: bool | None = None,
 ) -> str:
-    """Action-turn notice: rules + full board + recent moves, never the plan.
+    """Action-turn notice: full board + recent moves, never the plan.
+
+    The full rules block rides the match's FIRST delivered action notice
+    only (``include_rules``); later turns carry a one-line pointer instead
+    (see ``TurnDirector._run_turn`` and ``context._RULES_POINTER``).
 
     - ``nori_turn``: the AI's own seat ("the opponent just played X; you are
       up");
@@ -460,23 +477,67 @@ def build_stage_notice(match: Any, stage: str, *, plugin: Any = None) -> str:
     )
 
 
+def _example_move(match: Any, seat: int) -> str:
+    """A legal example move for the nudge's tool-call syntax line (F2).
+
+    Prefers the rule bot's own move for the current state (always legal);
+    falls back to a phase-appropriate constant. The nudge labels it as a
+    format example, so the model is told *how* to call, not *what* to play.
+    """
+    kind = str(getattr(match, "kind", "") or "")
+    state = getattr(match, "state", None)
+    try:
+        module = games.get(kind)
+    except Exception:  # noqa: BLE001 - the example is cosmetic
+        module = None
+    if module is not None and state is not None:
+        try:
+            move = module.bot(state, seat)
+        except Exception:  # noqa: BLE001
+            move = ""
+        if move:
+            return str(move)
+    if kind == "doudizhu":
+        phase = str((state or {}).get("phase") or "") if isinstance(state, dict) else ""
+        return "pass" if phase == "play" else "bid 1"
+    return "H8"
+
+
 def build_nudge_notice(
-    match: Any, *, seat: int, tool_name: str, plugin: Any = None
+    match: Any,
+    *,
+    seat: int,
+    tool_name: str,
+    plugin: Any = None,
+    text_only: bool = False,
 ) -> str:
-    """Short reminder for a turn the host answered without acting.
+    """Short reminder for a turn the host answered without acting (F2).
 
     The model sometimes replies to the action notice with plain text (e.g.
-    "10，继续顶。") instead of calling ``play_<match>``. The grant is still
-    live, so one explicit reminder is far better than silently letting the
-    rule bot take the move — which is what players perceived as "the opponent
-    timed out".
+    "这手牌有王有对子，我抢地主。") instead of calling ``play_<match>`` — the
+    decision is right, only the format is wrong, which players perceived as
+    "the opponent timed out". The reminder therefore spells out the exact
+    call syntax with a legal example move, so even a failover-tier model
+    cannot misread *how* to submit.
+
+    ``text_only=True`` is the immediate corrective variant (F1): sent right
+    after a completed reply that did not submit, with a shortened deadline.
     """
     agent = _agent_name(plugin)
     labels = _seat_labels(match)
     seat_label = _label(labels, seat)
+    example = _example_move(match, seat)
+    opening = (
+        f"[System: 你（{agent}，座位{seat}，{seat_label}）刚才只发了文字，"
+        "没有调用工具提交动作。"
+        if text_only
+        else f"[System: 你（{agent}，座位{seat}，{seat_label}）还没有提交动作。"
+    )
     return (
-        f"[System: 你（{agent}，座位{seat}，{seat_label}）还没有提交动作。"
-        f"请立刻在这一次回复里调用 {tool_name} 工具提交，move 格式见上一条通知；"
+        opening
+        + f"请立刻在这一次回复里调用 {tool_name} 工具提交，"
+        f'调用格式示例：move 参数填 "{example}"'
+        "（示例只展示格式，具体动作请按你的手牌/当前盘面决定）。"
         "只在正文里写结果不算行动。如果这次仍不调用，系统会替你随手出一手。]"
     )
 
@@ -503,6 +564,14 @@ class TurnDirector:
         # Match ids whose first action notice (with the full rules block) was
         # delivered. Ordered set; bounded so a long-lived process cannot leak.
         self._rules_sent: dict[str, None] = {}
+        # F3: per-session LLM run tracking (request vs last response) so the
+        # watchdog can tell "a run is in flight" without any host-side busy
+        # API (the core SessionManager exposes none).
+        self._llm_req: dict[str, float] = {}
+        self._llm_resp: dict[str, float] = {}
+        # F4: sid -> match_id of the grant whose play tools were offered on
+        # the last request for that session (only that grant can be nudged).
+        self._tools_grant: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     #  Queries
@@ -515,6 +584,9 @@ class TurnDirector:
 
         Returns ``[]`` when this session holds no live grant, which is also how
         a grant is revoked: the tools are simply not added to the next request.
+        When several grants share a session only the first one's tools are
+        offered — the mapping is remembered (``_tools_grant``) so F1 corrective
+        nudges never blame a grant whose tool the model cannot even call.
         """
         target = str(sid or "").strip()
         if not target or self._stopping:
@@ -524,6 +596,9 @@ class TurnDirector:
                 continue
             if str(grant.session_id or "") != target:
                 continue
+            self._tools_grant[target] = grant.match_id
+            if len(self._tools_grant) > 64:  # hygiene, same fail-open idea
+                self._tools_grant.pop(next(iter(self._tools_grant)), None)
             return build_turn_tools(
                 self._plugin, grant, match_kind=self._match_kind(grant.match_id)
             )
@@ -596,8 +671,180 @@ class TurnDirector:
             if grant.state != ST_ACTIVE or str(grant.session_id or "") != target:
                 continue
             timeout_s = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
-            grant.deadline = max(grant.deadline, now + max(0.5, timeout_s))
+            candidate = now + max(0.5, timeout_s)
+            if grant.short_deadline > 0:
+                # F1 short-window mode: progress may still re-arm the watchdog
+                # (steps keep arriving), but never past the corrective nudge's
+                # shortened deadline — otherwise a text-only reply would
+                # re-earn the full silence window and the fast fill is lost.
+                candidate = min(candidate, grant.short_deadline)
+            grant.deadline = max(grant.deadline, candidate)
             grant.last_progress = now
+
+    def note_llm_request(self, sid: str) -> None:
+        """Mark an LLM run as started for ``sid`` (F3 in-flight signal).
+
+        Paired with :meth:`note_response`; between the two, the watchdog
+        treats the session as busy (the model has not even answered yet, so
+        "silence" proves nothing about the turn).
+        """
+        target = str(sid or "").strip()
+        if not target:
+            return
+        self._llm_req[target] = time.monotonic()
+        self._prune_llm_marks()
+
+    def note_tool_progress(self, sid: str) -> None:
+        """Record real tool activity (``@on.tool_result``) for ``sid``.
+
+        Distinguished from text-delivery progress: a tool result between two
+        model steps proves the model is mid multi-step turn, so the
+        corrective-nudge arming from the previous response must stand down
+        (see :meth:`_text_nudge`).
+        """
+        target = str(sid or "").strip()
+        if not target or self._stopping:
+            return
+        now = time.monotonic()
+        for grant in list(self._grants.values()):
+            if grant.state != ST_ACTIVE or str(grant.session_id or "") != target:
+                continue
+            grant.last_tool_progress = now
+
+    def note_response(self, sid: str) -> None:
+        """A full LLM response completed for ``sid`` (F1 entry point).
+
+        First the ordinary progress bookkeeping (the host demonstrably
+        replied, so the watchdog must not fire mid-flight), then — when the
+        turn grant is still unresolved a short grace later — a corrective
+        nudge with a shortened deadline. The grace window lets a response
+        that *contains* the ``play_<match>`` call submit first (tool results
+        land after the response hook), which cancels the nudge naturally.
+
+        Arming is conservative (a false "you only talked" nudge wastes the
+        budget and can preempt a slow-but-correct model):
+
+        - the completed run must have *started after* the action notice was
+          published — otherwise the response belongs to some earlier message
+          (the incident's opening-line run) and the model has not even seen
+          the notice yet;
+        - when several grants share the session, only the grant whose
+          ``play`` tool was actually offered on the last request can be
+          nudged — the others cannot submit at all (``tools_for`` exposes one
+          grant's tools per request).
+        """
+        target = str(sid or "").strip()
+        if not target or self._stopping:
+            return
+        now = time.monotonic()
+        self._llm_resp[target] = now
+        self._prune_llm_marks()
+        self.note_progress(target)
+        cap = int(_cfg(self._plugin, "turn_text_retry_max", 2))
+        run_started_after_notice = self._llm_req.get(target, 0.0)
+        for grant in list(self._grants.values()):
+            if grant.state != ST_ACTIVE or str(grant.session_id or "") != target:
+                continue
+            if not grant.notice_sent or grant.text_nudges >= max(0, cap):
+                continue
+            if run_started_after_notice <= grant.notice_sent_at:
+                continue  # the response predates the notice's own run
+            if self._tools_grant.get(target, grant.match_id) != grant.match_id:
+                continue  # this grant's play tool was not offered
+            if grant.text_task is not None and not grant.text_task.done():
+                continue  # one corrective in flight is enough
+            grant.text_task = asyncio.create_task(
+                self._text_nudge(grant),
+                name=f"gamehub-turn-textnudge-{grant.match_id}",
+            )
+            self._tasks.add(grant.text_task)
+            grant.text_task.add_done_callback(self._tasks.discard)
+
+    def _prune_llm_marks(self, *, keep: int = 64) -> None:
+        """Bound the request/response maps (long-lived process hygiene).
+
+        Evicting a live mark fails *open* (the run reads as idle, so the
+        watchdog fills instead of wedging) — the safe direction. ``keep``
+        comfortably exceeds the realistic concurrent-session count.
+        """
+        if len(self._llm_req) <= keep and len(self._llm_resp) <= keep:
+            return
+        for marks in (self._llm_req, self._llm_resp):
+            if len(marks) <= keep:
+                continue
+            for sid in sorted(marks, key=marks.get)[: len(marks) - keep]:
+                marks.pop(sid, None)
+
+    async def _text_nudge(self, grant: TurnGrant) -> None:
+        """Corrective nudge after a text-only reply (F1); shortens the window.
+
+        Aborts (without consuming the budget) when the turn resolved during
+        the grace period, the grant went stale, real tool work started (the
+        model is mid multi-step turn, not "only talking"), or a newer
+        turn-level run opened (e.g. the model already answering the notice).
+        On send it cuts ``grant.deadline`` down to ``turn_text_retry_s`` so a
+        still-silent model is filled quickly instead of waiting out the full
+        turn timeout; an open run can still extend afterwards, but never
+        past ``short_ceiling`` (corrective time + full silence window).
+        """
+        spawned_at = time.monotonic()
+        sid = str(grant.session_id or "")
+        grace = max(0.0, float(_cfg(self._plugin, "turn_text_grace_s", 4.0)))
+        if grace:
+            await asyncio.sleep(grace)
+        if self._stopping or not self._is_current(grant):
+            return
+        if grant.last_tool_progress > spawned_at:
+            return  # real tool work since the reply: a multi-step turn
+        if self._llm_req.get(sid, 0.0) > spawned_at:
+            return  # a newer run opened; its own response re-arms if needed
+        rooms = _rooms_of(self._plugin)
+        getter = getattr(rooms, "get_room", None)
+        room = getter(grant.match_id) if callable(getter) else None
+        match = getattr(room, "match", None)
+        if match is None:
+            return
+        try:
+            text = build_nudge_notice(
+                match,
+                seat=grant.seat,
+                tool_name=play_tool_name(grant.match_id),
+                plugin=self._plugin,
+                text_only=True,
+            )
+        except Exception:  # noqa: BLE001 - a failed nudge must not block the fill
+            logger.warning(
+                "turn director: corrective nudge build failed (%s seat %s)",
+                grant.match_id, grant.seat, exc_info=True,
+            )
+            return
+        if not await send_notice(self._plugin, grant.session_id, text):
+            return
+        if not self._is_current(grant):  # resolved while the notice was in flight
+            return
+        grant.text_nudges += 1
+        # NOT setting last_progress here on purpose: a fresh last_progress
+        # would make _turn_in_flight true for a full timeout window and the
+        # watchdog would extend right past the shortened deadline. The nudge
+        # itself triggers a new run, which registers progress on its own
+        # (note_llm_request / note_response) if the model actually answers.
+        # ``nudged`` is consumed too: this IS the grant's one reminder, so the
+        # shortened deadline must lead straight to the fill, not to a second
+        # generic reminder that re-arms the full window.
+        grant.nudged = True
+        now = time.monotonic()
+        retry_s = max(0.5, float(_cfg(self._plugin, "turn_text_retry_s", 25.0)))
+        timeout_s = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
+        grant.short_deadline = now + retry_s
+        grant.short_ceiling = now + max(retry_s, timeout_s)
+        grant.deadline = min(grant.deadline, grant.short_deadline)
+        logger.info(
+            "turn director: text-only reply, corrective nudge sent (%s seat %s, %s/%s)",
+            grant.match_id,
+            grant.seat,
+            grant.text_nudges,
+            int(_cfg(self._plugin, "turn_text_retry_max", 2)),
+        )
 
     async def _handle_event(self, room: Any, event: dict[str, Any]) -> None:
         match = event.get("match") or getattr(room, "match", None)
@@ -841,6 +1088,7 @@ class TurnDirector:
                 grant.match_id, grant.session_id,
             )
             return
+        grant.notice_sent_at = time.monotonic()
         if include_rules:
             self._rules_sent[grant.match_id] = None
             if len(self._rules_sent) > 128:  # hygiene: drop the oldest entry
@@ -1086,63 +1334,97 @@ class TurnDirector:
         The deadline is a **silence timeout**, not a hard cap: a turn that is
         visibly progressing (the host is still streaming, tools are running)
         is not a stalled turn and must never be overwritten by a bot move.
+        Iterative (not recursive) so a long match cannot grow the stack.
         """
         try:
-            await self._wait_deadline(grant)
-            if not self._is_current(grant):
-                return
-            if self._stopping or getattr(self._plugin, "stopping", False):
-                return
-            if await self._turn_in_flight(grant):
-                # Progress observed: extend the silence window and keep waiting.
-                grant.deadline = time.monotonic() + float(
-                    _cfg(self._plugin, "turn_play_timeout_s", 90.0)
-                )
+            while True:
+                await self._wait_deadline(grant)
+                if not self._is_current(grant):
+                    return
+                if self._stopping or getattr(self._plugin, "stopping", False):
+                    return
+                in_flight = await self._turn_in_flight(grant)
+                if in_flight:
+                    # Progress observed: extend the silence window and keep
+                    # waiting. In F1 short-window mode the extension is capped
+                    # at the corrective nudge's ``short_deadline``; past it,
+                    # only an LLM run that is still open buys more time — in
+                    # ``retry_s`` steps up to ``short_ceiling`` — because the
+                    # model may genuinely be mid-answer to the corrective
+                    # (the incident's failover tier took 100s for 25 tokens).
+                    # Real silence (no open run) fills right at short_deadline.
+                    now = time.monotonic()
+                    window = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
+                    candidate = now + max(0.5, window)
+                    exhausted = False
+                    if grant.short_deadline > 0:
+                        candidate = min(candidate, grant.short_deadline)
+                        if candidate <= now + 0.05:
+                            # Past the short deadline: only a still-open run
+                            # (the strong signal — see _turn_in_flight) can
+                            # buy bounded extra time for a slow answer.
+                            retry_s = max(
+                                0.5,
+                                float(_cfg(self._plugin, "turn_text_retry_s", 25.0)),
+                            )
+                            candidate = min(now + retry_s, grant.short_ceiling)
+                            exhausted = candidate <= now + 0.05
+                    if not exhausted and candidate > now + 0.05:
+                        grant.deadline = max(grant.deadline, candidate)
+                        logger.info(
+                            "turn director: turn still in flight, extending "
+                            "(%s seat %s)",
+                            grant.match_id, grant.seat,
+                        )
+                        continue
+                    logger.info(
+                        "turn director: short window exhausted despite activity "
+                        "(%s seat %s)",
+                        grant.match_id, grant.seat,
+                    )
+                snap = await room.turn_snapshot(grant.seat)
+                if not self._is_current(grant):
+                    return
+                if not snap.get("active") or int(snap.get("move_count", -1)) != grant.move_count:
+                    self._finish(grant, ST_STALE, "watchdog_stale")
+                    return
+                match = snap.get("match")
+                module = _module_of(str(getattr(match, "kind", "") or ""))
+                if module is None:
+                    self._finish(grant, ST_CANCELLED, "no_module")
+                    return
+                # The host went quiet without acting: ask once, explicitly,
+                # before the rule bot takes the move. Bounded to one reminder
+                # per grant (the F1 corrective consumes it too).
+                if not grant.nudged and await self._nudge(grant, match):
+                    grant.nudged = True
+                    window = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
+                    grant.deadline = time.monotonic() + window
+                    logger.info(
+                        "turn director: turn stalled without a move, reminded "
+                        "(%s seat %s)",
+                        grant.match_id, grant.seat,
+                    )
+                    continue
+                if type(module).bot is GameModule.bot:
+                    self._finish(grant, ST_CANCELLED, "no_bot_module")
+                    await self._recover_without_bot(room, grant)
+                    return
+                move = module.bot(getattr(match, "state", None), grant.seat)
+                if not move:
+                    self._finish(grant, ST_CANCELLED, "no_bot_move")
+                    await self._recover_without_bot(room, grant)
+                    return
+                applied = await self._fill(room, grant, match, str(move))
+                if applied is None:
+                    self._finish(grant, ST_STALE, "watchdog_lost_race")
+                    return
+                self._finish(grant, ST_FILLED, "watchdog_fallback")
                 logger.info(
-                    "turn director: turn still in flight, extending (%s seat %s)",
-                    grant.match_id, grant.seat,
+                    "turn director: watchdog filled the turn (%s seat %s ← %s)",
+                    grant.match_id, grant.seat, move,
                 )
-                return await self._watchdog(grant, room)
-            snap = await room.turn_snapshot(grant.seat)
-            if not self._is_current(grant):
                 return
-            if not snap.get("active") or int(snap.get("move_count", -1)) != grant.move_count:
-                self._finish(grant, ST_STALE, "watchdog_stale")
-                return
-            match = snap.get("match")
-            module = _module_of(str(getattr(match, "kind", "") or ""))
-            if module is None:
-                self._finish(grant, ST_CANCELLED, "no_module")
-                return
-            # The host went quiet without acting: ask once, explicitly, before
-            # the rule bot takes the move. Bounded to one reminder per grant.
-            if not grant.nudged and await self._nudge(grant, match):
-                grant.nudged = True
-                window = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
-                grant.deadline = time.monotonic() + window
-                logger.info(
-                    "turn director: turn stalled without a move, reminded (%s seat %s)",
-                    grant.match_id, grant.seat,
-                )
-                return await self._watchdog(grant, room)
-            if type(module).bot is GameModule.bot:
-                self._finish(grant, ST_CANCELLED, "no_bot_module")
-                await self._recover_without_bot(room, grant)
-                return
-            move = module.bot(getattr(match, "state", None), grant.seat)
-            if not move:
-                self._finish(grant, ST_CANCELLED, "no_bot_move")
-                await self._recover_without_bot(room, grant)
-                return
-            applied = await self._fill(room, grant, match, str(move))
-            if applied is None:
-                self._finish(grant, ST_STALE, "watchdog_lost_race")
-                return
-            self._finish(grant, ST_FILLED, "watchdog_fallback")
-            logger.info(
-                "turn director: watchdog filled the turn (%s seat %s ← %s)",
-                grant.match_id, grant.seat, move,
-            )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a failed fill must not stall the match
@@ -1160,34 +1442,42 @@ class TurnDirector:
 
         - ``grant.last_progress``: a host step/tool result was observed within
           the silence window (``note_progress`` from the plugin's hooks);
-        - the host pipeline still reports the notice turn as running
-          (``ctx.session_mgr.is_busy(sid)`` when the host exposes it).
+        - an LLM run for the grant's session started but has not answered
+          yet (``note_llm_request`` newer than ``note_response``). This is the
+          plugin's own in-flight signal (F3): the core SessionManager exposes
+          no ``is_busy`` capability, so an earlier revision probed one that
+          never existed and silently always returned "idle". A run mark older
+          than ``_LLM_RUN_TTL_S`` (failed run that never answered) is
+          ignored — otherwise one dead run would wedge the turn forever.
+
+        Past the F1 short deadline (``short_deadline``), only the open-run
+        signal counts: text deliveries keep ticking ``last_progress``, but a
+        reply that keeps not submitting must not keep re-arming the watchdog.
+        The watchdog turns that open-run signal into bounded extensions up to
+        ``short_ceiling`` — past the ceiling the fill proceeds even mid-run
+        (a late correct submission is rejected as stale by the room layer,
+        which is the documented race-safe outcome).
 
         A turn that is visibly progressing must never be overwritten by a bot
-        move; only real silence (no step, no tool, no busy flag) counts.
+        move; only real silence (no step, no tool, no open run) counts.
         """
         window = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
-        last = float(getattr(grant, "last_progress", 0.0) or 0.0)
-        if last and time.monotonic() - last < window:
-            return True
         sid = str(getattr(grant, "session_id", "") or "")
-        if not sid:
+        requested = self._llm_req.get(sid)
+        answered = self._llm_resp.get(sid)
+        open_run = (
+            requested is not None
+            and (answered is None or requested > answered)
+            and time.monotonic() - requested < _LLM_RUN_TTL_S
+        )
+        if open_run:
+            return True
+        last = float(getattr(grant, "last_progress", 0.0) or 0.0)
+        if not last:
             return False
-        ctx = getattr(self._plugin, "ctx", None)
-        if ctx is None:
-            return False
-        manager = getattr(ctx, "session_mgr", None)
-        checker = getattr(manager, "is_busy", None)
-        if callable(checker):
-            try:
-                busy = checker(sid)
-                if inspect.isawaitable(busy):
-                    busy = await busy
-            except Exception:  # noqa: BLE001 - optional host capability
-                busy = False
-            if busy is True:
-                return True
-        return False
+        if grant.short_deadline > 0 and time.monotonic() >= grant.short_deadline:
+            return False  # weak signals no longer block the fill
+        return time.monotonic() - last < window
 
     async def _wait_deadline(self, grant: TurnGrant) -> None:
         """Sleep until the turn resolves or the silence window elapses.
@@ -1256,9 +1546,9 @@ class TurnDirector:
         grant.state = state
         grant.resolved_at = time.monotonic()
         self._log_grant(grant, reason)
-        watchdog = grant.watchdog
-        if watchdog is not None and watchdog is not asyncio.current_task():
-            watchdog.cancel()
+        for task in (grant.watchdog, grant.text_task):
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
 
     def _log_grant(self, grant: TurnGrant, reason: str) -> None:
         logger.debug(

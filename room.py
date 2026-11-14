@@ -440,8 +440,8 @@ class GameRoom:
     async def mark_plan_review(self, seat: int) -> bool:
         """锁内给**当前** ``seat.plan`` 打 ``review=True`` 软标记。
 
-        notice judge 高分（``score >= notice_priority_score``）时调用，供下一次
-        game_agent 决策参考。关键约束：
+        notice judge 的关键事件判定命中时调用，供下一次 game_agent 决策
+        参考（评分阈值配置已在移植中随 System1 一起移除）。关键约束：
 
         - 只读锁内**最新** plan，不拿 judge 手里的旧快照覆盖新 ``game_plan``；
         - 不改 ``seq``、不 bump ``version``、不广播（与 ``set_plan`` 同口径）；
@@ -533,8 +533,9 @@ class GameRoom:
 
         ``say``（可选）是**原子**随落子的对局聊天：只有落子成功才追加到
         ``Match.chat``，与落子共用一次版本推进；失败/迟到绝不落库。
-        ``persist_say=False`` 只供特殊调用方把台词留在会话面、不写对局
-        聊天（当前宿主主 agent 行动回合已不再传 say，普通正文由宿主直接落库）。
+        ``persist_say=False`` 目前没有调用方；行动回合的 say 由
+        ``play_<match>`` 原子随落子写入对局聊天，宿主的普通正文回复另行走
+        会话面，不经此参数。
         """
         event: dict[str, Any] | None = None
         follow: list[int] = []

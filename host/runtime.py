@@ -94,6 +94,10 @@ class GamehubRuntime:
         plugin.notice_target = self.notice_target
         plugin.notice_target_session_sync = self.notice_target_session_sync
         plugin.match_origin = self.match_origin
+        # talk.py probes ``plugin.turn_owns(match)``: route it to the director
+        # so an *active grant* (not just the mode flags) decides ownership.
+        if self.director is not None:
+            plugin.turn_owns = self.director.owns
         self._started = True
         logger.info("gamehub runtime started")
 

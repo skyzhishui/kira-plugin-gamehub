@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from director import build_turn_notice
+from director import build_nudge_notice, build_turn_notice
 from engine import games
 from engine.match import Match, SeatInfo
 
@@ -126,3 +126,41 @@ def test_doudizhu_subsequent_turn_notice_keeps_action_formats():
     # The bid/play formats stay literal on every turn: a missing format is
     # what makes the model answer with plain text and stall the turn.
     assert "bid 1" in later and "pass" in later and "牌面字符串" in later
+
+
+def test_nudge_notice_spells_out_the_call_syntax():
+    """F2：催促通知必须给出具体的调用格式（含合法示例 move）。
+
+    事件复盘：故障切换到 flash 级模型后，模型决策正确（叫3）却把结果
+    写成正文。通知只说「调用工具」不够，要给出 move 参数的填写示例。
+    """
+    module = games.get("gomoku")
+    state = module.create(SimpleNamespace(seed=1, options={}))
+    match = Match(
+        id="m4", kind="gomoku", created_at=0, updated_at=0, version=1,
+        state=state,
+        seats=[
+            SeatInfo(kind="human", name="Human", token=""),
+            SeatInfo(kind="ai", name="汐祈（Seki）", token=""),
+        ],
+    )
+    text = build_nudge_notice(match, seat=1, tool_name="play_m4", plugin=_plugin())
+    assert "play_m4" in text
+    assert 'move 参数填' in text
+    assert "示例只展示格式" in text
+    assert "只在正文里写结果不算行动" in text
+
+    # Text-only variant (F1): names the exact mistake and keeps the syntax.
+    corrective = build_nudge_notice(
+        match, seat=1, tool_name="play_m4", plugin=_plugin(), text_only=True
+    )
+    assert "刚才只发了文字" in corrective
+    assert "play_m4" in corrective and 'move 参数填' in corrective
+
+
+def test_doudizhu_bid_nudge_example_is_a_bid_or_pass():
+    text = build_nudge_notice(
+        _doudizhu_match(), seat=1, tool_name="play_m1", plugin=_plugin()
+    )
+    # Bidding phase: the example must be a bid/pass form, never a card string.
+    assert 'move 参数填 "bid' in text or 'move 参数填 "pass"' in text

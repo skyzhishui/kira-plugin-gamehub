@@ -3,7 +3,8 @@
 The ported nori modules read configuration through ``plugin.settings.<name>``.
 KiraAI stores plugin config as nested section dicts, so this module flattens
 those sections into an attribute namespace and fills every missing key with
-the nori default. System1-only fields are kept for compatibility but unused.
+the nori default. Dead nori/System1-only keys were removed; anything left
+here is read somewhere in the plugin.
 """
 
 from __future__ import annotations
@@ -46,16 +47,18 @@ DEFAULTS: dict[str, Any] = {
     # notice-driven turn
     "turn_play_timeout_s": 90.0,
     "turn_fallback_delay_s": 1.0,
-    "turn_dispatch_wait_s": 20.0,
+    # Text-only replies: a completed LLM response that did not submit the move
+    # gets an immediate corrective nudge with a SHORT deadline (F1); the
+    # example-carrying nudge text is F2.
+    "turn_text_retry_s": 25.0,
+    "turn_text_retry_max": 2,
+    "turn_text_grace_s": 4.0,
     # match
     "practice_name": "小白",
     "max_active_matches": 50,
-    "max_active_matches_per_actor": 1,
     "site_base_url": "",
     # page session
     "page_chat_enabled": True,
-    "page_chat_uid": "",
-    "page_chat_session_token": "",
     "page_chat_talk_default": "judge",
     "page_bubble_hold_s": 3.0,
     # notice target override
@@ -67,35 +70,16 @@ DEFAULTS: dict[str, Any] = {
     "table_talk_prompt_extra": "",
     "talk_min_interval_s": 15.0,
     "talk_cooldown_s": 30.0,
-    "talk_quiet_window_s": 8.0,
-    "talk_idle_s": 45.0,
-    "talk_idle_repeat_s": 90.0,
-    "talk_idle_max_per_turn": 2,
-    "talk_decide_threshold": 3.0,
-    "talk_group_threshold": 4.0,
-    "talk_assumed_turn_s": 10.0,
-    "talk_pending_ttl_s": 20.0,
-    "talk_merge_window_s": 8.0,
     "talk_key_every_n": 5,
     "talk_on_start": True,
     "talk_on_over": True,
     # notice judge (System1 removed; judge tier uses local key-event rules)
     "notice_judge_mode": "off",
-    "notice_base_url": "",
-    "notice_judge_timeout_ms": 800,
-    "notice_speak_prob": 0.55,
-    "notice_priority_score": 3.0,
-    "notice_gray_low": 0.45,
-    "notice_gray_high": 0.55,
     "notice_key_min_interval_s": 8.0,
     "notice_judge_log": False,
     # plan (legacy read-only)
-    "plan_default_ttl_moves": 8,
-    "plan_default_ttl_s": 120.0,
-    "plan_max_per_phase": 2,
     # misc
     "max_say_len": 280,
-    "schedule_expire_days": 30,
 }
 
 

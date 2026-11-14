@@ -884,7 +884,6 @@ async def test_games_payload_carries_the_host_name(tmp_path):
 
     data = await data_of(api.games())
     assert data["host_agent_name"] == "汐祈（Seki）"
-    gomoku = next(entry for entry in data["games"] if entry["kind"] == "gomoku")
     doudizhu = next(entry for entry in data["games"] if entry["kind"] == "doudizhu")
     labels = [item["label"] for item in doudizhu["lineups"]]
     assert labels, "doudizhu exposes lineup labels"
