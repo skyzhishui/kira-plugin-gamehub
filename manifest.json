@@ -2,7 +2,7 @@
   "plugin_id": "kira-plugin-gamehub",
   "display_name": "游戏中心",
   "version": "0.1.0",
-  "core_version": ">=3.2.0",
+  "core_version": ">=3.2.0b1",
   "author": "skyzhishui",
   "description": "游戏中心：五子棋、黑白棋、斗地主等小游戏，既能在聊天里跟诺里对弈（开局、走子、查询棋局、认输），也提供 WebUI 大厅与实时对局页面。",
   "tags": [

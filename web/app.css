@@ -1,6 +1,6 @@
 /* app.css — 游戏中心（大厅 + 对局页）· 浅蓝主题
  *
- * 主题：变量值沿用原 nori WebUI 调色板——
+ * 主题：变量值沿用浅蓝 × 白 × 粉紫的宿主调色板——
  *      白天默认：天蓝 × 白 × 粉紫点缀，Soft-Neumorphism（外凸卡片 / 内凹输入）；
  *      html[data-theme="dark"]：深蓝黑 × 霓虹蓝。
  * 主题来源（KiraAI）：localStorage["theme"]（"light"|"dark"）+ 宿主
@@ -148,6 +148,24 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 大厅底图：assets/bg-lobby.png（暖光棋室插画，无角色）压在一层柔光渐变之下，
+ * 卡片仍是实色凸起，不影响可读性；素材缺失时自动退回 --bg-grad。 */
+body.lobby {
+  background-image:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(233, 244, 253, 0.82) 46%, rgba(255, 255, 255, 0.9) 100%),
+    url("./assets/bg-lobby.png");
+  background-size: cover, cover;
+  background-position: center, center;
+  background-repeat: no-repeat, no-repeat;
+  background-attachment: fixed, fixed;
+}
+
+html[data-theme="dark"] body.lobby {
+  background-image:
+    linear-gradient(180deg, rgba(13, 24, 52, 0.9) 0%, rgba(9, 13, 29, 0.93) 52%, rgba(18, 14, 44, 0.92) 100%),
+    url("./assets/bg-lobby.png");
+}
+
 /* 氛围层（全部 fixed + pointer-events:none，压在 main 之下）：
  * 1) body::before            全页基础色晕（两主题各自的 --sky-soft / --pink-soft radial）；
  * 2) body.lobby::before      大厅专属底：light 天蓝→白 + 极淡棋盘格；
@@ -157,8 +175,8 @@ body {
  *    流星由 .fx-atmo::before/::after 出演（仅 dark 大厅）。
  * 只动 transform/opacity；不用大面积 filter/blur（柔和感全靠 radial-gradient 本身）；
  * prefers-reduced-motion 时 JS 不生成节点、CSS 动画全关（见文末）。
- * 大厅底图 assets/bg-lobby.png 只在窄屏（≤640px）作极淡纹理底（见下方媒体查询），
- * 桌面端仍是纯渐变 + 极光层，避免大面积贴图发灰。 */
+ * 大厅底图 assets/bg-lobby.png 作 body.lobby 的固定背景（见上方 body.lobby 规则，
+ * 上面盖一层柔光渐变，卡片仍是实色凸起）；氛围层 .fx-atmo 再叠极光/星点。 */
 body::before {
   content: "";
   position: fixed;
@@ -398,8 +416,8 @@ h1, h2, h3 { font-weight: 700; }
 
 /* ---------------- 全屏入口（大厅 / 对局页右上角） ---------------- */
 
-/* 圆形玻璃键，与宿主顶栏图标键同形；全屏中显示「压缩」图标。
- * needs-tap：自动进入被浏览器拦下时的引导态（呼吸光圈 + 主色），点一下即进全屏。 */
+/* 圆形玻璃图标键（宿主顶栏同形）。KiraAI 没有全屏/沉浸桥，本页不再放全屏入口；
+ * 该样式保留给未来的图标型操作键。 */
 .icon-btn {
   display: grid;
   place-items: center;
@@ -418,22 +436,6 @@ h1, h2, h3 { font-weight: 700; }
 .icon-btn svg { width: 16px; height: 16px; }
 .icon-btn:hover { border-color: var(--line-hover); box-shadow: var(--shadow-hover); }
 .icon-btn:active { transform: scale(0.94); }
-.icon-btn .ico-compress { display: none; }
-body.ui-immersive .icon-btn .ico-expand { display: none; }
-body.ui-immersive .icon-btn .ico-compress { display: block; }
-.icon-btn.needs-tap {
-  color: var(--pink-deep);
-  border-color: var(--pink);
-  background: var(--pink-soft);
-  animation: fs-tap-breathe 1.6s ease-in-out infinite;
-}
-@keyframes fs-tap-breathe {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(226, 168, 246, 0); }
-  50% { box-shadow: 0 0 0 5px rgba(226, 168, 246, 0.28); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .icon-btn.needs-tap { animation: none; }
-}
 
 /* ---------------- 按钮（软凸起） ---------------- */
 
@@ -869,36 +871,12 @@ html[data-theme="dark"] .hero-banner::after {
   .hero-sub { margin-top: 3px; font-size: 11.5px; }
 }
 
-/* 窄屏大厅底：把通用底图 bg-lobby.png 压到极淡当纹理（桌面端不铺贴图，
- * 保持纯渐变 + 极光层；素材缺失时自动退回上面的渐变底）。 */
-@media (max-width: 640px) {
-  body.lobby::before {
-    background-image:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.86) 0%, rgba(255, 255, 255, 0.7) 100%),
-      url("./assets/bg-lobby.png");
-    background-size: auto, cover;
-    background-position: center, center;
-    background-repeat: no-repeat, no-repeat;
-  }
-  html[data-theme="dark"] body.lobby::before {
-    background-image:
-      linear-gradient(180deg, rgba(13, 24, 52, 0.9) 0%, rgba(9, 13, 29, 0.92) 100%),
-      url("./assets/bg-lobby.png");
-    background-size: auto, cover;
-    background-position: center, center;
-    background-repeat: no-repeat, no-repeat;
-  }
-}
-
 @media (max-width: 380px) {
   .hero-banner { min-height: 98px; padding: 10px 12px; }
   .hero-copy { max-width: 68%; }
   .hero h1 { font-size: 19px; }
   .hero-sub { font-size: 11px; }
 }
-/* 全屏入口槽位：宿主顶栏已有全屏键时这里为空（JS 不自绘），不留空行 */
-.fs-slot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.fs-slot:empty { display: none; }
 
 /* ---------------- 玩家身份（hero 右侧紧凑折叠卡） ---------------- */
 
