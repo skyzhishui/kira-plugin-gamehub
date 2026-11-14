@@ -405,7 +405,7 @@ class GameRoom:
         """锁内校验并写入 ``seat.plan``：只持久化，**不 bump version / 不改走子**。
 
         ``created_move`` / ``seq`` 必须在本房间锁内构造，避免两个并发写拿到同一
-        seq；对局已结束或目标不是诺里座位时拒绝写入。plan 是给 ``game_agent``
+        seq；对局已结束或目标不是宿主主 agent 座位时拒绝写入。plan 是给 ``game_agent``
         的战术提示（不是闸门），人类侧不应因它收到 409；因此不广播、不更新
         ``updated_at``，页面下次拉快照即可看到。
         """
@@ -488,7 +488,7 @@ class GameRoom:
     async def turn_snapshot(self, seat: int) -> dict[str, Any]:
         """锁内读取任一座位的回合快照（不校验座位 kind）。
 
-        供行动通知回合（S2 诺里座位 / S4 受托人类座位）在锁外构造通知
+        供行动通知回合（S2 宿主主 agent 座位 / S4 受托人类座位）在锁外构造通知
         与 watchdog 判断使用；字段与 ``ai_snapshot`` 完全同源。
         """
         async with self.lock:
@@ -534,7 +534,7 @@ class GameRoom:
         ``say``（可选）是**原子**随落子的对局聊天：只有落子成功才追加到
         ``Match.chat``，与落子共用一次版本推进；失败/迟到绝不落库。
         ``persist_say=False`` 只供特殊调用方把台词留在会话面、不写对局
-        聊天（当前诺里行动回合已不再传 say，普通正文由宿主直接落库）。
+        聊天（当前宿主主 agent 行动回合已不再传 say，普通正文由宿主直接落库）。
         """
         event: dict[str, Any] | None = None
         follow: list[int] = []
@@ -1234,7 +1234,7 @@ class RoomManager:
                     normalized_mode["mode"] == modes.MODE_BOT
                     and normalized_mode["difficulty"] == modes.DIFF_ADVANCED
                 ):
-                    # 队友局（S3 advanced）：ai 座位是「进阶陪练」对手而非诺里
+                    # 队友局（S3 advanced）：ai 座位是「进阶陪练」对手而非宿主主 agent
                     # 本人——座位显示名由上层配置注入（默认「陪练」），
                     # 文本/对局视图/历史/通知全链路一致，避免 UI 与后端
                     # 的身份口径分裂。
@@ -1388,7 +1388,7 @@ class RoomManager:
 
         不代用户（human）或规则陪练（bot）认输；没有 AI 座位时给明确错误。
         队友模式（S3/S4）里 ``ai`` 座位（如有）是**对手**（advanced 陪练），
-        诺里自己没有座位——同样拒绝，绝不误让对方座位认输。
+        宿主主 agent 自己没有座位——同样拒绝，绝不误让对方座位认输。
         认输仍走房间锁（``GameRoom.apply``），结束后取消/丢弃在途任务，
         避免“认输后又落一子”。
         """

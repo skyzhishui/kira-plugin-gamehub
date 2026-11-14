@@ -59,6 +59,8 @@ import doudizhu from "../games/doudizhu/index.js";
 import {
   createMatchPayload,
   delegatedTurnStatus,
+  HOST_PLACEHOLDER,
+  LINEUP_LABELS,
   canDelegate,
   isCoachMatch,
   lineupHint,
@@ -84,7 +86,7 @@ const HAND = [
 
 const SEATS = [
   { kind: "human", name: "阿空(我)", joined: true },
-  { kind: "ai", name: "诺里", joined: true },
+  { kind: "ai", name: "汐祈（Seki）", joined: true },
   { kind: "ai", name: "蕾依（Raiy）", joined: true },
 ];
 
@@ -349,47 +351,68 @@ test("历史 move 文案：bid/pass/牌串转人话；未知文本原样", () =>
 test("阵容：目录选项（服务端 label 优先）+ 内置四档回落", () => {
   const listed = lineupsOf({
     lineups: [
-      { value: "nori_agent", label: "诺里 + 蕾依" },
+      { value: "nori_agent", label: "汐祈（Seki） + 蕾依" },
       { value: "bot_bot", label: "双陪练" },
       { value: "junk", label: "非法" },
       { value: "nori_agent", label: "重复" },
     ],
   });
   assert.deepEqual(listed, [
-    { value: "nori_agent", label: "诺里 + 蕾依" },
+    { value: "nori_agent", label: "汐祈（Seki） + 蕾依" },
     { value: "bot_bot", label: "双陪练" },
-  ]);
+  ], "服务端已给出真实名字的 label 原样透传");
   assert.deepEqual(
     lineupsOf({ lineups: [
-      { value: "nori_agent", label: "诺里 + 当前agent" },
-      { value: "agent_bot", label: "当前agent + 陪练（诺里队友）" },
-    ] }).map((x) => x.label),
-    ["诺里 + 搭档", "搭档 + 陪练（诺里队友）"],
-    "目录里的技术词收敛为用户文案"
+      { value: "nori_agent", label: `${HOST_PLACEHOLDER} + 当前agent` },
+      { value: "agent_bot", label: `当前agent + 陪练（${HOST_PLACEHOLDER} 队友）` },
+    ] }, "蕾依").map((x) => x.label),
+    [`${HOST_PLACEHOLDER} + 蕾依`, `蕾依 + 陪练（${HOST_PLACEHOLDER} 队友）`],
+    "目录里的技术词收敛为用户文案（宿主名未下发回落占位「AI」）"
   );
   const fallback = lineupsOf({});
   assert.deepEqual(fallback.map((x) => x.value), ["nori_agent", "nori_bot", "agent_bot", "bot_bot"]);
+  assert.deepEqual(fallback.map((x) => x.label), [
+    LINEUP_LABELS.nori_agent,
+    LINEUP_LABELS.nori_bot,
+    LINEUP_LABELS.agent_bot,
+    LINEUP_LABELS.bot_bot,
+  ], "内置四档文案 = LINEUP_LABELS 模板（宿主名未下发即占位「AI」）");
   assert.ok(fallback.every((x) => typeof x.label === "string" && x.label.length > 0));
-  assert.ok(!/AI|artificial|bot/i.test(lineupHint("nori_agent")));
+  // 回落文案里只有中性称呼，不含技术词（宿主身份由占位/宿主名承载）
+  assert.ok(!/artificial|bot/i.test(lineupHint("nori_agent")));
+  // 宿主名下发后，内置四档文案跟随宿主名（模板不含写死身份词）
+  setHostAgentName("汐祈（Seki）");
+  try {
+    assert.deepEqual(lineupsOf({}).map((x) => x.label), [
+      "汐祈（Seki） + 搭档",
+      "汐祈（Seki） + 陪练",
+      "汐祈（Seki）支招 · 搭档上桌",
+      "汐祈（Seki）支招 · 陪练上桌",
+    ]);
+  } finally {
+    setHostAgentName("");
+  }
 });
 
-test("身份口径：阵容里的「诺里」= 宿主主 agent，「搭档」= game_agent 配置名", () => {
-  // 默认配置（宿主名未下发）：两者都渲染「诺里」，保持旧文案。
+test("身份口径：阵容里的占位「AI」= 宿主主 agent，「搭档」= game_agent 配置名", () => {
+  // 宿主名未下发：宿主座位渲染占位「AI」，game_agent 用配置名。
   assert.deepEqual(
-    lineupsOf({ lineups: [{ value: "nori_agent", label: "诺里 + 当前agent" }] }, "蕾依").map((x) => x.label),
-    ["诺里 + 蕾依"]
+    lineupsOf({ lineups: [{ value: "nori_agent", label: `${HOST_PLACEHOLDER} + 当前agent` }] }, "蕾依").map((x) => x.label),
+    [`${HOST_PLACEHOLDER} + 蕾依`]
   );
-  assert.equal(lineupHint("nori_agent", "蕾依"), "诺里和蕾依与你同桌；地主叫分后确定");
+  assert.equal(lineupHint("nori_agent", "蕾依"), `${HOST_PLACEHOLDER}和蕾依与你同桌；地主叫分后确定`);
 
-  // 宿主名下发后：阵容里的「诺里」换成宿主名，game_agent 仍是配置名。
+  // 宿主名下发后：阵容里的占位换成宿主名，game_agent 仍是配置名；替换后不留空格。
   setHostAgentName("汐祈（Seki）");
   try {
     assert.deepEqual(
-      lineupsOf({ lineups: [{ value: "nori_agent", label: "诺里 + 当前agent" }] }, "诺里").map((x) => x.label),
-      ["汐祈（Seki） + 诺里"]
+      lineupsOf({ lineups: [{ value: "nori_agent", label: `${HOST_PLACEHOLDER} + 当前agent` }] }, "蕾依").map((x) => x.label),
+      ["汐祈（Seki） + 蕾依"]
     );
-    assert.equal(lineupHint("nori_bot", "诺里"), "汐祈（Seki）和陪练与你同桌；地主叫分后确定");
-    assert.equal(lineupHint("agent_bot", "诺里"), "诺里和陪练与你同桌，汐祈（Seki）在聊天里支招");
+    assert.equal(lineupHint("nori_bot", "蕾依"), "汐祈（Seki）和陪练与你同桌；地主叫分后确定");
+    assert.equal(lineupHint("agent_bot", "蕾依"), "蕾依和陪练与你同桌，汐祈（Seki）在聊天里支招");
+    // 宿主名与 game_agent 名相同也不串位（先占位再替换）
+    assert.equal(lineupHint("agent_bot", "汐祈（Seki）"), "汐祈（Seki）和陪练与你同桌，汐祈（Seki）在聊天里支招");
   } finally {
     setHostAgentName("");
   }
@@ -429,7 +452,7 @@ test("两座位旧载荷逐字段不变（阵容键不泄漏到棋类）", () =>
   assert.deepEqual(createMatchPayload("gomoku", {}), { kind: "gomoku", opponent: "ai" });
 });
 
-test("座位驱动：A/B 诺里座位 1；C/D 诺里不占座；身份按驱动而非名字", () => {
+test("座位驱动：A/B 宿主座位 1；C/D 宿主不占座；身份按驱动而非名字", () => {
   const build = (lineup, seats) => ({
     kind: "doudizhu",
     me: 0,
@@ -452,7 +475,7 @@ test("座位驱动：A/B 诺里座位 1；C/D 诺里不占座；身份按驱动�
     { kind: "ai", name: "蕾依（Raiy）" },
     { kind: "bot", name: "小白" },
   ]);
-  assert.equal(noriSeatOf(c), null, "教练阵容诺里不占席");
+  assert.equal(noriSeatOf(c), null, "教练阵容宿主不占席");
   assert.equal(noriRoleOf(c), "coach");
   assert.equal(seatDriverOf(c, 1), "agent");
   assert.equal(seatDriverOf(c, 2), "bot");
@@ -480,7 +503,7 @@ test("seat_drivers 全 3 席优先于 lineup 派生物；旧两项数组仍可�
   assert.equal(seatDriverOf(dirty, 2), "agent");
 });
 
-test("代打：C/D 教练阵容可代打；A/B 诺里参战不可", () => {
+test("代打：C/D 教练阵容可代打；A/B 宿主参战不可", () => {
   const make = (lineup) => ({
     id: "dz",
     kind: "doudizhu",
@@ -497,8 +520,17 @@ test("代打：C/D 教练阵容可代打；A/B 诺里参战不可", () => {
   assert.equal(canDelegate({ ...make("agent_bot"), status: { outcome: "win" } }), false, "终局不可代打");
   assert.deepEqual(delegatedTurnStatus({ mine: true, delegated: true, myTurn: true, act: "代打" }), {
     kind: "delegated",
-    text: "诺里代打中…",
-  });
+    text: `${HOST_PLACEHOLDER}代打中…`,
+  }, "代打由宿主执行（宿主名未下发回落占位「AI」）");
+  setHostAgentName("汐祈（Seki）");
+  try {
+    assert.deepEqual(delegatedTurnStatus({ mine: true, delegated: true, myTurn: true, act: "代打" }), {
+      kind: "delegated",
+      text: "汐祈（Seki）代打中…",
+    }, "宿主名下发后状态行跟随宿主");
+  } finally {
+    setHostAgentName("");
+  }
   assert.equal(delegatedTurnStatus({ mine: true, delegated: false, myTurn: true, act: "代打" }), null);
 });
 

@@ -731,7 +731,7 @@ a.btn:hover { color: var(--ink); }
 }
 
 /* 顶部横幅（取代招手动图 + 气泡）：
- * 一张合成的宽幅插画（诺里在右、左边是大片留白的天空）以「贴右、等高、不裁人」
+ * 一张合成的宽幅插画（人物在右、左边是大片留白的天空）以「贴右、等高、不裁人」
  * 的方式垫在卡片右端，左侧用同一张图边缘取样的天空渐变铺满 —— 插画与卡片底
  * 无缝衔接，任何视口宽度都不会把人物裁掉或拉变形。标题压在左侧渐变上。
  * 窄屏（≤640px）换 2:1 竖切裁图铺满整条，像一张真正的封面照，高度压到 96–104px。 */
@@ -1305,7 +1305,7 @@ html.dark .hero-banner::after {
   height: 18px;
   overflow: hidden;
 }
-/* 状态行 pill 可收缩：窄屏（320px）双 pill（「诺里代下」+「行棋中」）按
+/* 状态行 pill 可收缩：窄屏（320px）双 pill（「宿主主 agent 代下」+「行棋中」）按
  * 需收缩、文字省略（.pill-text），不再整枚被裁掉；单 pill 时基准宽不收缩。
  * 身份行 pill 不参与收缩（名字省略已收口）。 */
 .seat-chips .pill { flex: 0 1 auto; min-width: 0; overflow: hidden; }
@@ -1338,7 +1338,7 @@ html.dark .hero-banner::after {
   30% { transform: translateY(-3px); }
 }
 
-/* 诺里小头像（AI 座位），思考时轻晃 */
+/* 宿主主 agent 小头像（AI 座位），思考时轻晃 */
 .seat-avatar {
   width: 36px;
   height: 36px;
@@ -1514,7 +1514,7 @@ a.go:hover::after { transform: translateX(2px); }
   from { opacity: 0; transform: scale(1.02); }
 }
 
-/* 对局侧栏：走子记录（上）+ 和诺里聊天（下） */
+/* 对局侧栏：走子记录（上）+ 和宿主主 agent 聊天（下） */
 
 .side-col {
   grid-area: side;
@@ -1570,7 +1570,7 @@ a.go:hover::after { transform: translateX(2px); }
 
 .log-empty { color: var(--faint); font-size: 12.5px; padding: 14px 10px; text-align: center; }
 
-/* ---------------- 和诺里聊天 ---------------- */
+/* ---------------- 和宿主主 agent 聊天 ---------------- */
 
 .chat-panel {
   flex: 1 1 0;
@@ -1683,7 +1683,7 @@ a.go:hover::after { transform: translateX(2px); }
   min-width: 0;
 }
 
-/* 诺里：白卡浅蓝边；自己：粉紫气泡 */
+/* 宿主主 agent：白卡浅蓝边；自己：粉紫气泡 */
 .msg.nori .msg-body {
   background: var(--card-bg);
   border: 1px solid var(--line);
@@ -1697,7 +1697,7 @@ a.go:hover::after { transform: translateX(2px); }
 
 .msg-time { font-size: 10px; color: var(--faint); font-family: var(--font-mono); padding: 0 2px; }
 
-/* 「诺里正在说…」三点 */
+/* 「宿主主 agent 正在说…」三点 */
 .msg-typing { display: inline-flex; align-items: center; }
 .msg-typing .tdot {
   display: inline-block;
@@ -1870,7 +1870,7 @@ a.go:hover::after { transform: translateX(2px); }
   white-space: nowrap;
 }
 
-/* 语音芯片：手动播放兜底控件（用户/诺里语音都可点）；播放中波形起伏 */
+/* 语音芯片：手动播放兜底控件（用户/宿主主 agent 语音都可点）；播放中波形起伏 */
 .voice-chip {
   display: inline-flex;
   align-items: center;
@@ -1926,7 +1926,7 @@ a.go:hover::after { transform: translateX(2px); }
   color: var(--warn);
 }
 
-/* speaker 喇叭动效徽标：只挂在真实 playing 消息的诺里头像旁 */
+/* speaker 喇叭动效徽标：只挂在真实 playing 消息的宿主主 agent 头像旁 */
 .speakable { position: relative; }
 .speak-badge {
   position: absolute;
@@ -1957,7 +1957,7 @@ a.go:hover::after { transform: translateX(2px); }
 }
 html.dark .speak-badge { border-color: var(--pink); }
 
-/* ---------------- 诺里座位发言气泡（锚在 AI 座位卡上，不占布局） ---------------- */
+/* ---------------- 宿主主 agent 座位发言气泡（锚在 AI 座位卡上，不占布局） ---------------- */
 
 .seat { position: relative; }
 
@@ -2141,15 +2141,6 @@ html.dark .speak-badge { border-color: var(--pink); }
   ::view-transition-new(root) { animation: none !important; }
 }
 
-/* 路线图预告卡：无封面图时给一个柔和的图形占位（收尾用 --white，dark 下是深色卡面，避免脏白斑） */
-.card-cover-soon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: radial-gradient(120% 120% at 30% 20%, var(--sky-pale) 0%, var(--sky-pale-2) 60%, var(--white) 100%);
-}
-.soon-glyph { font-size: 44px; line-height: 1; opacity: 0.7; filter: saturate(0.85); }
-
 /* 单局提示（有进行中对局时替代卡片开局按钮） */
 .grid-note {
   grid-column: 1 / -1;
@@ -2320,7 +2311,7 @@ html.dark .speak-badge { border-color: var(--pink); }
   .am-uid { max-width: 150px; }
 }
 
-/* ================= S2–S4：开局方式选择 / 诺里代下 / 队友提示 ================= */
+/* ================= S2–S4：开局方式选择 / 宿主主 agent 代下 / 队友提示 ================= */
 
 /* 分段选择器（内凹槽 + 选中项浮起）：开局卡上的对战方式 / 难度 */
 .seg {
@@ -2364,7 +2355,7 @@ html.dark .speak-badge { border-color: var(--pink); }
 
 .level-seg { margin-top: 6px; }
 
-/* 对局页难度条：座位/棋盘之间的独立一行（只对诺里 / 当前 agent 显示） */
+/* 对局页难度条：座位/棋盘之间的独立一行（只对宿主主 agent / 当前 agent 显示） */
 .level-row {
   display: flex;
   align-items: center;
@@ -2408,7 +2399,7 @@ html.dark .speak-badge { border-color: var(--pink); }
 }
 .mode-block .card-actions { margin-top: 0; padding-top: 9px; }
 
-/* 对手三选一（诺里 / 当前 agent / 机器人陪练）：窄屏允许两行，标签不截断 */
+/* 对手三选一（宿主主 agent / 当前 agent / 机器人陪练）：窄屏允许两行，标签不截断 */
 .mode-seg .seg-opt { padding-inline: 6px; }
 .level-seg .seg-opt { padding-inline: 6px; }
 @media (max-width: 380px) {
@@ -2420,7 +2411,7 @@ html.dark .speak-badge { border-color: var(--pink); }
   }
 }
 
-/* 代下开关：开启态用粉色渐变（诺里的颜色），一眼可辨「代下进行中」 */
+/* 代下开关：开启态用粉色渐变（宿主主 agent 的颜色），一眼可辨「代下进行中」 */
 .btn.delegate.on {
   background: linear-gradient(120deg, var(--pink) 0%, var(--pink-deep) 100%);
   border-color: transparent;
@@ -2429,8 +2420,8 @@ html.dark .speak-badge { border-color: var(--pink); }
   animation: breathe 1.6s ease-in-out infinite;
 }
 
-/* 队友区（陪练局专属）：诺里是我方队友——头像/身份/代下状态集中在 seats 与
- * 棋盘之间的专属条上，绝不占用对手座位；诺里局（对手位）整区隐藏。 */
+/* 队友区（陪练局专属）：宿主主 agent 是我方队友——头像/身份/代下状态集中在 seats 与
+ * 棋盘之间的专属条上，绝不占用对手座位；宿主主 agent 局（对手位）整区隐藏。 */
 .mate-zone {
   display: flex;
   align-items: center;
@@ -2486,7 +2477,7 @@ html.dark .speak-badge { border-color: var(--pink); }
   white-space: nowrap;
 }
 .mate-standby { color: var(--sky-dark); border-color: var(--sky-light); background: var(--sky-soft); }
-/* 说明文字独占一块（宽屏与身份/状态同排），可折行但不把「诺里/队友/代下」
+/* 说明文字独占一块（宽屏与身份/状态同排），可折行但不把「宿主主 agent/队友/代下」
  * 身份行挤换行；窄屏按剩余宽度省略，队友区高度恒定，状态切换不推移棋盘。 */
 .mate-text {
   flex: 0 1 auto;
@@ -2509,8 +2500,8 @@ html.dark .speak-badge { border-color: var(--pink); }
   }
 }
 
-/* 诺里发言气泡改挂头像包裹层：侧向弹出（头像右侧、垂直居中），尾巴朝左指向头像，
- * 桌面/375px 都不遮挡座位行与棋盘；诺里局仍锚对手座位（基础 .seat-bubble 规则）。
+/* 宿主主 agent 发言气泡改挂头像包裹层：侧向弹出（头像右侧、垂直居中），尾巴朝左指向头像，
+ * 桌面/375px 都不遮挡座位行与棋盘；宿主主 agent 局仍锚对手座位（基础 .seat-bubble 规则）。
  * 注意：这里是合法 CSS 注释，之前误写 // 会让本条 position:relative 被丢，
  * 气泡继而失去头像锚点。 */
 .mate-avatar-wrap { position: relative; display: inline-flex; flex: none; }
@@ -2538,7 +2529,7 @@ html.dark .speak-badge { border-color: var(--pink); }
   border-left: 1px solid var(--line);
 }
 
-/* 陪练对手 say 气泡（独立单例，与诺里气泡分离）：挂在对手座位卡上方，
+/* 陪练对手 say 气泡（独立单例，与宿主主 agent 气泡分离）：挂在对手座位卡上方，
  * 尾巴朝下指向座位卡本身；不伪造头像。首帧历史只在 match.js 记水位不弹。 */
 .seat-bubble.rival-bubble {
   top: auto;
@@ -2709,7 +2700,7 @@ html.dark .speak-badge { border-color: var(--pink); }
  *
  * 座位卡：三列等宽，头像在左 + 剩余张数角标；身份片（地主/农民/叫分中）与
  * 状态行（叫分中/出牌中）沿用两座位卡的固定高度纪律——状态切换不撑高卡片、
- * 不推移牌桌。诺里/陪练的气泡各自钉在自己座位卡上，绝不串台。
+ * 不推移牌桌。宿主主 agent/陪练的气泡各自钉在自己座位卡上，绝不串台。
  *
  * 牌桌：桌面中央是「要压的牌」与最近动作；下方我的手牌（点选）+ 操作行
  * （叫分 / 不要 / 出牌 / 提示）。全部尺寸用 clamp 收敛在 320–375px 内，
@@ -2794,7 +2785,7 @@ html.dark .speak-badge { border-color: var(--pink); }
   white-space: nowrap;
 }
 
-/* 三人桌：诺里发言气泡钉在诺里座位卡上方（per-seat 单例，与对手 say 气泡分离） */
+/* 三人桌：宿主主 agent 发言气泡钉在宿主主 agent 座位卡上方（per-seat 单例，与对手 say 气泡分离） */
 .seat-bubble.bubble-top {
   top: auto;
   bottom: calc(100% + 8px);

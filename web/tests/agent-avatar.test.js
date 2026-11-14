@@ -17,6 +17,7 @@ import fs from "node:fs";
 
 import {
   AGENT_AVATAR_URL,
+  HOST_PLACEHOLDER,
   driverOf,
   getAgentAvatar,
   getHostAgentName,
@@ -70,7 +71,7 @@ test("界面共享状态：setAgentAvatar 归一化，getAgentAvatar 返回当�
 
 test("归属：进阶陪练的对手（agent 驱动）才配进阶头像", () => {
   assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "搭档" }), true);
-  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "诺里" }), true, "名字不参与判定，按模式/驱动");
+  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "蕾依" }), true, "名字不参与判定，按模式/驱动");
 });
 
 test("简单规则 bot 绝不冒用进阶头像", () => {
@@ -80,7 +81,7 @@ test("简单规则 bot 绝不冒用进阶头像", () => {
 });
 
 test("人设本人局 / 人类座位 / 缺数据一律不配进阶头像", () => {
-  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "诺里" }), false);
+  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "汐祈（Seki）" }), false);
   assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "human", name: "阿空" }), false);
   assert.equal(isAgentOpponent(null, { kind: "ai" }), false);
   assert.equal(isAgentOpponent(PRACTICE_ADV, null), false);
@@ -91,24 +92,34 @@ test("头像归属口径：只有 game_agent 座位（agent 驱动）用 agent-a
   // 宿主主 agent 的座位（turn 驱动 / nori 模式）不是 game_agent：不配头像。
   assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "汐祈（Seki）" }), false);
   // 只有 agent 驱动的座位才配。
-  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "诺里" }), true);
+  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "蕾依" }), true);
   // 名字/人设名不参与判定：宿主名不会让 turn 座位“变成”game_agent 座位。
   setHostAgentName("汐祈（Seki）");
-  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "诺里" }), false);
+  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "汐祈（Seki）" }), false);
   setHostAgentName("");
 });
 
-test("人设名可配置：留空或 nori 渲染默认「诺里」，其它取值原样渲染", () => {
-  assert.equal(personaNameText(""), "诺里");
-  assert.equal(personaNameText(null), "诺里");
-  assert.equal(personaNameText("  nori  "), "诺里", "默认配置名仍是 nori");
-  assert.equal(personaNameText("Nori"), "诺里", "大小写不敏感");
-  assert.equal(personaNameText(" 阿狸 "), "阿狸");
-  assert.equal(getPersonaName(), "诺里", "纯函数默认值不变（Node 无需初始化）");
-  assert.equal(setPersonaName("阿狸"), "阿狸");
-  assert.equal(getPersonaName(), "阿狸");
-  assert.equal(personaText("诺里会认真应战。"), "阿狸会认真应战。");
-  assert.equal(setPersonaName("nori"), "诺里", "恢复默认");
+test("人设名可配置：留空或 nori 渲染配置标识 nori（不做中文本地化），其它取值原样渲染", () => {
+  assert.equal(personaNameText(""), "nori");
+  assert.equal(personaNameText(null), "nori");
+  assert.equal(personaNameText("  nori  "), "nori", "默认配置名原样返回");
+  assert.equal(personaNameText("Nori"), "nori", "大小写不敏感，统一回落到配置标识");
+  assert.equal(personaNameText(" 蕾依 "), "蕾依");
+  assert.equal(getPersonaName(), "nori", "纯函数默认值不变（Node 无需初始化）");
+  assert.equal(setPersonaName("蕾依"), "蕾依");
+  assert.equal(getPersonaName(), "蕾依");
+  assert.equal(personaText("nori会认真应战。"), "蕾依会认真应战。");
+  assert.equal(setPersonaName("nori"), "nori", "恢复默认");
+});
+
+test("宿主名：未下发回落占位「AI」，空值同样回落（不再借用 game_agent 名）", () => {
+  assert.equal(HOST_PLACEHOLDER, "AI", "占位记号就是中性 AI，模板只在渲染时替换");
+  assert.equal(getHostAgentName(), HOST_PLACEHOLDER, "页面初始化前的中性称呼");
+  assert.equal(setHostAgentName("汐祈（Seki）"), "汐祈（Seki）");
+  assert.equal(getHostAgentName(), "汐祈（Seki）");
+  assert.equal(setHostAgentName(""), "");
+  assert.equal(getHostAgentName(), HOST_PLACEHOLDER, "空值回落占位「AI」，不借用 game_agent 名");
+  assert.equal(getPersonaName(), "nori", "宿主名与 game_agent 名互不影响");
 });
 
 test("driverOf：规范字段优先；旧对局缺 driver 时按难度回填（advanced=agent/easy=bot）", () => {
@@ -135,5 +146,5 @@ test("driverOf：mode 缺失但座位构成/驱动已写入的旧载荷，按后
   // ai 座位局按人设本人局口径：无陪练语义，不配进阶头像
   const legacyNori = { seats: [{ kind: "human" }, { kind: "ai" }] };
   assert.equal(driverOf(legacyNori), "");
-  assert.equal(isAgentOpponent(legacyNori, { kind: "ai", name: "诺里" }), false);
+  assert.equal(isAgentOpponent(legacyNori, { kind: "ai", name: "蕾依" }), false);
 });

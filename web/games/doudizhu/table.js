@@ -47,6 +47,7 @@ import {
   trickInfo,
   youOf,
 } from "./logic.js";
+import { getHostAgentName } from "../../shared/mode.js";
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -583,7 +584,10 @@ export function mountTable(host, { onPlace } = {}) {
     } else if (phase === "over") {
       waitEl.textContent = "本局结束";
     } else if (opts.delegated && my) {
-      waitEl.textContent = phase === "bid" ? "诺里正在替你叫分…" : "诺里正在替你出牌…";
+      // 代打方是宿主主 agent（行动通知回合驱动），名字随配置走，不写死
+      const who = getHostAgentName();
+      waitEl.textContent =
+        phase === "bid" ? `${who}正在替你叫分…` : `${who}正在替你出牌…`;
     } else if (phase === "bid") {
       waitEl.textContent = my
         ? legalBidChoices(view).length

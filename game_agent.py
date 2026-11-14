@@ -282,7 +282,7 @@ def _agent_identity(plugin: Any) -> tuple[str, str]:
 def _seat_identity(plugin: Any, match: Any, seat: int) -> tuple[str, str]:
     """本局该 AI 座位的说话身份：优先配置身份，座位名兜底。
 
-    - 对手局（诺里本人座位）：用插件配置的昵称/人格，绝不改写原有人设；
+    - 对手局（宿主主 agent 所在座位）：用插件配置的昵称/人格，绝不改写原有人设；
     - 队友局 advanced 对手座位：同样用配置身份；未配置时用通用
       ``"agent"``，不写给具体人设名；
     - 配置缺席时用座位落库显示名，再退中性「玩家」。

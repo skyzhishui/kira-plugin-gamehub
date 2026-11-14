@@ -49,7 +49,7 @@ except ImportError:  # standalone tests import plugin-root modules as top-level
 
 from .bridge import ws_hub
 from .notices import send_notice
-from .avatar import avatar_url, clear_avatar, save_avatar
+from .avatar import avatar_url, clear_avatar, host_avatar_url, save_avatar
 
 try:  # ``host/session.py`` imports host-only modules (core.adapter)
     from .session import GAME_SID, PAGE_USER_ID
@@ -359,12 +359,15 @@ class GamehubApi:
             "page_session": GAME_SID,
             "actor": PAGE_ACTOR,
             "agent_name": self._agent_name(),
-            "host_agent_name": str(getattr(self._plugin, "host_agent_name", "") or ""),
+            "host_agent_name": await self._refresh_host_agent_name(),
             "agent_avatar": await self._agent_avatar(),
+            "host_avatar": await host_avatar_url(self._plugin),
             "practice_name": self._practice_name(),
             "games": [
                 {**entry, "agent_name": self._agent_name(), "practice_name": self._practice_name()}
-                for entry in games.catalog()
+                for entry in games.catalog(
+                    self._host_agent_name(), self._agent_name()
+                )
             ],
             "notice_target_session_id": target_sid,
             "notice_target_platform": platform_of_session_id(target_sid),
@@ -423,6 +426,27 @@ class GamehubApi:
                 "external_not_mirrored": False,
             }
         )
+
+    def _host_agent_name(self) -> str:
+        """Display name of the host AI (the ``nori`` mode seat).
+
+        Never a constant: the runtime stores the active persona's name on the
+        plugin. An empty value means the host has not been read yet, and copy
+        falls back to the neutral ``NEUTRAL_HOST_NAME``.
+        """
+        return str(getattr(self._plugin, "host_agent_name", "") or "").strip()
+
+    async def _refresh_host_agent_name(self) -> str:
+        """Re-read the host name so a persona switch lands without a restart."""
+        runtime = getattr(self._plugin, "_runtime", None)
+        refresh = getattr(runtime, "refresh_host_name", None)
+        if not callable(refresh):
+            return self._host_agent_name()
+        try:
+            return str(await refresh() or "").strip()
+        except Exception:  # noqa: BLE001 - a stale name must not break the page
+            logger.debug("gamehub: host name refresh failed", exc_info=True)
+            return self._host_agent_name()
 
     async def _agent_avatar(self) -> str:
         """URL of the ``game_agent`` avatar (bundled default or uploaded file).
@@ -525,7 +549,7 @@ class GamehubApi:
         practice_name = self._practice_name()
         catalog = [
             {**entry, "agent_name": agent_name, "practice_name": practice_name}
-            for entry in games.catalog()
+            for entry in games.catalog(self._host_agent_name(), agent_name)
         ]
         return envelope(
             {

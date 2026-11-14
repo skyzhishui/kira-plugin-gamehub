@@ -55,7 +55,9 @@ import {
   setHostAgentName,
   getHostAgentName,
   setAgentAvatar,
+  setHostAvatar,
   getAgentAvatar,
+  getHostAvatar,
 } from "./shared/mode.js";
 import {
   moveText as doudizhuMoveText,
@@ -352,12 +354,16 @@ function renderSeats(match) {
     tile.dataset.seat = String(i);
     tile.dataset.identity = identity;
 
-    // 头像口径：game_agent 座位（进阶对手/教练席）用插件自有 agent-avatar
-    // （默认 nori 头像，可上传替换）；宿主主 agent 座位与陪练/人类座位用
-    // 名字首字占位，不冒充任何人设。
+    // 头像口径：
+    // - game_agent 座位（进阶对手/教练席）→ 插件自有 agent-avatar（默认 nori，可上传替换）；
+    // - 宿主主 agent 座位 → 当前人设的自拍参考图（宿主下发 host_avatar）；
+    //   宿主没配参考图时用名字首字占位，绝不借用 game_agent 的头像；
+    // - 陪练/人类座位 → 名字首字占位，不冒充任何人设。
     let avatar = null;
     if (identity === "agent") {
       avatar = seatAvatarEl(getAgentAvatar(), name, thinking, { agent: true });
+    } else if (identity === "nori" && getHostAvatar()) {
+      avatar = seatAvatarEl(getHostAvatar(), name, thinking, { agent: true });
     } else if (three && (identity === "human" || identity === "bot" || identity === "nori")) {
       avatar = seatAvatarFallback(name, thinking, false);
     }
@@ -431,7 +437,11 @@ function renderSeats(match) {
     // 人设/进阶对手座位都挂公共头像 + 各自的 say 气泡（per-seat 单例，
     // 座位每次重渲染时重新挂载，不重建、不打断计时）。
     if (!three && identity === "nori") {
-      tile.appendChild(seatAvatarFallback(name, thinking, false));
+      tile.appendChild(
+        getHostAvatar()
+          ? seatAvatarEl(getHostAvatar(), name, thinking, { agent: true })
+          : seatAvatarFallback(name, thinking, false)
+      );
       const bubble = seatBubbleEl(i);
       bubble.classList.remove("bubble-top");
       tile.appendChild(bubble);
@@ -508,10 +518,18 @@ function renderMateZone(match) {
   // The teammate/coach seat is the host agent (it does the delegating).
   const persona = getHostAgentName();
 
-  // 教练/队友席是宿主主 agent：用名字首字占位，不套 game_agent 头像。
+  // 教练/队友席是宿主主 agent：优先用当前人设的自拍参考图；宿主没配时
+  // 用名字首字占位。绝不套 game_agent 的头像。
   const avWrap = el("span", "mate-avatar-wrap");
-  const av = seatAvatarFallback(persona, noriActing, false);
-  av.className = "mate-avatar mate-avatar-fallback" + (noriActing ? " wiggle" : "");
+  const hostSrc = getHostAvatar();
+  let av;
+  if (hostSrc) {
+    av = seatAvatarEl(hostSrc, persona, noriActing, { agent: true });
+    av.className = "mate-avatar" + (noriActing ? " wiggle" : "");
+  } else {
+    av = seatAvatarFallback(persona, noriActing, false);
+    av.className = "mate-avatar mate-avatar-fallback" + (noriActing ? " wiggle" : "");
+  }
   avWrap.appendChild(av);
   // 人设发言气泡挂头像包裹层内（侧向气泡，尾巴指向头像）。只挂一次：
   // 之前的重复 append 会把气泡移到 zone，导致脱离头像锚点。
@@ -1109,8 +1127,10 @@ async function initUiConfig() {
   if (cfg.agent_name) setPersonaName(cfg.agent_name);
   // mode "nori" 的座位是宿主 AI 本人（行动通知回合驱动），不是插件人设。
   if (cfg.host_agent_name) setHostAgentName(cfg.host_agent_name);
-  // 头像：插件自有 agent-avatar（默认素材或 WebUI 上传版，脏值回落默认）
+  // 头像：插件自有 agent-avatar（默认素材或 WebUI 上传版，脏值回落默认）；
+  // 宿主主 agent 用当前人设的自拍参考图（空串 = 宿主没配，走首字占位）
   setAgentAvatar(cfg.agent_avatar);
+  setHostAvatar(cfg.host_avatar);
   const holdFromCfg = Math.round(Number(cfg.bubble_hold_s) * 1000);
   chat.holdMs = Math.min(
     BUBBLE_MAX_SHOW_MS,

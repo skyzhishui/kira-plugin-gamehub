@@ -43,16 +43,11 @@ class GamehubRuntime:
         self.store = MatchStore(plugin.data_dir)
         await self.store.init()
 
-        bot_name = "AI"
-        try:
-            persona = await plugin.ctx.persona_mgr.get_active_persona()
-            bot_name = str(getattr(persona, "name", "") or "").strip() or bot_name
-        except Exception as e:  # noqa: BLE001 - persona is cosmetic
-            logger.warning(f"gamehub: failed to read active persona: {e}")
-
         # The turn-driven seat is played by the host AI itself, so the UI must
         # be able to tell it apart from the plugin-owned game_agent identity.
-        plugin.host_agent_name = bot_name
+        # The name is read from the host every time (never hard-coded): the
+        # active persona can be switched while the plugin keeps running.
+        plugin.host_agent_name = await self._read_host_name()
 
         # ``opponent_name`` names the agent-driven seat; keep it identical to
         # the configured game_agent name so the lobby and the seat agree.
@@ -101,6 +96,24 @@ class GamehubRuntime:
         plugin.match_origin = self.match_origin
         self._started = True
         logger.info("gamehub runtime started")
+
+    async def _read_host_name(self) -> str:
+        """Active persona's display name; ``"AI"`` only when the host has none."""
+        plugin = self.plugin
+        try:
+            persona = await plugin.ctx.persona_mgr.get_active_persona()
+            name = str(getattr(persona, "name", "") or "").strip()
+            if name:
+                return name
+        except Exception as e:  # noqa: BLE001 - persona is cosmetic
+            logger.warning(f"gamehub: failed to read active persona: {e}")
+        return "AI"
+
+    async def refresh_host_name(self) -> str:
+        """Re-read the host name (persona may have been switched at runtime)."""
+        name = await self._read_host_name()
+        self.plugin.host_agent_name = name
+        return name
 
     async def stop(self) -> None:
         plugin = self.plugin

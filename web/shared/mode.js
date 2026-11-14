@@ -6,7 +6,7 @@
  * - MatchView 字段容错读取：modeOf（mode/difficulty）、delegatedOf（代下态）
  * - 代下动作体：delegateAction；重开载荷：restartPayload；重开按钮文案：restartLabel
  * - 座位展示名：seatDisplay（优先服务端真实名字；陪练局无名字的非人类座位
- *   兜底「陪练」，绝不冒充诺里）
+ *   兜底「陪练」，绝不冒充宿主主 agent）
  * - 用户文案常量：对手三口径 + 三档等级（用户可见文案不出现 AI 字样）
  *
  * 后端规范（kira-plugin-gamehub/modes.py，协议与 nori 原版一致）：
@@ -20,11 +20,11 @@
  * 「陪练」或人设名；只有名字缺席的非人类座位才兜底「陪练」。
  * 头像归属仍按模式：陪练局人设是队友，对手位绝不挂人设头像。
  *
- * 人设名可配置（KiraAI）：所有指代「可配置人设」的文案统一走
+ * game_agent 名可配置（KiraAI）：所有指代「可配置人设」的文案统一走
  * personaNameText / setPersonaName / personaText —— 配置名留空或就是 "nori"
- * 时渲染默认「诺里」，其它取值原样渲染。UI 在大厅/对局页拿到
+ * 时保留配置标识 "nori"，其它取值原样渲染。UI 在大厅/对局页拿到
  * /games 或 /ui-config 的 agent_name 后调用一次 setPersonaName 即全局生效；
- * 纯函数默认值仍是「诺里」，Node 测试无需初始化。
+ * 纯函数默认值仍是配置标识 "nori"，Node 测试无需初始化。
  *
  * 设计约束：
  * - 旧后端/旧对局（缺字段）安全降级：mode 为空 → 沿用旧契约，不破坏现有流程
@@ -41,16 +41,17 @@
  * MODE_LABELS / MODE_HINTS 是默认人设下的静态文案（导出给需要常量的调用方）；
  * 界面请用下面的 modeLabel / modeHint，它们跟随 setPersonaName 生效。 */
 
-export const MODE_LABELS = { nori: "与诺里对战", agent: "与搭档对战", bot: "与陪练对战" };
+export const MODE_LABELS = { nori: "与AI对战", agent: "与搭档对战", bot: "与陪练对战" };
 
-/** 默认人设名（配置名留空或就是 nori 时渲染它）。 */
-export const PERSONA_DEFAULT = "诺里";
+/** game_agent 的缺省配置名（schema.json 的 agent_name 默认值）。
+ * 它只是一个配置标识；渲染文案由服务端下发的名字决定，前端不写死任何人设名。 */
+export const AGENT_CONFIG_DEFAULT = "nori";
 
-let personaName = PERSONA_DEFAULT;
+let personaName = AGENT_CONFIG_DEFAULT;
 
 /** Host AI display name (the seat driven by action notices). Empty until
- * ``setHostAgentName`` runs; falls back to the persona name so the copy still
- * reads sensibly when /ui-config is unavailable. */
+ * ``setHostAgentName`` runs; falls back to a neutral「AI」so the copy never
+ * claims a specific persona before /ui-config answers. */
 let hostAgentName = "";
 
 export function setHostAgentName(v) {
@@ -59,13 +60,15 @@ export function setHostAgentName(v) {
 }
 
 export function getHostAgentName() {
-  return hostAgentName || personaName;
+  return hostAgentName || HOST_PLACEHOLDER;
 }
 
-/** 配置里的人设名 → 渲染名：留空/"nori" 一律渲染默认「诺里」。 */
+/** 配置里的 game_agent 名 → 渲染名。
+ * 前端不再自带中文缺省名：``nori`` 这类配置标识原样返回（后端目录项
+ * 已经下发渲染后的 label），空值回落中性「搭档」。 */
 export function personaNameText(v) {
   const s = String(v == null ? "" : v).trim();
-  if (!s || s.toLowerCase() === "nori") return PERSONA_DEFAULT;
+  if (!s || s.toLowerCase() === AGENT_CONFIG_DEFAULT) return AGENT_CONFIG_DEFAULT;
   return s;
 }
 
@@ -79,9 +82,9 @@ export function getPersonaName() {
   return personaName;
 }
 
-/** 把人设模板文案（含「诺里」）渲染成当前人设名。 */
+/** 把人设模板文案里的配置标识渲染成当前 game_agent 名。 */
 export function personaText(template) {
-  return String(template == null ? "" : template).replaceAll(PERSONA_DEFAULT, personaName);
+  return String(template == null ? "" : template).replaceAll(AGENT_CONFIG_DEFAULT, personaName);
 }
 
 export const LEVEL_VALUES = ["beginner", "intermediate", "advanced"];
@@ -123,8 +126,23 @@ export function levelHint(level, name) {
   return `${who}会认真应战。`;
 }
 
+/** 宿主 AI 名字的占位记号。文案模板里写它，渲染时替换成 /ui-config 下发的
+ * host_agent_name（宿主当前激活人设的名字）；只有在拿不到宿主名字时才原样
+ * 显示「AI」，绝不在界面上写死任何身份词。 */
+export const HOST_PLACEHOLDER = "AI";
+
+/** 把文案模板里的宿主占位记号换成宿主真名。
+ *
+ * 只在「独立出现」时替换：``AI和搭档`` 会换，``KAI`` 这种真实名字里的
+ * 子串不会被误伤（宿主/搭档名字完全由用户配置，不能假定字符集）。 */
+function substituteHostPlaceholder(text, hostName) {
+  const host = String(hostName == null ? "" : hostName);
+  if (!host) return text;
+  return text.replace(/(^|[^A-Za-z])AI(?![A-Za-z])/g, (_m, prefix) => `${prefix}${host}`);
+}
+
 export const MODE_HINTS = {
-  nori: "诺里会认真应战。",
+  nori: "AI会认真应战。",
   agent: "会认真应战。",
   bot: "轻松的切磋",
 };
@@ -144,20 +162,22 @@ export const MATE_NOTE_TEXT = "聊天里给你支招，也能替你落子";
  *   bot_bot    人设不占座（队友/教练）+ 两位陪练
  * 2 座位棋类永远不写这些键，本段新增函数对旧数据一律降级为空值。 */
 
+/** 旧后端（目录未下发 lineups）的回落文案。宿主名/搭档名在渲染时替换，
+ * 这里只留占位词，前端不写死任何人设名。 */
 export const LINEUP_LABELS = {
-  nori_agent: "诺里 + 搭档",
-  nori_bot: "诺里 + 陪练",
-  agent_bot: "诺里支招 · 搭档上桌",
-  bot_bot: "诺里支招 · 陪练上桌",
+  nori_agent: "AI + 搭档",
+  nori_bot: "AI + 陪练",
+  agent_bot: "AI支招 · 搭档上桌",
+  bot_bot: "AI支招 · 陪练上桌",
 };
 
 /* 地主/农民要等叫分结束才定，开局前同桌都是「同桌」——不预先指派谁和谁一队。
  * 「搭档」是进阶对手的占位称呼，渲染时优先换成服务端公开名（agent_name）。 */
 export const LINEUP_HINTS = {
-  nori_agent: "诺里和搭档与你同桌；地主叫分后确定",
-  nori_bot: "诺里和陪练与你同桌；地主叫分后确定",
-  agent_bot: "搭档和陪练与你同桌，诺里在聊天里支招",
-  bot_bot: "两位陪练与你同桌，诺里在聊天里支招",
+  nori_agent: "AI和搭档与你同桌；地主叫分后确定",
+  nori_bot: "AI和陪练与你同桌；地主叫分后确定",
+  agent_bot: "搭档和陪练与你同桌，AI在聊天里支招",
+  bot_bot: "两位陪练与你同桌，AI在聊天里支招",
 };
 
 /* 全 3 席对齐（含人类座位 0）：seat_drivers 与 seats 一一对应，human 也写明。
@@ -178,23 +198,23 @@ export function normalizeLineup(v) {
 
 /** 目录 label → 用户可读文案：目录当前可能写「当前agent/陪练」，
  * 前端统一收敛为「搭档/陪练」，不把技术词带进大厅（更不出现 AI 字样）。
- * 身份口径：阵容里的「诺里」是 turn 驱动的宿主主 agent → 渲染宿主名；
- * 「搭档」是 game_agent → 渲染 agentName（配置名，默认 nori → 诺里）。 */
+ * 身份口径：阵容里的「AI」是 turn 驱动的宿主主 agent → 渲染宿主名；
+ * 「搭档」是 game_agent → 渲染 agentName（配置标识默认 nori）。 */
 export function friendlyLineupLabel(label, fallback, agentName) {
   const raw = String(label == null ? "" : label).trim() || String(fallback == null ? "" : fallback).trim();
   if (!raw) return "";
   const name = String(agentName == null ? "" : agentName).trim() || "搭档";
   const host = getHostAgentName();
-  // 占位符先落成不冲突的记号，避免「宿主名恰好是诺里」时被第二次替换：
-  // 「诺里」= turn 驱动的宿主主 agent；「搭档/当前agent」= game_agent。
-  return raw
-    .replace(/当前\s*agent/gi, "\u0000")
-    .replace(/搭档/g, "\u0000")
-    .replaceAll(PERSONA_DEFAULT, "\u0001")
-    .replace(/\s*\+\s*/g, " + ")
-    .replaceAll("\u0000", name)
-    .replaceAll("\u0001", host)
-    .trim();
+  // 占位符先落成不冲突的记号，避免「宿主名恰好等于搭档名」时被第二次替换：
+  // 「AI」= turn 驱动的宿主主 agent；「搭档/当前agent」= game_agent。
+  return substituteHostPlaceholder(
+    raw
+      .replace(/当前\s*agent/gi, "\u0000")
+      .replace(/搭档/g, "\u0000")
+      .replace(/\s*\+\s*/g, " + ")
+      .replaceAll("\u0000", name),
+    host
+  ).trim();
 }
 
 /** 目录项 → 阵容选项 [{value,label}]。目录未声明（旧后端）回落内置四档文案。 */
@@ -227,12 +247,8 @@ export function lineupHint(lineup, agentName) {
   // 「搭档」是 game_agent 的占位称呼：有配置名时换成名字，缺席保持中性称呼。
   const name = String(agentName == null ? "" : agentName).trim() || "搭档";
   const host = getHostAgentName();
-  // 同 friendlyLineupLabel：先占位再替换，宿主名与 game_agent 名相同也不会串。
-  return raw
-    .replace(/搭档/g, "\u0000")
-    .replaceAll(PERSONA_DEFAULT, "\u0001")
-    .replaceAll("\u0000", name)
-    .replaceAll("\u0001", host);
+  // 同 friendlyLineupLabel：先落搭档名，再替换宿主占位记号。
+  return substituteHostPlaceholder(raw.replace(/搭档/g, name), host);
 }
 
 /** 当前对局的阵容（mode_options 首选；旧后端按座位构成无法可靠推断，返回空串）。 */
@@ -274,7 +290,7 @@ export function seatDriverOf(match, seatIndex) {
   return driverOf(match);
 }
 
-/** 诺里所在座位（0 起）。规范字段 nori_seat 显式 null = 诺里不占座（教练/队友）。 */
+/** 宿主主 agent 所在座位（0 起）。规范字段 nori_seat 显式 null = 宿主主 agent 不占座（教练/队友）；字段值保持 nori。 */
 export function noriSeatOf(match) {
   if (!match || typeof match !== "object") return null;
   const mo = match.mode_options && typeof match.mode_options === "object" ? match.mode_options : null;
@@ -285,7 +301,7 @@ export function noriSeatOf(match) {
   }
   const plan = lineupPlanOf(lineupOf(match));
   if (plan) return plan.noriSeat;
-  // 2 座位旧局：诺里局的对家座位即诺里；陪练局诺里不占座
+  // 2 座位旧局：宿主主 agent 局的对家座位即宿主主 agent；陪练局不占座
   if (isPractice(match)) return null;
   return driverOf(match) === "turn" ? 1 : null;
 }
@@ -300,7 +316,7 @@ export function noriRoleOf(match) {
   return isPractice(match) ? "coach" : "player";
 }
 
-/** 诺里是队友（教练）而不是同桌玩家：两座位陪练局与 C/D 阵容。 */
+/** 宿主主 agent 是队友（教练）而不是同桌玩家：两座位陪练局与 C/D 阵容。 */
 export function isCoachMatch(match) {
   return noriRoleOf(match) === "coach";
 }
@@ -349,7 +365,7 @@ export function opponentKindOf(match) {
   return "bot";
 }
 
-/** 三档等级是否对该局可见：对诺里或当前 agent（含诺里参战的 bot 模式）。
+/** 三档等级是否对该局可见：对宿主主 agent 或当前 agent（含宿主主 agent 参战的 bot 模式）。
  * 陪练（easy / bot 驱动）不显示三档——它没有威胁分析。 */
 export function levelVisible(match) {
   return opponentKindOf(match) !== "bot";
@@ -366,12 +382,12 @@ export function levelOf(match) {
   return "intermediate";
 }
 
-/** 开局方式提示（对手三选一 + 三档等级）：诺里应战 / 当前 agent 应战 /
+/** 开局方式提示（对手三选一 + 三档等级）：宿主主 agent 应战 / 当前 agent 应战 /
  * 陪练按规则走子。level 只对 nori/agent 有意义，不影响文案承诺。 */
 export function modeHint(mode, level, name) {
   if (mode === "agent") return MODE_HINTS.agent;
   if (mode === "bot") return MODE_HINTS.bot;
-  return MODE_HINTS.nori.replace(PERSONA_DEFAULT, getHostAgentName());
+  return substituteHostPlaceholder(MODE_HINTS.nori, getHostAgentName());
 }
 
 /* ---------------- 归一化 ---------------- */
@@ -382,7 +398,7 @@ export function modeHint(mode, level, name) {
 const LEGACY_TURN_KINDS = new Set(["gomoku", "reversi"]);
 
 /**
- * 是否支持「与诺里对战 / 与陪练对战」模式选择（= 回合驱动棋种）。
+ * 是否支持「与宿主主 agent 对战 / 与陪练对战」模式选择（= 回合驱动棋种）。
  * 入参：目录项（推荐，读 supports_turn）或旧式 kind 字符串（回落白名单）。
  * 目录字段显式给出即定案（false 也定案）；缺字段再按 kind 保守回落。
  */
@@ -401,7 +417,7 @@ function normalizeKind(v) {
   return String(v == null ? "" : v).trim().toLowerCase();
 }
 
-/** UI 内部只区分 nori（诺里是对手）/ practice（诺里是队友）；后端 "bot" 模式
+/** UI 内部只区分 nori（宿主主 agent 是对手）/ practice（宿主主 agent 是队友）；后端 "bot" 模式
  * 即陪练局（modes.MODE_BOT），一并归一为 "practice"。 */
 export function normalizeMode(v) {
   const s = String(v == null ? "" : v).trim().toLowerCase();
@@ -420,7 +436,7 @@ export function normalizeDifficulty(v) {
 /** 视图 → { mode, difficulty }。候选位：mode_options（后端规范）→ options
  * （gomoku_mode）→ 顶层 → view。候选位全缺 mode 时按座位构成回填，与后端
  * modes.normalize_mode_options 的 legacy 推断一致：bot 座位局（无 ai 座）是
- * 陪练局，ai 座位局按诺里局口径（前端保持空串=未知，不显式断言 nori）。
+ * 陪练局，ai 座位局按宿主主 agent 局口径（前端保持空串=未知，不显式断言 nori）。
  * 这样「mode 缺失但 driver=agent 已写入」的旧载荷也能拿到陪练语义。 */
 export function modeOf(match) {
   const o = match && typeof match === "object" ? match : {};
@@ -450,7 +466,7 @@ export function isPractice(match) {
   return modeOf(match).mode === "practice";
 }
 
-/** 对手座位驱动方：turn（诺里行动回合）/ agent（高级陪练）/ bot（简单陪练）。
+/** 对手座位驱动方：turn（宿主主 agent 行动回合）/ agent（高级陪练）/ bot（简单陪练）。
  * 规范字段优先；旧对局缺 driver 时按难度回填（advanced=agent、其余=bot），
  * 与后端 modes.normalize_mode_options 的推断保持一致。 */
 export function driverOf(match) {
@@ -493,6 +509,31 @@ export function setAgentAvatar(value) {
 
 export function getAgentAvatar() {
   return agentAvatar;
+}
+
+/* 宿主主 agent 头像：当前激活人设的「自拍参考图」。
+ * 后端通过 ctx.persona_mgr.get_reference_image() 取到文件，再由插件端点
+ * /api/plugin/kira-plugin-gamehub/host-avatar?v=<mtime> 转发（宿主自己的
+ * /api/personas/{id}/reference-image 需要 JWT，<img> 带不了这个头）。
+ * 空串是有效状态：宿主没配自拍参考图 → 座位渲染名字首字占位，
+ * 绝不借用 game_agent 的头像冒充主 agent。 */
+const HOST_AVATAR_ENDPOINT = /^\/api\/plugin\/kira-plugin-gamehub\/host-avatar(\?.*)?$/;
+
+export function resolveHostAvatar(value) {
+  const s = String(value == null ? "" : value).trim();
+  return HOST_AVATAR_ENDPOINT.test(s) ? s : "";
+}
+
+let hostAvatar = "";
+
+/** 记录 /ui-config 下发的宿主头像地址（脏值/缺席一律当作「没有」）。 */
+export function setHostAvatar(value) {
+  hostAvatar = resolveHostAvatar(value);
+  return hostAvatar;
+}
+
+export function getHostAvatar() {
+  return hostAvatar;
 }
 
 /** 进阶对手（agent 驱动）的对手座位才配进阶对手头像。
@@ -540,8 +581,8 @@ export function matchOver(match) {
   return !!(v.winLine || v.full || v.over || v.phase === "over");
 }
 
-/** 能否代下：诺里是队友（陪练局 / C·D 阵容）+ 本人在座（人类座位）+ 未终局
- * （观战/诺里参战局/终局一律不行）。 */
+/** 能否代下：宿主主 agent 是队友（陪练局 / C·D 阵容）+ 本人在座（人类座位）+ 未终局
+ * （观战/宿主主 agent 参战局/终局一律不行）。 */
 export function canDelegate(match) {
   if (!match || typeof match !== "object") return false;
   if (!isCoachMatch(match)) return false;
@@ -551,7 +592,7 @@ export function canDelegate(match) {
   return !matchOver(match);
 }
 
-/* ---------------- 座位展示名（防「诺里冒充对手」） ---------------- */
+/* ---------------- 座位展示名（防「宿主主 agent 冒充对手」） ---------------- */
 
 const SEAT_FALLBACK_NAMES = ["黑方", "白方"];
 

@@ -15,7 +15,7 @@ def level_of(match):
 
 
 def _delegated_teammate(match):
-    """诺里是队友且人类座位已委托代打（S4「友方高级模式」）。"""
+    """宿主主 agent 是队友且人类座位已委托代打（S4「友方高级模式」）。"""
     return modes.is_delegated(match) and modes.role_of(match) == modes.ROLE_TEAMMATE
 
 
@@ -32,7 +32,7 @@ def _delegated_human(match, seat):
 
 
 def analysis_enabled(match, seat=None):
-    # 代打时诺里替人类座位落子，必须看得见威胁位置（与所选等级无关）；
+    # 代打时宿主主 agent 替人类座位落子，必须看得见威胁位置（与所选等级无关）；
     # seat 缺省/非人类座位保持按等级判定（对手座位不吃代打加成）。
     return _delegated_human(match, seat) or level_of(match) != "beginner"
 

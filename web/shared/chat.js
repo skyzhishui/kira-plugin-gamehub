@@ -163,7 +163,7 @@ export function matchSayKey(entry) {
 
 /** 对手座位新发言（match.chat 增量）：首帧由调用方只播种 seen，绝不调用本函数。
  * 默认仅陪练局、仅非人类座位（对手 agent）进入结果；人类手打 say 永不弹气泡。
- * allowSeat 可选：三人桌按「非诺里、非人类座位」精确分发（每座位独立气泡），
+ * allowSeat 可选：三人桌按「非宿主主 agent、非人类座位」精确分发（每座位独立气泡），
  * 不改变旧调用的默认语义。返回 {nextSeen, entries}（正序）。 */
 export function pickNewMatchSays(chatArr, seen, { practice = false, seats = [], me = -1, allowSeat = null } = {}) {
   const nextSeen = new Set(seen || []);

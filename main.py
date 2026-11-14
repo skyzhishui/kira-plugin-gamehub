@@ -468,6 +468,25 @@ class GamehubPlugin(BasePlugin):
             raise HTTPException(status_code=404, detail="头像不存在")
         return FileResponse(str(path))
 
+    @register.api(method="GET", path="/host-avatar")
+    async def api_get_host_avatar(self):
+        """Serve the host agent's avatar (active persona selfie reference).
+
+        404 when the active persona has no reference image — the front end
+        then renders the seat's name initial rather than another identity's
+        picture.
+        """
+        from fastapi.responses import FileResponse
+
+        from .host.avatar import host_avatar_path
+
+        path = await host_avatar_path(self)
+        if path is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="宿主没有自拍参考图")
+        return FileResponse(str(path))
+
     @register.ws(path="/matches/{match_id}/ws")
     async def match_ws(self, websocket):
         """Live match channel (seat token in ``?t=``, host JWT in ``?token=``)."""

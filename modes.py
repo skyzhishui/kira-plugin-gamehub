@@ -1,24 +1,24 @@
 """对局模式选项（S2-S4）：``role`` / ``driver`` / ``difficulty`` / ``delegation``。
 
-把「诺里在这局里的身份、对手由谁驱动、难度、人类座位是否委托」建模为
+把「game_agent 在这局里的身份、对手由谁驱动、难度、人类座位是否委托」建模为
 **随对局快照持久化的模式选项**（``Match.mode_options``），旧数据（无选项
 行）按座位构成做合理回填，行为与历史完全一致：
 
 - 旧 ``ai`` 座位局 → ``{mode: nori, role: opponent, driver: agent}``：
-  继续由 ``game_agent`` 驱动诺里走子（S2 之前的行为）；
+  继续由 ``game_agent`` 驱动该座位走子（S2 之前的行为）；
 - 旧 ``bot`` 座位局 → ``{mode: bot, role: teammate, driver: bot, difficulty: easy}``：
-  纯规则陪练 + 诺里队友视角发言（与历史一致）。
+  纯规则陪练 + game_agent 队友视角发言（与历史一致）。
 
 新开局默认 ``{mode: nori, driver: turn}``：禁用 game_agent 对手驱动，人类
-每手合法落子触发**强制行动通知**，诺里在回复回合内用会话级临时 ``play``
-工具出招（S2）；``bot`` 模式下诺里是队友（只发言不落子），对手 ``advanced``
+每手合法落子触发**强制行动通知**，宿主主 agent 在回复回合内用会话级临时 ``play``
+工具出招（S2）；``bot`` 模式下宿主主 agent 是队友（只发言不落子），对手 ``advanced``
 由 game_agent 驱动、``easy`` 仅规则 bot（S3）；``bot`` 模式可把人类座位
-持久化委托给诺里代走（S4）。
+持久化委托给宿主主 agent 代走（S4）。
 
 纪律：
 
 - 座位 kind 沿用引擎内部名（``human``/``ai``/``bot``），不在任何文案里
-  露出「AI」字样；诺里座位的显示名仍是「诺里」，bot 座位是陪练名；
+  露出「AI」字样；宿主主 agent 座位的显示名仍是宿主名，bot 座位是陪练名；
 - 本模块是纯函数（不依赖房间层/引擎状态），供 main/room/talk/judge/
   context/tools/web_api 共用；
 - 未知的选项键/取值一律归一到安全默认，绝不让坏数据炸掉读取路径。
@@ -28,11 +28,11 @@ from __future__ import annotations
 
 from typing import Any
 
-# 模式：对诺里本人（S2 行动回合） / 对陪练（诺里队友视角）
+# 模式：对宿主主 agent 本人（S2 行动回合） / 对陪练（宿主主 agent 队友视角）
 MODE_NORI = "nori"
 MODE_BOT = "bot"
 
-# 诺里角色：opponent=对手（S2）；teammate=队友（S3/S4，不落子，委托时除外）
+# 宿主主 agent 角色：opponent=对手（S2）；teammate=队友（S3/S4，不落子，委托时除外）
 ROLE_OPPONENT = "opponent"
 ROLE_TEAMMATE = "teammate"
 
@@ -52,7 +52,7 @@ _MODES = (MODE_NORI, MODE_BOT)
 _DRIVERS = (DRIVER_TURN, DRIVER_AGENT, DRIVER_BOT)
 _DIFFS = (DIFF_STANDARD, DIFF_EASY, DIFF_ADVANCED)
 
-# 全席位对齐（含人类），绝不以 kind=ai 猜测诺里身份。
+# 全席位对齐（含人类），绝不以 kind=ai 猜测宿主主 agent 身份。
 LINEUPS = {
     "nori_agent": ["human", "turn", "agent"],
     "nori_bot": ["human", "turn", "bot"],
@@ -167,7 +167,7 @@ def normalize_mode_options(
     校验，缺驱动时按 ``kind`` 决定默认。**kind 划界（按游戏能力声明）**：
 
     - 模块声明 ``supports_turn_driver=True``（gomoku / reversi）：legacy
-      （无选项行）的 ai 座位局迁移为 ``driver=turn``（用户口径「与诺里对战
+      （无选项行）的 ai 座位局迁移为 ``driver=turn``（用户口径「与宿主主 agent 对战
       不再有 game_agent 参与」，重启后既有 active 局即得新语义）；新开局
       缺驱动同样默认 turn；
     - 其他/未知 kind：保持通用旧行为——legacy 回填 ``agent``，缺驱动保守
@@ -187,7 +187,7 @@ def normalize_mode_options(
 
     raw_mode = str((source or {}).get("mode") or "").strip().lower()
     if raw_mode not in (MODE_NORI, MODE_BOT):
-        # 旧数据回填：bot 座位局是陪练局；ai 座位局是诺里局。
+        # 旧数据回填：bot 座位局是陪练局；ai 座位局是宿主主 agent 局。
         raw_mode = MODE_BOT if (has_bot and not has_ai) else MODE_NORI
     mode = raw_mode
 
@@ -218,7 +218,7 @@ def normalize_mode_options(
         # nori 模式没有规则 bot 对手座位；防御归一到 turn。
         driver = DRIVER_TURN
     if mode == MODE_BOT and driver == DRIVER_TURN:
-        # bot 模式的对手座位不由行动通知回合驱动（诺里是队友）。
+        # bot 模式的对手座位不由行动通知回合驱动（宿主主 agent 是队友）。
         driver = DRIVER_BOT
 
     if mode == MODE_NORI:
@@ -365,8 +365,8 @@ def trigger_seat(match: Any, event: Any = None) -> int:
 def is_wanted_trigger(match: Any, mover: int) -> bool:
     """该局的评论触发是否落在 mover 上（角色感知）。
 
-    - 对手局（诺里参战）：人类落子触发（人类应手后轮到诺里/评论）；
-    - 队友局：对手应手触发（诺里站人类一边，评论对手的回应）。
+    - 对手局（宿主主 agent 参战）：人类落子触发（人类应手后轮到宿主主 agent/评论）；
+    - 队友局：对手应手触发（宿主主 agent 站人类一边，评论对手的回应）。
     终局/开局由调用方单独放行，不经过本判据。
     """
     seats = _seats_of(match)
@@ -381,7 +381,7 @@ def is_wanted_trigger(match: Any, mover: int) -> bool:
 def bound_seat(bound: Any, match: Any) -> int | None:
     """绑定回合上下文 → 该回合的座位（通知工具的视角）。
 
-    显式 ``seat`` 优先；缺省按角色取默认（对手局取诺里座位，队友局取
+    显式 ``seat`` 优先；缺省按角色取默认（对手局取宿主主 agent 座位，队友局取
     人类座位）。解析不出返回 None（观战视图）。
     """
     try:

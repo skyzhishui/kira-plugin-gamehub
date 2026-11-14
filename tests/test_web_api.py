@@ -70,7 +70,7 @@ class FakeCtx:
         self.published: list[tuple[Any, Any, bool]] = []
         self.session_ok = True
         self.session_mgr = SimpleNamespace(resolve_session=self._resolve)
-        self.bot_config = SimpleNamespace(bot=SimpleNamespace(nickname="诺里"))
+        self.bot_config = SimpleNamespace(bot=SimpleNamespace(nickname="汐祈（Seki）"))
 
     def _resolve(self, sid: str) -> Any:
         return SimpleNamespace(sid=sid) if self.session_ok else None
@@ -99,7 +99,7 @@ class FakePlugin:
         self.settings = Settings(
             {
                 "max_active_matches": 5,
-                "agent_name": "诺里",
+                "agent_name": "nori",
                 "practice_name": "小白",
                 "page_chat_enabled": True,
                 "page_chat_talk_default": "judge",
@@ -132,7 +132,7 @@ def make_plugin(tmp_path: Path, *, now: int = 1000) -> FakePlugin:
         repository=FakeRepo(),
         config=Settings({"max_active_matches": 5}),
         now_fn=lambda: now,
-        bot_name="诺里",
+        bot_name="汐祈（Seki）",
         practice_name="小白",
     )
     return FakePlugin(rooms, tmp_path)
@@ -235,7 +235,7 @@ async def test_ui_config_lobby_and_match(tmp_path):
 
     lobby = await data_of(api.ui_config())
     assert lobby["page_session"] == "gamehub:dm:admin"
-    assert lobby["agent_name"] == "诺里"
+    assert lobby["agent_name"] == "nori"
     assert lobby["agent_avatar"] == "./assets/agent-avatar.png"
     assert lobby["match_id"] == ""
     assert lobby["current"] is None
@@ -363,7 +363,7 @@ async def test_games_lists_catalog_and_active_matches(tmp_path):
     assert empty["current"] is None
     assert empty["active_matches"] == []
     gomoku = next(entry for entry in empty["games"] if entry["kind"] == "gomoku")
-    assert gomoku["agent_name"] == "诺里"
+    assert gomoku["agent_name"] == "nori"
     assert gomoku["practice_name"] == "小白"
 
     created = await data_of(api.create_match({"kind": "gomoku"}))
@@ -757,3 +757,111 @@ async def test_ws_without_rooms_reports_error(tmp_path):
     ws = FakeWS()
     await asyncio.wait_for(serve_ws(plugin, ws, "any", ""), timeout=2.0)
     assert ws.sent == [{"type": "error", "code": "not_ready", "message": "对局服务不可用"}]
+
+
+# ----------------------------------------------------------------------
+#  Host agent identity: name + selfie reference image
+# ----------------------------------------------------------------------
+async def test_ui_config_host_avatar_uses_the_persona_reference_image(tmp_path):
+    """The host seat uses the active persona's selfie reference image.
+
+    Resolved through the host's public ``PersonaManager.get_reference_image``
+    accessor — never by guessing a path — so the plugin cannot show one
+    identity in place of another.
+    """
+    plugin = make_plugin(tmp_path)
+    ref = tmp_path / "seki.png"
+    ref.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    async def get_reference_image(persona_id=None):
+        return ref
+
+    plugin.ctx.persona_mgr = SimpleNamespace(get_reference_image=get_reference_image)
+    api = GamehubApi(plugin)
+
+    config = await data_of(api.ui_config())
+    assert config["host_avatar"].startswith(
+        "/api/plugin/kira-plugin-gamehub/host-avatar?v="
+    )
+    # The game_agent avatar stays a separate, plugin-owned asset.
+    assert config["agent_avatar"] == "./assets/agent-avatar.png"
+
+
+async def test_ui_config_host_avatar_is_empty_without_a_reference_image(tmp_path):
+    """No reference image → empty string, so the seat renders a name initial."""
+    plugin = make_plugin(tmp_path)
+
+    async def get_reference_image(persona_id=None):
+        return None
+
+    plugin.ctx.persona_mgr = SimpleNamespace(get_reference_image=get_reference_image)
+    api = GamehubApi(plugin)
+    config = await data_of(api.ui_config())
+    assert config["host_avatar"] == ""
+
+
+async def test_ui_config_host_avatar_tolerates_a_missing_persona_manager(tmp_path):
+    plugin = make_plugin(tmp_path)
+    plugin.ctx.persona_mgr = None
+    api = GamehubApi(plugin)
+    assert (await data_of(api.ui_config()))["host_avatar"] == ""
+
+
+async def test_ui_config_names_host_and_agent_separately(tmp_path):
+    """Host name comes from the runtime (active persona), agent from config."""
+    plugin = make_plugin(tmp_path)
+    plugin.host_agent_name = "汐祈（Seki）"
+    plugin.settings.agent_name = "nori"
+    api = GamehubApi(plugin)
+
+    config = await data_of(api.ui_config())
+    assert config["host_agent_name"] == "汐祈（Seki）"
+    assert config["agent_name"] == "nori"
+    assert config["agent_name"] != config["host_agent_name"]
+
+
+async def test_lineup_labels_carry_both_identities(tmp_path):
+    """Three-seat lineup copy names the host AI and the game_agent separately."""
+    plugin = make_plugin(tmp_path)
+    plugin.host_agent_name = "汐祈（Seki）"
+    plugin.settings.agent_name = "nori"
+    api = GamehubApi(plugin)
+
+    config = await data_of(api.ui_config())
+    doudizhu = next(g for g in config["games"] if g["kind"] == "doudizhu")
+    labels = {item["value"]: item["label"] for item in doudizhu["lineups"]}
+    assert labels["nori_agent"] == "汐祈（Seki） + nori"
+    assert labels["nori_bot"] == "汐祈（Seki） + 陪练"
+    assert "汐祈（Seki）" in labels["agent_bot"]
+    assert "nori" in labels["agent_bot"]
+
+
+async def test_ui_config_refreshes_the_host_name_from_the_persona(tmp_path):
+    """A persona switch must reach the lobby without restarting the plugin."""
+    plugin = make_plugin(tmp_path)
+    plugin.host_agent_name = "旧名字"
+    current = {"name": "汐祈（Seki）"}
+
+    async def get_active_persona():
+        return SimpleNamespace(name=current["name"])
+
+    plugin.ctx.persona_mgr = SimpleNamespace(
+        get_active_persona=get_active_persona,
+        get_reference_image=lambda persona_id=None: None,
+    )
+
+    async def refresh_host_name():
+        name = await plugin.ctx.persona_mgr.get_active_persona()
+        plugin.host_agent_name = str(getattr(name, "name", "") or "").strip() or "AI"
+        return plugin.host_agent_name
+
+    plugin._runtime = SimpleNamespace(refresh_host_name=refresh_host_name)
+    api = GamehubApi(plugin)
+
+    config = await data_of(api.ui_config())
+    assert config["host_agent_name"] == "汐祈（Seki）"
+
+    current["name"] = "阿狸"
+    config = await data_of(api.ui_config())
+    assert config["host_agent_name"] == "阿狸"
+    assert config["agent_name"] == "nori"  # configured game_agent name, untouched

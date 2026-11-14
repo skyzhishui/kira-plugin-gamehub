@@ -6,7 +6,7 @@
  * 「进入操作」：GET /matches/{id}/control 拿 human token → sessionStorage →
  * 跳 match；不修改页面 identity、不迁移 actor、口令不进链接（shared/matches.js）。
  * 页面路径：/page/plugin/kira-plugin-gamehub/hub/（静态托管，相对路径全部相对本目录）。
- * 人设名可配置：/games 的 agent_name 决定「诺里」这一处置渲染成什么（默认仍为诺里）。
+ * 人设名可配置：/games 的 agent_name 决定 game_agent 渲染成什么名字（默认配置标识 nori）。
  */
 
 import { api, localToken, readSessionToken, writeSessionToken, PLUGIN_ID, API_BASE } from "./shared/api.js";
@@ -165,39 +165,13 @@ function render({ games, current, active_matches: rawActive } = {}) {
   }
   const active = current && current.id && !isOver(current) ? current : null;
   list.forEach((g, i) => grid.appendChild(gameCard(g, i, active)));
-  // 路线图预告（M4）：纯展示卡，不产生请求；有真实 ready=false 游戏时自然重复也无害
-  const have = new Set(list.map((g) => g.kind));
-  SOON.filter((g) => !have.has(g.kind)).forEach((g, i) => grid.appendChild(soonCard(g, list.length + i + 1)));
   // 单局提示放最后：它 grid-column 横跨整行，插在卡片中间会把后面的卡片挤到下一行
   if (active) grid.appendChild(activeNote(active));
 }
 
-const SOON = [
-  { kind: "chess", name: { zh: "国际象棋", en: "Chess" }, family: "棋", blurb: "王车易位与将死，规则完整版筹备中。", glyph: "♞" },
-];
-
-function soonCard(g, i) {
-  const card = el("article", "game-card not-ready reveal");
-  card.dataset.kind = g.kind;
-  card.style.animationDelay = `${80 + i * 70}ms`;
-  const cover = el("div", "card-cover-wrap card-cover-soon");
-  cover.appendChild(el("span", "soon-glyph", g.glyph));
-  card.appendChild(cover);
-  const top = el("div", "card-top");
-  if (g.family) top.appendChild(el("span", "chip family", g.family));
-  top.appendChild(el("span", "chip soon", "准备中"));
-  card.appendChild(top);
-  card.appendChild(el("h3", "game-name", g.name.zh));
-  card.appendChild(el("p", "game-en", g.name.en));
-  card.appendChild(el("p", "game-blurb", g.blurb));
-  const actions = el("div", "card-actions");
-  const btn = el("button", "btn", "筹备中");
-  btn.type = "button";
-  btn.disabled = true;
-  actions.appendChild(btn);
-  card.appendChild(actions);
-  return card;
-}
+/** 目录里 ready=false 的棋种仍会出卡（服务端能力声明说了算），只是开局按钮
+ * 置灰并标「准备中」。大厅不再额外塞路线图预告卡：没有实现的棋种
+ * （如国际象棋）不进大厅，避免给出点不动的筹备入口。 */
 
 /** 封面图候选链：目录式棋种优先取本游戏目录内的素材（games/<kind>/assets/card-<kind>.png|svg），
  * 再回落公共 assets/card-<kind>.png；全失败自动移除（不塌卡）。新增棋种素材放各自目录。 */
@@ -479,7 +453,7 @@ function turnText(match) {
   if (match.me === wo) return isCardGame(match) ? (String(v && v.phase) === "bid" ? "轮到你叫分" : "轮到你出牌") : "轮到你";
   if (seat) {
     const verb = isCardGame(match) ? (String(v && v.phase) === "bid" ? "叫分中…" : "出牌中…") : "思考中…";
-    // 陪练局/教练阵容的座位不是诺里本人（advanced 的 ai 座位也一样）
+    // 陪练局/教练阵容的座位不是宿主主 agent 本人（advanced 的 ai 座位也一样）
     const noriSeat = noriSeatOf(match);
     if (noriSeat != null && wo === noriSeat) return `${getHostAgentName()}${verb}`;
     return `${seatDisplay(seat, wo, practice)} ${verb}`;
@@ -623,7 +597,7 @@ function opponentLabel(m, agentName) {
 function modeBlock(g) {
   const kind = g.kind;
   const choice = readModeChoice(kind);
-  // agent_name 就是 game_agent 人设名（默认 "nori" → 渲染「诺里」）
+  // agent_name 就是 game_agent 人设名（默认配置标识 "nori"，渲染名由配置/服务端决定）
   const agentName = personaNameText(g && g.agent_name);
   const practiceName = practiceNameText(g && g.practice_name);
 

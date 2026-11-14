@@ -116,11 +116,11 @@ test("segments 全为非渲染段（at/reply）时回退 content 纯文本", () 
   const { parts, fromSegments } = extractMessageParts({
     id: 3,
     role: "user",
-    content: "@诺里 你好",
+    content: "@AI 你好",
     segments: [{ type: "at", target_user_id: "nori" }],
   });
   assert.equal(fromSegments, false);
-  assert.deepEqual(parts, [{ kind: "text", text: "@诺里 你好" }]);
+  assert.deepEqual(parts, [{ kind: "text", text: "@AI 你好" }]);
 });
 
 test("纯文本 [表情包:…] 内容（无 hash/无 URL）绝不伪造图片", () => {
@@ -163,15 +163,15 @@ test("媒体 URL：KiraAI 归档/网页聊天端点；同源判定外链/data:/b
   assert.equal(cleanMediaTitle("[表情包:开心]"), "", "整枚标记形态剥掉（desc 在标记内）");
 });
 
-/* ---------------- 自动播放选择（历史不重播 / 仅诺里新消息） ---------------- */
+/* ---------------- 自动播放选择（历史不重播 / 仅宿主新消息） ---------------- */
 
-test("水位线：初次拉历史只记水位不播；旧消息不播；仅诺里新语音播；用户语音不播", () => {
+test("水位线：初次拉历史只记水位不播；旧消息不播；仅宿主新语音播；用户语音不播", () => {
   const history = [
     { id: 1, role: "user", content: "hi" },
     { id: 2, role: "assistant", content: "[语音]", segments: [{ type: "voice", text: "", hash: "v1", local_media: true, media_kind: "voice", local_url: "/api/messages/12/media/v1" }] },
     { id: 3, role: "assistant", content: "纯文本回复" },
   ];
-  // 初载（历史/重连）：只推水位（诺里最大 id，含纯文本消息）
+  // 初载（历史/重连）：只推水位（宿主消息最大 id，含纯文本消息）
   const first = selectAutoPlayVoices(history, 0, { firstLoad: true });
   assert.deepEqual(first.jobs, []);
   assert.equal(first.nextWatermark, 3);
@@ -179,7 +179,7 @@ test("水位线：初次拉历史只记水位不播；旧消息不播；仅诺�
   const again = selectAutoPlayVoices(history, first.nextWatermark, { firstLoad: false });
   assert.deepEqual(again.jobs, []);
   assert.equal(again.nextWatermark, 3);
-  // 新诺里语音消息：入队一次
+  // 新宿主语音消息：入队一次
   const withNew = [
     ...history,
     { id: 4, role: "assistant", content: "[语音]", segments: [{ type: "voice", text: "", hash: "v4", local_media: true, media_kind: "voice", local_url: "/api/messages/12/media/v4" }] },
@@ -593,7 +593,7 @@ test("图片装载：先 loading 占位（skel 微光、aria-hidden、无可见 
   body.appendChild(ph);
   assert.equal(fetches, 1, "有 src 即拉取");
   assert.ok(ph.className.includes("msg-media-loading"), "loading 占位类");
-  assert.ok(ph.className.includes("skel"), "诺里 skel 微光语言");
+  assert.ok(ph.className.includes("skel"), "骨架屏 skel 微光语言");
   assert.equal(ph.getAttribute("aria-hidden"), "true", "占位不进读屏");
   const img = imgIn(doc);
   assert.ok(img, "img 已预创建");

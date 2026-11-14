@@ -34,7 +34,7 @@ function memoryQueue() {
   return { q, shown };
 }
 
-/** 与 match.js 相同的选择逻辑：消费历史里所有未见过的诺里消息（正序）。 */
+/** 与 match.js 相同的选择逻辑：消费历史里所有未见过的宿主消息（正序）。 */
 function takeFresh(items, queue) {
   const fresh = [];
   for (const m of items) {

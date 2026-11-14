@@ -41,8 +41,43 @@ def create_context(*, seed: int, players: int, options: dict[str, str]) -> Creat
     return CreateContext(seed=seed, players=players, options=options)
 
 
-def catalog() -> list[dict[str, Any]]:
-    """大厅/``game_list`` 用的游戏清单（不含规则长文）。"""
+# 三人桌阵容标签模板：``{host}`` = 宿主主 agent（跑行动通知回合的那个 AI），
+# ``{agent}`` = 插件自有的 game_agent。两边都不写死名字——配置改了标签跟着变。
+LINEUP_TEMPLATES = (
+    ("nori_agent", "{host} + {agent}"),
+    ("nori_bot", "{host} + 陪练"),
+    ("agent_bot", "{agent} + 陪练（{host}队友）"),
+    ("bot_bot", "两位陪练（{host}队友）"),
+)
+
+# 调用方拿不到名字时的中性称呼（绝不回落到某个写死的人设名）。
+# 正常路径一定带真实名字：宿主名来自宿主当前激活人设，agent 名来自配置。
+NEUTRAL_HOST_NAME = "AI"
+NEUTRAL_AGENT_NAME = "搭档"
+
+
+def lineup_labels(host_name: str = "", agent_name: str = "") -> list[dict[str, str]]:
+    """Render the three-seat lineup labels for the given identities."""
+    host = str(host_name or "").strip() or NEUTRAL_HOST_NAME
+    agent = str(agent_name or "").strip() or NEUTRAL_AGENT_NAME
+    return [
+        {
+            "value": value,
+            "label": template.replace("{host}", host).replace("{agent}", agent),
+        }
+        for value, template in LINEUP_TEMPLATES
+    ]
+
+
+def catalog(host_name: str = "", agent_name: str = "") -> list[dict[str, Any]]:
+    """大厅/``game_list`` 用的游戏清单（不含规则长文）。
+
+    Only games that are actually playable are listed: an entry the lobby shows
+    but cannot start (``ready=False``) is a dead "筹备中" button, which is
+    exactly the kind of non-entry we do not want in the lobby. The capability
+    fields below let the front end decide what it may offer, so no client-side
+    ``kind === ...`` allow-list is needed.
+    """
     return [
         {
             "kind": m.kind,
@@ -72,14 +107,11 @@ def catalog() -> list[dict[str, Any]]:
             # 能力声明：前端/模式据此决定是否支持「行动通知回合」等模式，
             # 不再维护 ``kind === "gomoku"`` 白名单。
             "supports_turn": bool(getattr(m, "supports_turn_driver", False)),
-            **({"lineups": [
-                {"value": "nori_agent", "label": "诺里 + 当前agent"},
-                {"value": "nori_bot", "label": "诺里 + 陪练"},
-                {"value": "agent_bot", "label": "当前agent + 陪练（诺里队友）"},
-                {"value": "bot_bot", "label": "两位陪练（诺里队友）"},
-            ]} if m.kind == "doudizhu" else {}),
+            **({"lineups": lineup_labels(host_name, agent_name)}
+               if m.kind == "doudizhu" else {}),
         }
         for m in all_modules()
+        if m.ready
     ]
 
 

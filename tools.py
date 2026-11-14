@@ -160,6 +160,12 @@ def _opponent_name(match: Any) -> str:
     return name or "对手"
 
 
+def _agent_configured_name(plugin: Any) -> str:
+    """Configured ``game_agent`` name (default ``nori``); never a persona guess."""
+    settings = getattr(plugin, "settings", None)
+    return str(getattr(settings, "agent_name", "") or "").strip() or "nori"
+
+
 def _view_text(match: Any, seat: int | None) -> str:
     """Board view for a tool result, without the retired ``MOVE:`` lines."""
     if seat is None:
@@ -407,7 +413,8 @@ async def _bound_state_text(plugin: Any, bound: dict[str, Any]) -> str:
 async def game_list(plugin: Any, event: Any, **kwargs: Any) -> str:
     """List playable games with their move syntax."""
     lines = ["可玩的游戏："]
-    for game in games.catalog():
+    host_name = str(getattr(plugin, "host_agent_name", "") or "").strip()
+    for game in games.catalog(host_name, _agent_configured_name(plugin)):
         if not game["ready"]:
             continue
         players = game["players"]

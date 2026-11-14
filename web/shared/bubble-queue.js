@@ -1,6 +1,6 @@
 /* bubble-queue.js — 座位发言气泡的排队播放器（纯逻辑，Node 可测）。
  *
- * 需求（诺里座位与陪练对手座位共用同一套规则）：
+ * 需求（宿主主 agent 座位与陪练对手座位共用同一套规则）：
  * - 多条消息按「到达顺序」逐条展示：不合并成一条、不取最新一条；
  * - 每条至少展示 BUBBLE_MIN_SHOW_MS（1s）：不足 1s 时新消息只排队，
  *   到点才换，保证肉眼能看清每一条；
@@ -42,8 +42,8 @@ export function matchStreamedIndex(items, buffer) {
  *
  * items 为宿主历史（时间正序）；keyOf(msg) 给气泡键，payloadOf(msg) 给
  * {text, media}。行为：
- * - firstLoad：把历史里所有诺里 key 播种为已见（不播放）；
- * - 其余重拉：所有未见过的诺里消息按时间正序入队；
+ * - firstLoad：把历史里所有宿主主 agent key 播种为已见（不播放）；
+ * - 其余重拉：所有未见过的宿主主 agent 消息按时间正序入队；
  * - 流式临时条目结算：在未见消息里按 liveText 定位落库消息并 finalize；
  *   初载在全部条目匹配，覆盖 SSE 抢跑历史返回的竞态；
  * - 未匹配时**保留** liveToken/liveText 交给下次重拉继续匹配（前缀不丢）。

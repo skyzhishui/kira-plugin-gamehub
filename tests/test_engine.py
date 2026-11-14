@@ -241,3 +241,24 @@ def test_match_roundtrip_dict():
     restored = Match.from_dict(data)
     assert restored.to_dict() == match.to_dict()
     assert view_match(restored, 0)["view"] == view_match(match, 0)["view"]
+
+
+def test_catalog_lists_only_playable_games():
+    """The lobby must not offer an entry it cannot start (e.g. chess)."""
+    kinds = [g["kind"] for g in games.catalog()]
+    assert "gomoku" in kinds and "reversi" in kinds and "doudizhu" in kinds
+    assert "chess" not in kinds
+    assert all(g["ready"] for g in games.catalog())
+
+
+def test_lineup_labels_follow_the_configured_identities():
+    """Lineup copy is rendered from names, never from a hard-coded persona."""
+    labels = {x["value"]: x["label"] for x in games.lineup_labels("汐祈（Seki）", "nori")}
+    assert labels["nori_agent"] == "汐祈（Seki） + nori"
+    assert labels["nori_bot"] == "汐祈（Seki） + 陪练"
+    assert labels["agent_bot"] == "nori + 陪练（汐祈（Seki）队友）"
+    assert labels["bot_bot"] == "两位陪练（汐祈（Seki）队友）"
+
+    # A missing host name degrades to a neutral label, not to a persona name.
+    fallback = {x["value"]: x["label"] for x in games.lineup_labels("", "")}
+    assert fallback["nori_agent"] == f"{games.NEUTRAL_HOST_NAME} + {games.NEUTRAL_AGENT_NAME}"

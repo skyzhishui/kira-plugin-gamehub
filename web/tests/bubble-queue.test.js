@@ -638,7 +638,7 @@ test("reset/dispose 清空已消费 token 记录（切会话不串台）", () =>
   assert.equal(q.provisional({ token: "live-1", text: "A" }), "queued");
 });
 
-/** 与 match.js reloadChatHistory 相同的选择逻辑：所有未见过诺里消息按正序入队。 */
+/** 与 match.js reloadChatHistory 相同的选择逻辑：所有未见过的宿主消息按正序入队。 */
 function collectFresh(items, queue) {
   const fresh = [];
   for (const m of items) {

@@ -25,6 +25,7 @@ import {
   matchHref,
   enterControl,
 } from "../shared/matches.js";
+import { HOST_PLACEHOLDER } from "../shared/mode.js";
 import { fetchUiConfig, chatSessionFromConfig, isChatReadOnly } from "../shared/chat.js";
 
 /* ---------------- 1) 契约解析 ---------------- */
@@ -54,13 +55,13 @@ const CONTRACT_PAYLOAD = {
       kind: "chess",
       game_name: "国际象棋",
       players: [
-        { seat: 0, kind: "ai", actor: "", name: "诺里" },
+        { seat: 0, kind: "ai", actor: "", name: "汐祈（Seki）" },
         { seat: 1, kind: "human", actor: "uid-bob", name: "小波" },
       ],
       source: { kind: "webui", platform: "", session_id: "" },
       status: "",
       move_count: 3,
-      turn_text: "诺里思考中…",
+      turn_text: "汐祈（Seki）思考中…",
       notice_target: null,
       can_control: false,
     },
@@ -70,7 +71,7 @@ const CONTRACT_PAYLOAD = {
       game_name: "五子棋",
       players: [
         { seat: 0, kind: "human", actor: "uid-carl", name: "老卡" },
-        { seat: 1, kind: "ai", actor: "", name: "诺里" },
+        { seat: 1, kind: "ai", actor: "", name: "汐祈（Seki）" },
       ],
       source: { kind: "chat", platform: "live2d", session_id: "l2d-9" },
       status: { outcome: "win", resultText: "黑方胜" },
@@ -173,7 +174,7 @@ test("开局来源与 notice 诊断文案", () => {
 test("轮次行：手数 + 轮次文案；缺省回落", () => {
   const [chatPair, webui, overMatch, botPair] = parseActiveMatches(CONTRACT_PAYLOAD);
   assert.equal(turnSummary(chatPair), "第 24 手 · 轮到 阿空（uid-alicia）行棋");
-  assert.equal(turnSummary(webui), "第 3 手 · 诺里思考中…");
+  assert.equal(turnSummary(webui), "第 3 手 · 汐祈（Seki）思考中…");
   assert.equal(turnSummary(overMatch), "第 51 手 · 黑方胜");
   assert.equal(turnSummary(botPair), "等待开局");
   assert.equal(turnSummary({ moveCount: null, turnText: "", status: { resultText: "白方胜" } }), "白方胜");
@@ -199,8 +200,8 @@ test("跳转地址：对局 ID 进 query 且编码；观战与接管共用同一
   assert.equal(matchHref(""), "./match.html?id=");
 });
 
-test("kindLabel：AI 展示为诺里，bot 原样，人类不标注", () => {
-  assert.equal(kindLabel("ai"), "诺里");
+test("kindLabel：宿主座位回落占位「AI」，bot 原样，人类不标注", () => {
+  assert.equal(kindLabel("ai"), HOST_PLACEHOLDER);
   assert.equal(kindLabel("bot"), "陪练");
   assert.equal(kindLabel("human"), "");
 });

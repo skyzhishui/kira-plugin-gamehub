@@ -354,7 +354,11 @@ def _label(labels: list[str], seat: int | None) -> str:
 
 
 def _bot_name(plugin: Any) -> str:
-    """Host bot display name; falls back to "你" (no hard-coded persona)."""
+    """Host AI display name; falls back to "你" (no hard-coded persona)."""
+    # Runtime-resolved active persona name wins (set in host/runtime.py).
+    host = str(getattr(plugin, "host_agent_name", "") or "").strip()
+    if host:
+        return _safe(host)
     getter = getattr(plugin, "bot_nickname", None)
     if isinstance(getter, str) and getter.strip():
         return _safe(getter)
@@ -410,9 +414,10 @@ def _describe_room(plugin: Any, room: Any, *, snapshot: bool) -> str:
         )
 
     if match.kind == "doudizhu":
+        who = _bot_name(plugin)
         stance = "- 立场：" + (
-            "诺里为人类玩家的场边队友，不占席位"
-            if teammate else "诺里占席参战；农民同队、地主独战，叫分前阵营待定"
+            f"{who}为人类玩家的场边队友，不占席位"
+            if teammate else f"{who}占席参战；农民同队、地主独战，叫分前阵营待定"
         )
         colors = "- 席位：" + "、".join(
             f"{_safe(s.name)}（{_safe(_label(labels, i))}）" for i, s in enumerate(seats)
@@ -494,11 +499,12 @@ def _chat_snapshot(match: Any, viewer_seat: int | None) -> str:
 
 
 def _player_name(seat: Any, fallback: str = "棋手", *, teammate: bool = False) -> str:
-    """Seat display name: prefer the stored seat name (avoid "诺里（诺里）").
+    """Seat display name: prefer the stored seat name.
 
-    A teammate match's AI seat is the opponent (advanced practice bot): never
-    call it "诺里" — keep its stored name ("陪练") or fall back to "对手".
-    Opponent matches fall back to "诺里" on an empty name.
+    Seat names are resolved by the room layer (the host AI seat carries the
+    active persona name, the agent seat carries the configured game_agent
+    name), so this never invents one. A non-human seat without a stored name
+    falls back to 「对手」.
     """
     if getattr(seat, "kind", "") == "ai":
         return _safe(

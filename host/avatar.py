@@ -11,6 +11,7 @@ Every other visual (banner, lobby background, stickers) is character-free.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import re
@@ -208,3 +209,54 @@ def clear_avatar(plugin: Any) -> dict[str, Any]:
                 pass
     logger.info("gamehub: agent avatar reset to the bundled default")
     return {"agent_avatar": avatar_url(plugin), "uploaded": False, "size": 0}
+
+
+# ----------------------------------------------------------------------
+#  Host agent avatar (the active persona's selfie reference image)
+# ----------------------------------------------------------------------
+async def host_avatar_path(plugin: Any) -> Path | None:
+    """Active persona's selfie reference image, resolved through the host API.
+
+    ``ctx.persona_mgr.get_reference_image()`` is the host's public accessor: it
+    takes the *active* persona when no id is given, validates the recorded path
+    (``data/selfie_refs/<persona_id>.<ext>``) and returns ``None`` when the
+    persona has no reference image — so the UI never has to guess a path or
+    fall back to another character's picture.
+    """
+    ctx = getattr(plugin, "ctx", None)
+    manager = getattr(ctx, "persona_mgr", None)
+    getter = getattr(manager, "get_reference_image", None)
+    if not callable(getter):
+        return None
+    try:
+        path = getter()
+        if asyncio.iscoroutine(path) or isinstance(path, asyncio.Future):
+            path = await path
+    except Exception:  # noqa: BLE001 - a missing avatar is cosmetic
+        logger.debug("gamehub: host avatar lookup failed", exc_info=True)
+        return None
+    if not path:
+        return None
+    candidate = Path(path)
+    try:
+        if not candidate.is_file():
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
+async def host_avatar_url(plugin: Any) -> str:
+    """URL of the host agent avatar, or ``""`` when the host has none.
+
+    An empty string is meaningful: the front end then renders the seat's name
+    initial instead of borrowing the ``game_agent`` avatar.
+    """
+    path = await host_avatar_path(plugin)
+    if path is None:
+        return ""
+    try:
+        stamp = int(path.stat().st_mtime)
+    except OSError:
+        stamp = 0
+    return f"/api/plugin/kira-plugin-gamehub/host-avatar?v={stamp}"

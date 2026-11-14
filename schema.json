@@ -8,11 +8,11 @@
         "type": "string",
         "name": "Agent Name",
         "default": "nori",
-        "hint": "Display name the host AI uses inside game rooms. Shown to the opponent and used in table talk.",
+        "hint": "Display name of the plugin-owned game_agent (the AI that plays the advanced seats). Shown to the opponent and used in table talk.",
         "locales": {
           "zh": {
             "name": "对弈者名字",
-            "hint": "宿主 AI 在对局中使用的显示名，会展示给对手，也用于桌面解说里的自称。"
+            "hint": "插件自有的 game_agent 显示名（进阶对手/教练席位由它驱动）。默认值 nori 是配置标识，会原样展示给对手，也用于桌面解说里的自称。"
           }
         }
       },
@@ -32,11 +32,11 @@
         "type": "string",
         "name": "Agent Avatar Path",
         "default": "",
-        "hint": "Optional local image used as the game agent avatar. Empty = the bundled default (nori's avatar); the WebUI lobby can also upload a replacement.",
+        "hint": "Optional local image used as the game agent avatar. Empty = the bundled default; the WebUI lobby can also upload a replacement.",
         "locales": {
           "zh": {
             "name": "对弈者头像路径",
-            "hint": "可选：本地图片路径，作为 game_agent 头像。留空=使用内置默认头像（nori 头像）；也可在 WebUI 大厅直接上传替换。"
+            "hint": "可选：本地图片路径，作为 game_agent 头像。留空=使用插件内置默认头像；也可在 WebUI 大厅直接上传替换。"
           }
         }
       }
@@ -51,7 +51,10 @@
         "type": "string",
         "name": "Decision Mode",
         "default": "agent",
-        "options": ["agent", "bot"],
+        "options": [
+          "agent",
+          "bot"
+        ],
         "hint": "agent = LLM agent makes moves (falls back to the rule bot on failure); bot = rule bot only, no model calls.",
         "locales": {
           "zh": {
@@ -212,7 +215,12 @@
         "type": "string",
         "name": "Private Chat Tier",
         "default": "moves",
-        "options": ["judge", "moves", "key", "off"],
+        "options": [
+          "judge",
+          "moves",
+          "key",
+          "off"
+        ],
         "hint": "Default table talk tier for private-chat matches. judge = smart timing; moves = try every move but still cooled down; key = once every N moves plus start/end; off = silent.",
         "locales": {
           "zh": {
@@ -225,7 +233,11 @@
         "type": "string",
         "name": "Group Chat Tier",
         "default": "key",
-        "options": ["judge", "key", "off"],
+        "options": [
+          "judge",
+          "key",
+          "off"
+        ],
         "hint": "Default table talk tier for group-chat matches (anti-spam; moves is not offered in groups).",
         "locales": {
           "zh": {
@@ -238,7 +250,12 @@
         "type": "string",
         "name": "WebUI Page Tier",
         "default": "judge",
-        "options": ["judge", "moves", "key", "off"],
+        "options": [
+          "judge",
+          "moves",
+          "key",
+          "off"
+        ],
         "hint": "Default table talk tier for matches started from the WebUI page.",
         "locales": {
           "zh": {

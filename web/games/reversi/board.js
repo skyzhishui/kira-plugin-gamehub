@@ -1,4 +1,4 @@
-/* games/reversi/board.js — 黑白棋 canvas 棋盘（诺里主题 · 翻子动效版）。
+/* games/reversi/board.js — 黑白棋 canvas 棋盘（宿主主 agent 主题 · 翻子动效版）。
  *
  * 纪律沿用 shared/board.js（五子棋）：
  * - devicePixelRatio 正确缩放；ResizeObserver 驱动重绘；绘制空间 = 画布内容盒，

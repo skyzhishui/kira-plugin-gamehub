@@ -149,7 +149,7 @@ const HAND = [
 
 const SEATS = [
   { kind: "human", name: "阿空(我)", joined: true },
-  { kind: "ai", name: "诺里", joined: true },
+  { kind: "ai", name: "汐祈（Seki）", joined: true },
   { kind: "ai", name: "蕾依（Raiy）", joined: true },
 ];
 
@@ -353,7 +353,7 @@ test("不要：仅 canPass=true 且本人回合出现；点击提交 pass", asyn
   const notMine = await mount({ canPass: true, turn: 1, myTurn: false });
   try {
     assert.equal(byClass(notMine.root, "dz-pass")[0].classList.contains("hidden"), true, "非本人回合不显示不要");
-    assert.ok(byClass(notMine.root, "dz-wait")[0].textContent.includes("等待 诺里 出牌"));
+    assert.ok(byClass(notMine.root, "dz-wait")[0].textContent.includes("等待 汐祈（Seki） 出牌"));
   } finally {
     notMine.dom.restore();
   }

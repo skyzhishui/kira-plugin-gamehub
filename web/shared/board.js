@@ -1,4 +1,4 @@
-/* shared/board.js — GomokuBoard：canvas 棋盘渲染与交互（诺里主题 · 动效版）。
+/* shared/board.js — GomokuBoard：canvas 棋盘渲染与交互（宿主主 agent 主题 · 动效版）。
  *
  * - devicePixelRatio 正确缩放，ResizeObserver 驱动重绘（棋盘尺寸取宿主容器短边）
  * - 悬停显示预落子并轻微呼吸；键盘（方向键 + 回车/空格）可移动光标并落子
