@@ -625,7 +625,9 @@ class GameRoom:
         - ``grant_key`` 校验由调用方（TurnDirector）在锁外完成（授权映射是
           director 状态）；房间层只负责座位 kind / 等待位 / 手数校验。
         - ``say`` / ``persist_say`` 语义与 ``apply_ai_move`` 完全一致：只有
-          合法落子才在同一快照里追加对局聊天。
+          合法落子才在同一快照里追加对局聊天。追加的条目带 ``by="host"``
+          （``MatchChat.by``）：座位是人类座位，说话的是宿主主 agent，前端
+          据此把这条 say 挂到宿主的教练位气泡。
         """
         event: dict[str, Any] | None = None
         async with self.lock:
@@ -647,7 +649,11 @@ class GameRoom:
             action: dict[str, Any] = {"type": "move", "move": move}
             if say and persist_say:
                 action["say"] = say
-            result = apply_match_action(self.match, seat, action, self.now_fn())
+            # 代下 say 标记真实说话人（宿主主 agent），前端据此把这条发言
+            # 归到宿主的教练位气泡，而不是静默过滤（人类座位不弹泡）。
+            result = apply_match_action(
+                self.match, seat, action, self.now_fn(), say_by="host"
+            )
             if not result.ok:
                 return None, result.message
             self.match = result.match

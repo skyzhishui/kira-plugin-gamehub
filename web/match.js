@@ -493,11 +493,17 @@ function renderStatus(match) {
  * （-1）的单例队列展示。 */
 const COACH_SEAT = -1;
 
-/** 队列键 = 座位号；人设不占座（教练/队友阵容）时统一用 COACH_SEAT。
- * 否则 match.chat 里人设的 say（seat=null/-1）会被归一到座位 0，
- * 落到「人类座位」上、被 isTalkSeat 过滤掉而永不展示。 */
-function talkSeatKey(match, seatIndex) {
-  return noriSeatOf(match) == null ? COACH_SEAT : seatIndex;
+/** 队列键 = 发言归属座位。代下宿主发言（by="host"）归教练位气泡（队友区的
+ * 宿主头像）；其余一律按发言者真实座位归各自的座位气泡——含 2 座位陪练局的
+ * 对手座位（noriSeatOf 为 null 只代表宿主不占座，不代表所有发言都归教练位）。
+ * 座位号缺失/越界（理论不应出现）回落教练位；教练位气泡未挂载时
+ * showSeatSays 静默丢弃，绝不把发言冒充到人类座位上。 */
+function talkSeatKey(match, entry) {
+  if (entry && entry.by === "host") return COACH_SEAT;
+  const idx = Number(entry && entry.seat);
+  const seats = Array.isArray(match && match.seats) ? match.seats : [];
+  if (Number.isInteger(idx) && idx >= 0 && idx < seats.length) return idx;
+  return COACH_SEAT;
 }
 
 function renderMateZone(match) {
@@ -982,11 +988,12 @@ function ensureModule(match) {
 }
 
 /* ---------------- 座位发言气泡（match.chat） ----------------
- * 后端的牌桌发言只有一条真相链：match.chat = [{seat,text,t,at}]。人设本人的
- * say（行动回合工具）与陪练/进阶对手的 say 都以各自座位号落在这里，所以前端
- * 按「座位」维护独立单例气泡 + 独立排队器：
+ * 后端的牌桌发言只有一条真相链：match.chat = [{seat,text,t,at,by}]。人设本人
+ * 的 say（行动回合工具）、代下宿主的 say（by="host"）与陪练/进阶对手的 say
+ * 都以各自座位号落在这里，所以前端按「发言归属」维护独立单例气泡 + 独立排队器：
  * - 首帧（本局第一条快照/WS 帧）只播种水位，历史旧发言绝不自动弹；
- * - 之后仅比水位新的非人类座位条目按到达顺序逐条展示（人类手打 say 不弹）；
+ * - 之后仅比水位新的条目按到达顺序逐条展示：非人类座位弹在其座位卡上
+ *   （人类手打 say 不弹）；代下宿主发言（by="host"）弹在队友区的宿主头像上；
  * - 每条至少 1s、最多 3s 收起（ui-config bubble_hold_s 只能在该区间内收紧）。
  * 本插件没有宿主 webchat 面板（旁白走插件 notice 通道），因此这里不再有
  * SSE / 历史拉取 / 发送入口，只保留只读渲染。
@@ -1069,17 +1076,20 @@ function hideAllSeatBubbles() {
   chat.seatBubbles.forEach((b, idx) => hideSeatBubbleAt(idx));
 }
 
-/** 该座位是否需要气泡：非人类座位都不弹（人设本人 + 陪练/进阶对手都算）。 */
-function isTalkSeat(match, seatIndex) {
+/** 该条 say 是否需要气泡：代下宿主发言（后端 by="host"，按人类座位落库）
+ * 始终展示（挂教练位气泡，见 talkSeatKey）；其余仅非人类座位且非本人视角
+ * （人设本人 + 陪练/进阶对手都算）。 */
+function isTalkSeat(match, seatIndex, seat, entry) {
+  if (entry && entry.by === "host") return true;
   const seats = Array.isArray(match && match.seats) ? match.seats : [];
-  const seat = seats[seatIndex];
-  if (!seat || seat.kind === "human") return false;
+  const s = seat || seats[seatIndex];
+  if (!s || s.kind === "human") return false;
   return !(typeof match.me === "number" && match.me === seatIndex);
 }
 
 /* WS 快照/帧 → 座位 say 增量。first=true（本局首帧）只记水位，历史旧发言
- * 绝不自动弹；之后仅比水位新的非人类座位条目进入 pickNewMatchSays，并按
- * 到达顺序逐条入各自座位的队列。 */
+ * 绝不自动弹；之后仅比水位新的条目进入 pickNewMatchSays，并按到达顺序逐条
+ * 入各自归属的队列。 */
 function applyMatchChat(match, first) {
   if (!match) return;
   const arr = Array.isArray(match.chat) ? match.chat : [];
@@ -1094,10 +1104,10 @@ function applyMatchChat(match, first) {
     practice: true,
     seats: match.seats,
     me: match.me,
-    allowSeat: (seatIndex) => isTalkSeat(match, seatIndex),
+    allowSeat: (seatIndex, seat, entry) => isTalkSeat(match, seatIndex, seat, entry),
   });
   chat.saySeen = nextSeen;
-  entries.forEach((e) => showSeatSays(talkSeatKey(match, e.seat), e.text, matchSayKey(e)));
+  entries.forEach((e) => showSeatSays(talkSeatKey(match, e), e.text, matchSayKey(e)));
 }
 
 /* 只读/诊断提示：ui-config 的 chat_read_only 与 notice_target_error。
@@ -1154,7 +1164,8 @@ async function initUiConfig() {
 }
 
 /* ---------------- 对局聊天窗口（chat-panel.js 接线） ----------------
- * 独立的第二块聊天面板：GET /chat 回填 + POST /chat 发送 + WS agent_message。
+ * 独立的第二块聊天面板：GET /chat 回填 + POST /chat 发送 + WS agent_message
+ * （断线重连后由 onLive 触发 refresh 补拉，漏帧自愈）。
  * 桌面挂在右栏走子记录下方；窄屏入口挂在动作行下方（CSS 切抽屉）。
  * match.js 只做接线：构造 / 初始化 / 喂 ui-config 与 agent_message 帧。 */
 
@@ -1215,6 +1226,11 @@ function bootstrap() {
     // 对局聊天的 agent 回复帧：交给聊天窗口追加（座位气泡不受影响）
     onAgentMessage: (frame) => {
       if (chatWin) chatWin.onAgentMessage(frame);
+    },
+    // WS 每次建连成功（含断线重连）后补拉聊天窗口：治愈断线期间漏掉的
+    // agent_message 帧（座位气泡走快照增量，本来就免疫断线）。
+    onLive: () => {
+      if (chatWin) chatWin.refresh();
     },
   });
   conn.start();

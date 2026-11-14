@@ -22,6 +22,7 @@ from sqlalchemy import func, select, update
 
 from engine import (
     Match,
+    MatchChat,
     NewMatchOptions,
     NewSeat,
     apply_match_action,
@@ -87,6 +88,17 @@ async def test_round_trip_preserves_chinese_log_chat_and_plan(store):
     assert moved.ok
     match = moved.match
 
+    # Delegated play: the say is attributed to the host agent (by="host").
+    # Built via replace() — the apply path itself is covered by the room tests;
+    # what matters here is that the marker survives the store round trip.
+    match = replace(
+        match,
+        chat=[
+            *match.chat,
+            MatchChat(seat=0, text="我替你守这里", t=1_700_000_025_000, at=len(match.log), by="host"),
+        ],
+    )
+
     plan = {"direction": "先稳后攻，别急着连四", "aggression": "steady", "ttl_moves": 4}
     match = replace(
         match,
@@ -109,6 +121,9 @@ async def test_round_trip_preserves_chinese_log_chat_and_plan(store):
     assert loaded.seats[0].token == "m1-abc123"
     assert loaded.seats[1].token == ""  # AI seats carry no token
     assert loaded.chat[0].text == "你好呀，诺里！"
+    assert loaded.chat[0].by == ""  # seat-own speech keeps the empty marker
+    assert loaded.chat[1].text == "我替你守这里"
+    assert loaded.chat[1].by == "host"  # delegated speaker survives the round trip
     assert loaded.log[0].move == "H8"
 
     # Raw columns keep Chinese unescaped (ensure_ascii=False).

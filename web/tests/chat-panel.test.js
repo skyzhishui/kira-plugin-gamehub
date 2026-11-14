@@ -506,6 +506,72 @@ test("面板：WS agent_message → agent 行，sender 用宿主主 agent 名，
   }
 });
 
+test("面板：WS 帧带库内 id/ts（权威身份）→ 按 id 归并；refresh 补拉同 id 不重复", async () => {
+  const host = new FakeEl("div");
+  let messages = [msg("42", 1_700_000_008_000, "agent", "汐祈", "E1。")];
+  const env = mountPanel({
+    panelHost: host,
+    getAgentName: () => "汐祈",
+    handler: () => ok({ enabled: true, messages }),
+  });
+  try {
+    await env.panel.load();
+    assert.equal(byClass(host, "chat-win-msg").length, 1);
+    // 同一条回复的实时 WS 帧：带库内 id/ts（秒级）→ 与回填行同 id，不重复追加
+    assert.equal(
+      env.panel.onAgentMessage({ type: "agent_message", sid: "gamehub:dm:admin", id: "42", ts: 1_700_000_008, text: "E1。" }),
+      false,
+      "同 id 帧不重复追加（重连补拉不会出现两条）"
+    );
+    assert.equal(byClass(host, "chat-win-msg").length, 1);
+    // 新回复：新 id 照常追加
+    assert.equal(
+      env.panel.onAgentMessage({ type: "agent_message", sid: "gamehub:dm:admin", id: "43", ts: 1_700_000_009, text: "A2，锁胜。" }),
+      true
+    );
+    assert.equal(byClass(host, "chat-win-msg").length, 2);
+    // 模拟 WS 重连后的 refresh 补拉：列表里已有的 id 不产生重复
+    messages = [
+      msg("42", 1_700_000_008_000, "agent", "汐祈", "E1。"),
+      msg("43", 1_700_000_009_000, "agent", "汐祈", "A2，锁胜。"),
+      msg("44", 1_700_000_010_000, "agent", "汐祈", "收尾了，H2。"),
+    ];
+    await env.panel.refresh();
+    assert.equal(byClass(host, "chat-win-msg").length, 3, "refresh 只补入漏掉的新行");
+    assert.equal(env.panel.state().list.length, 3);
+  } finally {
+    env.restore();
+  }
+});
+
+test("面板：refresh 无新行不重绘；请求失败静默（不打扰用户，hintError 不变）", async () => {
+  const host = new FakeEl("div");
+  let messages = [msg("7", 1_700_000_001_000, "agent", "汐祈", "先看你想怎么输")];
+  let shouldFail = false;
+  const env = mountPanel({
+    panelHost: host,
+    handler: () => {
+      if (shouldFail) return fail("not_ready", "对局服务不可用", 503);
+      return ok({ enabled: true, messages });
+    },
+  });
+  try {
+    await env.panel.load();
+    const rowsBefore = byClass(host, "chat-win-msg").length;
+    await env.panel.refresh();
+    assert.equal(byClass(host, "chat-win-msg").length, rowsBefore, "无新行不重绘");
+    messages = [...messages, msg("8", 1_700_000_002_000, "agent", "汐祈", "下一手 B6")];
+    await env.panel.refresh();
+    assert.equal(byClass(host, "chat-win-msg").length, rowsBefore + 1, "新行照常追加");
+    shouldFail = true;
+    await env.panel.refresh();
+    assert.equal(byClass(host, "chat-win-msg").length, rowsBefore + 1, "失败保持原状");
+    assert.equal(env.panel.state().hintError, "", "补拉失败静默，不渲染失败提示");
+  } finally {
+    env.restore();
+  }
+});
+
 test("面板：enabled=false（GET /chat）→ 输入/发送禁用并显示中文提示；ui-config 关同样禁用", async () => {
   const host = new FakeEl("div");
   const env = mountPanel({ panelHost: host, handler: () => ok({ enabled: false, messages: [] }) });

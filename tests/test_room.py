@@ -646,6 +646,7 @@ async def test_atomic_move_say_only_on_success_and_single_version() -> None:
     assert len(moved.chat) == chat_before + 1
     assert moved.chat[-1].text == "好棋" and moved.chat[-1].seat == 1
     assert moved.chat[-1].at == len(moved.log)
+    assert moved.chat[-1].by == ""  # AI 席发言归属座位本人
     await asyncio.sleep(0)
     assert events and events[-1]["say"] == "好棋"
 
@@ -661,6 +662,7 @@ async def test_delegated_atomic_say_and_stale_guard() -> None:
     )
     assert moved is not None and error == ""
     assert moved.chat[-1].text == "我下这里"
+    assert moved.chat[-1].by == "host"  # 座位是人类座位，说话的是宿主主 agent
     assert [e.seat for e in moved.log] == [0, 1]
 
     # 旧手数 + say：作废且不写 chat。

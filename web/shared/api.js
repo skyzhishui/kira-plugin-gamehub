@@ -103,15 +103,17 @@ export function matchWsUrl(matchId, seatToken) {
  * close 4001 = 座位口令无效（降级观战），4003 = 宿主鉴权失败/插件停用。
  */
 export class MatchConnection {
-  constructor({ matchId, getToken, onMatch, onStatus, onError, onNotice, onAgentMessage } = {}) {
+  constructor({ matchId, getToken, onMatch, onStatus, onError, onNotice, onAgentMessage, onLive } = {}) {
     this.matchId = String((matchId || "")).trim();
     this.getToken = typeof getToken === "function" ? getToken : () => "";
     this.onMatch = onMatch || (() => {});
     this.onStatus = onStatus || (() => {});
     this.onError = onError || (() => {});
     this.onNotice = onNotice || (() => {});
-    /** 对局聊天窗口的 agent 回复帧（{type:"agent_message", sid, text}）。 */
+    /** 对局聊天窗口的 agent 回复帧（{type:"agent_message", sid, text[, id, ts]}）。 */
     this.onAgentMessage = onAgentMessage || (() => {});
+    /** WS 每次建连成功（含断线重连）后触发：给聊天窗口补拉断线期间漏掉的帧。 */
+    this.onLive = onLive || (() => {});
     this.ws = null;
     this.attempt = 0;
     this.stopped = false;
@@ -206,6 +208,7 @@ export class MatchConnection {
     ws.onopen = () => {
       this.lastMessageAt = Date.now();
       this._startHeartbeat();
+      this.onLive();
     };
     ws.onmessage = (ev) => this._onFrame(ev);
     ws.onerror = () => {}; // 错误随后必然触发 onclose，统一在那里处理

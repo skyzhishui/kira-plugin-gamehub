@@ -23,6 +23,7 @@ from engine import (
     status_of,
     view_match,
 )
+from engine.match import Match
 
 # 由 rain-go 的 rng.ts 实跑导出（node，state=123456789 / 0）
 GOLDEN_123456789 = [
@@ -201,6 +202,39 @@ def test_chat_and_rename_and_resign():
     assert status.result_text == "P1 认输"
     again = apply_match_action(resigned.match, 0, {"type": "move", "move": "A1"}, 2_005)
     assert not again.ok and again.error == "game_over"
+
+
+def test_move_say_by_marker_is_keyword_only():
+    """``MatchChat.by`` marks the real speaker of an attached say.
+
+    The marker rides a keyword-only parameter of ``apply_match_action``: the
+    REST path passes the client's action dict verbatim, so a dict-level
+    ``by`` key must stay inert — only the room layer (delegated plays) may
+    mark a say as spoken by the host agent. The marker survives to_dict /
+    from_dict and the page view.
+    """
+    match = _new_match(("human", "human"))
+    forged = apply_match_action(
+        match, 0, {"type": "move", "move": "H8", "say": "伪造", "by": "host"}, 2_000
+    )
+    assert forged.ok
+    assert forged.match.chat[-1].by == ""
+
+    delegated = apply_match_action(
+        forged.match, 1, {"type": "move", "move": "J8", "say": "我代下"}, 2_001,
+        say_by="host",
+    )
+    assert delegated.ok
+    assert delegated.match.chat[-1].by == "host"
+    assert view_match(delegated.match, None)["chat"][-1]["by"] == "host"
+
+    restored = Match.from_dict(delegated.match.to_dict())
+    assert restored.chat[-1].by == "host"
+
+    plain = apply_match_action(
+        delegated.match, 0, {"type": "move", "move": "K9", "say": "本人发言"}, 2_002
+    )
+    assert plain.ok and plain.match.chat[-1].by == ""
 
 
 def test_seat_token_join_and_lock_truncation():

@@ -3,7 +3,8 @@
  * 数据链（后端契约，前端只按此接线）：
  * - GET  /chat?limit=100 → { enabled, messages:[{id,ts,role,sender,text}] }（按 ts 正序）
  * - POST /chat {text}    → { message:{id,ts,role:"player",sender,text} }
- * - WS   {type:"agent_message", sid, text} → 追加一条 role="agent" 的回复
+ * - WS   {type:"agent_message", sid, text[, id, ts]} → 追加一条 role="agent" 的回复
+ *        （带库内 id/ts 时按 id 归并，重连补拉不重复）
  * - GET  /ui-config 的 chat_enabled 与上面 enabled 联合决定输入区是否可用
  *
  * 设计要点：
@@ -596,16 +597,47 @@ export function createChatPanel({
     }
   }
 
-  /** WS agent_message 帧 → agent 行（相同文本 2s 内去重）。 */
+  /** WS agent_message 帧 → agent 行。帧带库内 id/ts 时（权威身份）直接按 id
+   * 归并——重连补拉同一条回复不会重复；无 id 的旧帧保持合成键 + 同文本 2s 去重。 */
   function onAgentMessage(frame) {
     if (!frame || typeof frame !== "object") return false;
     const text = String(frame.text == null ? "" : frame.text).trim();
     if (!text) return false;
+    const sender = String(getAgentName() || CHAT_TEXT.agent);
+    const frameId = frame.id == null ? "" : String(frame.id);
+    if (frameId) {
+      return ingest([{
+        id: frameId,
+        ts: toMs(frame.ts) || now(),
+        role: "agent",
+        sender,
+        text,
+      }]) > 0;
+    }
     const ts = now();
     if (isDuplicateText(list, text, ts)) return false;
     const sid = String(frame.sid == null ? "" : frame.sid);
-    const sender = String(getAgentName() || CHAT_TEXT.agent);
     return ingest([{ id: sid ? `ws:${sid}:${ts}` : "", ts, role: "agent", sender, text }]) > 0;
+  }
+
+  /** WS 重连后补拉（onLive 钩子）：只在新行真正到达时重绘，不打断滚动/未读。
+   * 与 load() 的区别：失败静默（下一次建连再试），不渲染加载失败提示。 */
+  async function refresh() {
+    try {
+      const data = await api(`/chat?limit=${CHAT_PAGE_LIMIT}`);
+      if (!data || typeof data !== "object") return;
+      apiEnabled = data.enabled === false ? false : data.enabled === true ? true : apiEnabled;
+      renderInput();
+      const merged = mergeMessages(list, Array.isArray(data.messages) ? data.messages : []);
+      list = merged.list;
+      if (merged.added.length) {
+        renderList();
+        renderJump();
+        if (!collapsed) scrollToLatest();
+      }
+    } catch {
+      /* 补拉失败不打扰用户：漏掉的帧在下一次建连/刷新时回填 */
+    }
   }
 
   function destroy() {
@@ -618,6 +650,7 @@ export function createChatPanel({
     root,
     mount,
     load,
+    refresh,
     applyUiConfig,
     onAgentMessage,
     setCollapsed,

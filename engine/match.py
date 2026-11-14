@@ -114,9 +114,13 @@ class MatchChat:
     text: str
     t: int
     at: int
+    # 发言归属："" = 座位本人；"host" = 宿主主 agent 代该座位发言（S4 代下）。
+    # 只由房间层在代下落子时设置（apply_match_action 的 say_by 参数），
+    # 客户端动作 dict 传不进来；前端据此把这类 say 归到宿主的教练位气泡。
+    by: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {"seat": self.seat, "text": self.text, "t": self.t, "at": self.at}
+        return {"seat": self.seat, "text": self.text, "t": self.t, "at": self.at, "by": self.by}
 
 
 @dataclass
@@ -192,6 +196,7 @@ class Match:
                     str(c.get("text", "")),
                     int(c.get("t", 0)),
                     int(c.get("at", 0)),
+                    str(c.get("by") or ""),
                 )
                 for c in data.get("chat") or []
             ],
@@ -480,23 +485,35 @@ def autoplay(match: Match, now: int) -> Match:
     return cur
 
 
-def _append_chat(match: Match, seat: Seat, text: Any, now: int, at: int) -> Match:
+def _append_chat(match: Match, seat: Seat, text: Any, now: int, at: int, by: str = "") -> Match:
     """把一条聊天追加到快照（空文本忽略；超长截断；不 bump version）。"""
     clean = str(text or "").strip()[:MAX_CHAT_LENGTH]
     if not clean:
         return match
-    chat = [*match.chat, MatchChat(seat=seat, text=clean, t=now, at=at)][-MAX_CHAT:]
+    chat = [
+        *match.chat,
+        MatchChat(seat=seat, text=clean, t=now, at=at, by=str(by or "")[:32]),
+    ][-MAX_CHAT:]
     return replace(match, chat=chat)
 
 
 def apply_match_action(
-    match: Match, seat: Seat, action: dict[str, Any], now: int
+    match: Match,
+    seat: Seat,
+    action: dict[str, Any],
+    now: int,
+    *,
+    say_by: str = "",
 ) -> MatchResult:
     """统一动作：move / resign / say / rename。
 
     ``move`` 动作可带可选 ``say``：落子成功后，在同一次快照变更里追加一条
     对局聊天（``MatchChat``），**不会产生第二次动作/版本推进**。落子失败
     时 ``say`` 绝不落库，避免「棋没下出去、话先说了」的竞态。
+
+    ``say_by`` 标记这条 say 的真实说话人（"" = 座位本人；"host" = 代下），
+    只对房间层开放的关键字参数：客户端动作 dict 里就算带上同名字段也不
+    生效，防止伪造「宿主代下」发言归属。
     """
     if not isinstance(seat, int) or seat < 0 or seat >= len(match.seats):
         return MatchActionErr("bad_seat", "没有这个座位")
@@ -544,7 +561,7 @@ def apply_match_action(
             log = log[-MAX_LOG:]
         moved = bump({"state": result.state, "log": log})
         # 原子 say：只有合法落子才追加；与落子共用同一个 version/updated_at。
-        moved = _append_chat(moved, seat, action.get("say"), now, len(log))
+        moved = _append_chat(moved, seat, action.get("say"), now, len(log), by=say_by)
         return MatchActionOk(autoplay(moved, now))
 
     if kind == "resign":

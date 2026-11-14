@@ -163,8 +163,9 @@ export function matchSayKey(entry) {
 
 /** 对手座位新发言（match.chat 增量）：首帧由调用方只播种 seen，绝不调用本函数。
  * 默认仅陪练局、仅非人类座位（对手 agent）进入结果；人类手打 say 永不弹气泡。
- * allowSeat 可选：三人桌按「非宿主主 agent、非人类座位」精确分发（每座位独立气泡），
- * 不改变旧调用的默认语义。返回 {nextSeen, entries}（正序）。 */
+ * allowSeat 可选：提供时拥有**完整裁决权**（不再叠加内置的人类座位/本人过滤），
+ * 并以第三参收整条 say —— 代下宿主发言按人类座位落库（by="host"），需要回调
+ * 按 by 标记放行这类条目；未提供时保持旧默认语义。返回 {nextSeen, entries}（正序）。 */
 export function pickNewMatchSays(chatArr, seen, { practice = false, seats = [], me = -1, allowSeat = null } = {}) {
   const nextSeen = new Set(seen || []);
   const entries = [];
@@ -175,9 +176,12 @@ export function pickNewMatchSays(chatArr, seen, { practice = false, seats = [], 
     if (nextSeen.has(key)) continue;
     nextSeen.add(key);
     const seat = Array.isArray(seats) ? seats[e.seat] : null;
-    if (!seat || seat.kind === "human") continue;
-    if (typeof me === "number" && me >= 0 && e.seat === me) continue;
-    if (custom ? !custom(e.seat, seat) : !practice) continue;
+    const allowed = custom
+      ? !!custom(e.seat, seat, e)
+      : !!seat && seat.kind !== "human"
+        && !(typeof me === "number" && me >= 0 && e.seat === me)
+        && practice;
+    if (!allowed) continue;
     entries.push(e);
   }
   return { nextSeen, entries };

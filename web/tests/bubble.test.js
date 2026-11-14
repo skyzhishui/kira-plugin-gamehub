@@ -204,6 +204,32 @@ test("match.chat 缺 seat 字段的脏条目：签名可生成但不弹（无座
   assert.equal(entries.length, 0);
 });
 
+test("match.chat allowSeat 拥有完整裁决权（收整条 say）：可按 by 标记放行代下宿主发言", () => {
+  // 代下宿主的 say 按人类座位落库（by="host"）：旧实现里内置的人类座位
+  // 过滤先于回调执行，这类条目永远被拒。新契约：allowSeat 是唯一裁决者，
+  // 按条目的 by 标记精确放行，其余仍按座位身份拒绝。
+  const seeded = new Set([matchSayKey({ seat: 1, text: "旧", t: 10, at: 1 })]);
+  const chat = [
+    { seat: 1, text: "旧", t: 10, at: 1 },
+    { seat: 0, text: "人类手打", t: 11, at: 2 },
+    { seat: 1, text: "对手新发言", t: 12, at: 3 },
+    { seat: 0, text: "我替你守这里", t: 13, at: 4, by: "host" },
+  ];
+  const { entries } = pickNewMatchSays(chat, seeded, {
+    practice: true,
+    seats: PRACTICE.seats,
+    me: 0,
+    allowSeat: (seatIndex, seat, entry) =>
+      (entry && entry.by === "host") ||
+      (!!seat && seat.kind !== "human" && seatIndex !== 0),
+  });
+  assert.deepEqual(
+    entries.map((e) => e.text),
+    ["对手新发言", "我替你守这里"],
+    "代下宿主发言（人类座位 + by=host）放行；人类手打 say 仍拒绝"
+  );
+});
+
 /* ---------------- match.js 接线：单条临时气泡 + 全量正序入队 + 上下限钳制 ---------------- */
 
 const matchSrc = fs.readFileSync(
