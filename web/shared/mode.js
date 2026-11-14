@@ -48,6 +48,20 @@ export const PERSONA_DEFAULT = "诺里";
 
 let personaName = PERSONA_DEFAULT;
 
+/** Host AI display name (the seat driven by action notices). Empty until
+ * ``setHostAgentName`` runs; falls back to the persona name so the copy still
+ * reads sensibly when /ui-config is unavailable. */
+let hostAgentName = "";
+
+export function setHostAgentName(v) {
+  hostAgentName = String(v == null ? "" : v).trim();
+  return hostAgentName;
+}
+
+export function getHostAgentName() {
+  return hostAgentName || personaName;
+}
+
 /** 配置里的人设名 → 渲染名：留空/"nori" 一律渲染默认「诺里」。 */
 export function personaNameText(v) {
   const s = String(v == null ? "" : v).trim();
@@ -92,7 +106,9 @@ export function practiceNameText(v) {
 
 export function modeLabel(mode, agentName) {
   if (mode === "agent") return `与${agentNameText(agentName)}对战`;
-  if (mode === "nori") return `与${personaName}对战`;
+  // mode "nori" = the host AI itself (action-notice driven), not the
+  // plugin-owned game_agent persona.
+  if (mode === "nori") return `与${getHostAgentName()}对战`;
   if (mode === "bot") return "与陪练对战";
   return "";
 }
@@ -294,7 +310,7 @@ export function seatIdentity(match, seat, index) {
 export function seatIdentityLabel(match, seat, index) {
   if (!seat || seat.kind === "human") return "";
   const identity = seatIdentity(match, seat, index);
-  if (identity === "nori") return personaName;
+  if (identity === "nori") return getHostAgentName();
   if (identity === "agent") return "对手";
   if (identity === "bot") return "陪练";
   return "";
@@ -343,7 +359,7 @@ export function levelOf(match) {
 export function modeHint(mode, level, name) {
   if (mode === "agent") return MODE_HINTS.agent;
   if (mode === "bot") return MODE_HINTS.bot;
-  return personaText(MODE_HINTS.nori);
+  return MODE_HINTS.nori.replace(PERSONA_DEFAULT, getHostAgentName());
 }
 
 /* ---------------- 归一化 ---------------- */
@@ -543,7 +559,8 @@ export function seatDisplay(seat, index, practice) {
  * 陪练座位=「陪练」（名字本身已展示，不写死任何人设名）。 */
 export function seatKindLabel(seat, practice) {
   const kind = seat && seat.kind;
-  if (kind === "ai") return practice ? "对手" : personaName;
+  // turn-driven ai seat = the host AI itself, not the plugin persona.
+  if (kind === "ai") return practice ? "对手" : getHostAgentName();
   if (kind === "bot") return "陪练";
   return "";
 }

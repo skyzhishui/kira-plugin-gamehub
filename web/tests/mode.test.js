@@ -30,6 +30,8 @@ import {
   opponentKindOf,
   modeLabel,
   agentNameText,
+  getHostAgentName,
+  setHostAgentName,
   modeOf,
   driverOf,
   isPractice,
@@ -120,6 +122,28 @@ test("agent 公开名：modeLabel / agentNameText 动态，不写死人设", () 
   assert.equal(modeLabel("bot", "蕾依"), "与陪练对战");
   assert.equal(agentNameText("  蕾依  "), "蕾依");
   assert.equal(agentNameText(null), "玩家");
+});
+
+test("mode nori 的对手是宿主 AI：host_agent_name 覆盖文案，人设名不受影响", () => {
+  // 未下发 host 名时回落人设名（旧行为，页面仍可读）
+  assert.equal(getHostAgentName(), "诺里");
+  assert.equal(modeLabel("nori", "蕾依"), "与诺里对战");
+
+  setHostAgentName("汐祈（Seki）");
+  assert.equal(getHostAgentName(), "汐祈（Seki）");
+  assert.equal(modeLabel("nori", "蕾依"), "与汐祈（Seki）对战");
+  // 进阶座位仍是插件人设（game_agent），不受 host 名影响
+  assert.equal(modeLabel("agent", "蕾依"), "与蕾依对战");
+  assert.equal(modeLabel("bot", ""), "与陪练对战");
+  // 身份小片同理
+  assert.equal(seatKindLabel({ kind: "ai" }, false), "汐祈（Seki）");
+  assert.equal(seatKindLabel({ kind: "ai" }, true), "对手");
+  assert.equal(seatKindLabel({ kind: "bot" }, true), "陪练");
+  // 态度文案跟随 host 名，人设模板不变
+  assert.equal(modeHint("nori"), "汐祈（Seki）会认真应战。");
+
+  setHostAgentName("");
+  assert.equal(getHostAgentName(), "诺里", "空值回落人设名");
 });
 
 test("S2 payload：旧契约回落（mode 未知 → 不带 mode_options，opponent 显式可传）", () => {

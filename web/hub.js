@@ -30,6 +30,8 @@ import {
   modeLabel,
   setPersonaName,
   getPersonaName,
+  setHostAgentName,
+  getHostAgentName,
   personaNameText,
   practiceNameText,
   setAgentAvatar,
@@ -927,12 +929,14 @@ function bindDiag() {
 
 /* ---------------- 人设名（服务端 agent_name） ---------------- */
 
-/** /games 顶层 agent_name 决定「诺里」的渲染名；目录项也带一份，顶层优先。 */
+/** /games 顶层 agent_name 决定人设的渲染名；目录项也带一份，顶层优先。
+ * 横幅里的「对坐一局」默认对手是宿主 AI（行动通知回合驱动），所以用
+ * /ui-config 的 host_agent_name；拿不到时回落人设名。 */
 function applyPersona(data) {
   const name = data && (data.agent_name || (Array.isArray(data.games) && data.games[0] && data.games[0].agent_name));
   setPersonaName(name);
   const hero = $("hero-agent");
-  if (hero) hero.textContent = getPersonaName();
+  if (hero) hero.textContent = getHostAgentName();
 }
 
 /* ---------------- 对手头像（插件自有 agent-avatar，可上传/恢复默认） ----------------
@@ -1030,7 +1034,10 @@ async function loadAvatar() {
   try {
     const cfg = await api("/ui-config");
     if (cfg && cfg.agent_name) setPersonaName(cfg.agent_name);
+    if (cfg && cfg.host_agent_name) setHostAgentName(cfg.host_agent_name);
     if (cfg) applyAvatar(cfg.agent_avatar);
+    const hero = $("hero-agent");
+    if (hero) hero.textContent = getHostAgentName();
   } catch {
     applyAvatar(AGENT_AVATAR_URL); // 读不到就显示默认素材
   }

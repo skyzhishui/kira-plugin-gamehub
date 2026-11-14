@@ -51,6 +51,8 @@ import {
   MATE_NOTE_TEXT,
   setPersonaName,
   getPersonaName,
+  setHostAgentName,
+  getHostAgentName,
   setAgentAvatar,
   getAgentAvatar,
 } from "./shared/mode.js";
@@ -1104,6 +1106,8 @@ async function initUiConfig() {
   }
   if (!cfg || typeof cfg !== "object") return;
   if (cfg.agent_name) setPersonaName(cfg.agent_name);
+  // mode "nori" 的座位是宿主 AI 本人（行动通知回合驱动），不是插件人设。
+  if (cfg.host_agent_name) setHostAgentName(cfg.host_agent_name);
   // 头像：插件自有 agent-avatar（默认素材或 WebUI 上传版，脏值回落默认）
   setAgentAvatar(cfg.agent_avatar);
   const holdFromCfg = Math.round(Number(cfg.bubble_hold_s) * 1000);
