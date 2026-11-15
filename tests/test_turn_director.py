@@ -832,7 +832,7 @@ async def test_play_tag_through_grant_submits_the_move():
     late = await submit_play_from_actions(
         plugin, director, grant, actions, grant.session_id
     )
-    assert late is True  # attempted, then refused inside submit_play
+    assert late is False  # refused inside submit_play (grant already played)
     assert grant.state == "played"
     assert len(room.match.log) == 2
     await director.stop()

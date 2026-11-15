@@ -338,14 +338,18 @@ class GamehubPlugin(BasePlugin):
 
     @on.after_xml_parse(priority=Priority.LOW)
     async def submit_turn_play_tag(self, event, actions=None, *args, **kwargs):
-        """The ``play_<match>`` root tag: submit the move before delivery.
+        """The ``play_<match>`` root tag: submit the move, then stop the reply.
 
         ``AFTER_XML_PARSE`` runs right after the reply text is parsed and
         before any of its messages is sent, so the atomic move+say lands
-        first and the envelope table talk follows through the normal send
-        path. The tag is only registered for the session that owes the move
-        (request-scoped ``tag_set``), and the grant binding makes a late or
-        duplicate tag a safe no-op.
+        first. On success the reply is stopped (``event.stop()``): the
+        agent loop ends, the delivery tail is skipped and ``final_result``
+        — which releases the next turn's pending trigger and saves session
+        memory — fires immediately; the table talk reaches the page window
+        through ``runtime.record_agent_line`` instead. The tag is only
+        registered for the session that owes the move (request-scoped
+        ``tag_set``), and the grant binding makes a late or duplicate tag
+        a safe no-op.
         """
         sid = str(getattr(event, "sid", "") or "")
         if not sid or not isinstance(actions, list) or not actions:
@@ -358,7 +362,7 @@ class GamehubPlugin(BasePlugin):
             return
         from .tools_turn import submit_play_from_actions
 
-        await submit_play_from_actions(self, director, grant, actions, sid)
+        await submit_play_from_actions(self, director, grant, actions, sid, event=event)
 
     @on.step_result(priority=Priority.LOW)
     async def note_turn_progress(self, event, step_result=None, *args, **kwargs):

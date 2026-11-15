@@ -178,6 +178,19 @@ class GamehubRuntime:
     async def _on_outbound(self, sid: str, chain: Any) -> None:
         """Forward one agent reply from the internal session to match pages."""
         text = self._chain_text(chain)
+        await self.record_agent_line(sid, text)
+
+    async def record_agent_line(self, sid: str, text: str) -> None:
+        """Write one agent line to the window read model + WS, no message pipeline.
+
+        The stop-on-move path (``AFTER_XML_PARSE`` event.stop) skips normal
+        reply delivery, so a move turn's table talk would never reach the
+        page chat window through ``_on_outbound``. This is the same write
+        without the pipeline: one sqlite row (id/ts keyed, so the page can
+        never duplicate it against a reconnect backfill) plus the
+        ``agent_message`` WS frame the window already ingests.
+        """
+        text = str(text or "").strip()
         if not text:
             return
         # Record the reply for the match-page chat window read model (the

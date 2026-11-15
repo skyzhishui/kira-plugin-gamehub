@@ -74,6 +74,24 @@ class _Director:
         self.rejected.append((sid, move, error))
 
 
+class _Runtime:
+    """Duck-typed ``plugin._runtime`` capturing window-line writes."""
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str]] = []
+
+    async def record_agent_line(self, sid: str, text: str) -> None:
+        self.lines.append((sid, text))
+
+
+class _Event:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
 class _Element:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -90,8 +108,13 @@ class _TagAction:
         self.value = value
 
 
-def _plugin(director: _Director, *, max_say_len: int = 280) -> SimpleNamespace:
-    return SimpleNamespace(settings=SimpleNamespace(max_say_len=max_say_len))
+def _plugin(
+    director: _Director, *, max_say_len: int = 280, runtime: _Runtime | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        settings=SimpleNamespace(max_say_len=max_say_len),
+        _runtime=runtime if runtime is not None else _Runtime(),
+    )
 
 
 # ----------------------------------------------------------------------
@@ -143,57 +166,91 @@ def test_turn_tools_are_state_only_now():
 # ----------------------------------------------------------------------
 #  submit_play_from_actions
 # ----------------------------------------------------------------------
-async def test_submit_extracts_tag_and_rides_msg_texts_as_say():
+async def test_submit_extracts_tag_rides_say_stops_and_records():
     director = _Director()
+    runtime = _Runtime()
+    event = _Event()
     grant = _Grant()
     actions = [_Chain("堵你这里喵～"), _TagAction(play_tool_name("m-tag"), "K9")]
     assert await submit_play_from_actions(
-        _plugin(director), director, grant, actions, "s1"
+        _plugin(director, runtime=runtime), director, grant, actions, "s1", event
     ) is True
     assert director.calls == [("m-tag", "grant-key", "K9", "堵你这里喵～", True)]
     assert director.notes == ["s1"]  # stands down a pending corrective nudge
+    assert event.stopped is True  # A plan: the delivery tail is skipped
+    assert runtime.lines == [("s1", "堵你这里喵～")]  # window line via read model
 
 
 async def test_say_is_truncated_and_persisted_with_the_move():
     director = _Director()
+    runtime = _Runtime()
     actions = [_Chain("这是一句很长的话"), _TagAction(play_tool_name("m-tag"), "K9")]
     await submit_play_from_actions(
-        _plugin(director, max_say_len=4), director, _Grant(), actions, "s1"
+        _plugin(director, max_say_len=4, runtime=runtime),
+        director, _Grant(), actions, "s1",
     )
     assert director.calls[0][3] == "这是一句"
     assert director.calls[0][4] is True
+    assert runtime.lines == [("s1", "这是一句")]
 
 
-async def test_no_table_talk_means_no_say_param():
+async def test_no_table_talk_means_no_say_and_no_window_line():
     director = _Director()
+    runtime = _Runtime()
+    event = _Event()
     actions = [_TagAction(play_tool_name("m-tag"), "K9")]
-    await submit_play_from_actions(_plugin(director), director, _Grant(), actions, "s1")
+    assert await submit_play_from_actions(
+        _plugin(director, runtime=runtime), director, _Grant(), actions, "s1", event
+    ) is True
     assert director.calls == [("m-tag", "grant-key", "K9", None, False)]
+    assert event.stopped is True
+    assert runtime.lines == []
 
 
 async def test_missing_or_foreign_tag_is_a_noop():
     director = _Director()
+    runtime = _Runtime()
+    event = _Event()
     grant = _Grant()
+    plugin = _plugin(director, runtime=runtime)
     assert await submit_play_from_actions(
-        _plugin(director), director, grant, [_Chain("你好")], "s1"
-    ) is False
+        plugin, director, grant, [_Chain("你好")], "s1", event
+    ) is None
     assert await submit_play_from_actions(
-        _plugin(director), director, grant, [_TagAction("play_other", "H8")], "s1"
-    ) is False
+        plugin, director, grant, [_TagAction("play_other", "H8")], "s1", event
+    ) is None
     assert await submit_play_from_actions(
-        _plugin(director), director, grant, [_TagAction(play_tool_name("m-tag"), "  ")], "s1"
-    ) is False
+        plugin, director, grant, [_TagAction(play_tool_name("m-tag"), "  ")], "s1", event
+    ) is None
     assert director.calls == []
     assert director.notes == []
+    assert event.stopped is False
+    assert runtime.lines == []
 
 
-async def test_invalid_result_asks_for_a_bounded_retry():
+async def test_invalid_result_asks_for_a_bounded_retry_and_keeps_delivery():
     director = _Director(result=_Result(ok=False, status="invalid", error="这里已经有子"))
+    runtime = _Runtime()
+    event = _Event()
     actions = [_TagAction(play_tool_name("m-tag"), "K9")]
     assert await submit_play_from_actions(
-        _plugin(director), director, _Grant(), actions, "s1"
-    ) is True
+        _plugin(director, runtime=runtime), director, _Grant(), actions, "s1", event
+    ) is False
     assert director.rejected == [("s1", "K9", "这里已经有子")]
+    assert event.stopped is False  # a rejected tag never terminates the reply
+    assert runtime.lines == []
+
+
+async def test_runtimeless_plugin_still_stops():
+    """The window-line write is cosmetic: its absence must not break the stop."""
+    director = _Director()
+    event = _Event()
+    plugin = SimpleNamespace(settings=SimpleNamespace(max_say_len=280))
+    actions = [_Chain("堵你这里喵～"), _TagAction(play_tool_name("m-tag"), "K9")]
+    assert await submit_play_from_actions(
+        plugin, director, _Grant(), actions, "s1", event
+    ) is True
+    assert event.stopped is True
 
 
 async def test_terminal_failure_does_not_ask_for_retry():

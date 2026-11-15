@@ -188,7 +188,8 @@ async def submit_play_from_actions(
     grant: Any,
     actions: Any,
     sid: str,
-) -> bool:
+    event: Any = None,
+) -> bool | None:
     """Submit the move a ``play_<match>`` root tag carries (AFTER_XML_PARSE).
 
     Called from the plugin's ``@on.after_xml_parse`` hook — before any
@@ -198,10 +199,19 @@ async def submit_play_from_actions(
     makes ``submit_play`` refuse, so a late or duplicate tag can never land
     in a later turn — the same race-safety the old native tool had.
 
-    An ``invalid`` result (illegal move / empty action) re-opens the feedback
-    loop through ``director.note_tag_rejected`` — the tag channel has no
-    tool-result lane, so without it a mistyped action would sit silently
-    until the watchdog fill.
+    Returns ``None`` when the reply carries no play tag (the caller must not
+    touch the event), ``False`` when the tag was rejected (invalid/stale —
+    the reply keeps delivering normally and a bounded retry notice re-opens
+    the feedback loop through ``director.note_tag_rejected``), and ``True``
+    when the move was applied. On ``True`` the reply is terminated
+    (``event.stop()``): the agent loop ends, the remaining delivery tail is
+    skipped and ``final_result`` fires immediately, which releases the next
+    turn's pending trigger hours—er, seconds earlier. The table talk does
+    NOT ride the aborted delivery; it goes to the page window through
+    ``runtime.record_agent_line`` (same read-model row + WS frame the
+    delivery path produces) and stays on the match bubble via the atomic
+    ``say``. Session memory is unaffected — finalize saves it for stopped
+    turns by contract.
     """
     tag_name = play_tool_name(grant.match_id)
     move = ""
@@ -210,24 +220,19 @@ async def submit_play_from_actions(
             move = str(getattr(action, "value", "") or "").strip()
             break
     if not move:
-        return False
+        return None
     say = _truncate_say(plugin, _chain_texts(actions))
     note = getattr(director, "note_tool_progress", None)
     if callable(note):
         note(str(sid or ""))  # stand down a pending corrective nudge
     submit = getattr(director, "submit_play", None)
     if not callable(submit):
-        return True
+        return False
     if say:
         result = await submit(grant.match_id, grant.key, move, say, persist_say=True)
     else:
         result = await submit(grant.match_id, grant.key, move)
-    if bool(getattr(result, "ok", False)):
-        logger.info(
-            "turn director: play tag submitted (%s seat %s <- %s)",
-            grant.match_id, grant.seat, move,
-        )
-    else:
+    if not bool(getattr(result, "ok", False)):
         status = str(getattr(result, "status", "") or "")
         error = str(getattr(result, "error", "") or "")
         logger.warning(
@@ -238,6 +243,25 @@ async def submit_play_from_actions(
             reject_note = getattr(director, "note_tag_rejected", None)
             if callable(reject_note):
                 await reject_note(str(sid or ""), grant, move, error)
+        return False
+    logger.info(
+        "turn director: play tag submitted (%s seat %s <- %s)",
+        grant.match_id, grant.seat, move,
+    )
+    # The delivery tail is skipped below, so the table talk reaches the page
+    # window through the read model directly (cosmetic on failure).
+    runtime = getattr(plugin, "_runtime", None) or getattr(plugin, "runtime", None)
+    record = getattr(runtime, "record_agent_line", None)
+    if callable(record) and say:
+        try:
+            await record(str(sid or ""), say)
+        except Exception:  # noqa: BLE001 - the window line must not block the stop
+            logger.debug("gamehub: window line record failed", exc_info=True)
+    # Stop the reply: the agent loop ends, the delivery tail is skipped and
+    # final_result (with the memory save) fires immediately.
+    stop = getattr(event, "stop", None)
+    if callable(stop):
+        stop()
     return True
 
 
