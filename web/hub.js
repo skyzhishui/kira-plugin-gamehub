@@ -1,4 +1,4 @@
-/* hub.js — 游戏中心大厅：游戏卡片 / 继续对局 / 开局 / 进行中棋局操作台 / 联调诊断折叠区。
+/* hub.js — 游戏中心大厅：游戏卡片 / 继续对局 / 开局 / 进行中棋局操作台。
  *
  * 服务端为唯一真相：/games 返回 { games: [...], current: MatchView | null,
  * active_matches: [...] }（旧后端缺字段时安全降级为空态）。
@@ -9,7 +9,7 @@
  * 人设名可配置：/games 的 agent_name 决定 game_agent 渲染成什么名字（默认配置标识 nori）。
  */
 
-import { api, localToken, readSessionToken, writeSessionToken, PLUGIN_ID, API_BASE } from "./shared/api.js";
+import { api, readSessionToken, writeSessionToken, PLUGIN_ID } from "./shared/api.js";
 import { errorText } from "./shared/i18n.js";
 import { toast } from "./shared/toast.js";
 import { fetchIdentity, saveIdentity } from "./shared/chat.js";
@@ -854,53 +854,6 @@ async function createMatch({ kind, mode, difficulty, level, opponent = "ai", lin
   }
 }
 
-/* ---------------- M0 诊断（保留接缝，主界面是大厅） ---------------- */
-
-function dlog(line) {
-  const pre = $("diag-log");
-  const ts = new Date().toLocaleTimeString();
-  pre.textContent += `[${ts}] ${line}\n`;
-  pre.scrollTop = pre.scrollHeight;
-}
-
-function bindDiag() {
-  const run = (btnId, fn) => {
-    const b = $(btnId);
-    b.addEventListener("click", async () => {
-      b.disabled = true;
-      try {
-        await fn();
-      } catch (err) {
-        dlog(`失败: ${errorText(err, String(err))}`);
-        toast(errorText(err, "诊断请求失败"), "error");
-      } finally {
-        b.disabled = false;
-      }
-    });
-  };
-
-  run("diag-ping", async () => {
-    const data = await api("/ping");
-    dlog(`ping → ${JSON.stringify(data)}`);
-  });
-
-  run("diag-session", async () => {
-    const data = await api("/page-session");
-    dlog(`页面固定会话: ${data.session_id}`);
-  });
-
-  run("diag-notice", async () => {
-    dlog("发送 notice（回合可能需要 5-15s）…");
-    const data = await api("/notice-test", { method: "POST", timeoutMs: 45000 });
-    dlog(`notice 已投递: ${JSON.stringify(data)}`);
-  });
-
-  dlog(`REST 基址 ${API_BASE}；对局长连接走 /ws/plugin/${PLUGIN_ID}/matches/{id}/ws`);
-  if (!localToken()) {
-    dlog("未检测到宿主 token（localStorage.jwt_token），请先在宿主 WebUI 登录。");
-  }
-}
-
 /* ---------------- 人设名（服务端 agent_name） ---------------- */
 
 /** /games 顶层 agent_name 决定人设的渲染名；目录项也带一份，顶层优先。
@@ -1043,7 +996,6 @@ if (!window.location.pathname.includes(`/page/plugin/${PLUGIN_ID}`)) {
 
 renderSkeleton();
 init();
-bindDiag();
 bindIdentity();
 bindAvatar();
 loadIdentity();
