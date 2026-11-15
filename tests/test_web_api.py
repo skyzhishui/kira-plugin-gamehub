@@ -719,6 +719,20 @@ async def test_ws_first_frame_ping_and_broadcast(tmp_path):
         await wait_for(
             lambda: any(p.get("type") == "agent_message" for p in ws.sent)
         )
+
+        # The socket is attached to the room: applies fan live match frames
+        # (the board/bubble channel — without the attach this registry stays
+        # empty and the page only ever refreshes on reconnect).
+        room = plugin.rooms.get_room(match_id)
+        assert room is not None and room.sockets.get(ws) == 0
+        version_before = room.match.version
+        assert await room.apply(
+            0, {"type": "move", "move": "H8"}, client_version=version_before
+        ) is not None
+        await wait_for(lambda: any(
+            p.get("type") == "match" and p["match"]["version"] > version_before
+            for p in ws.sent
+        ))
     finally:
         await ws.queue.put(None)
         await asyncio.wait_for(task, timeout=2.0)

@@ -1099,8 +1099,17 @@ async def serve_ws(
         )
 
     ws_hub.subscribe(room.match.id, websocket)
+    await send({"type": "match", "match": room.view(seat)})
+    # Attach the socket to the room: every apply fans a live ``{"type":
+    # "match"}`` frame through room.sockets. Without this the socket lived
+    # only in ws_hub — the chat window stayed live while the board and the
+    # seat bubbles silently froze until a reconnect (the page has no
+    # polling, and pings keep the connection "healthy" forever). The attach
+    # also re-enqueues the initial view via the room's own writer; the
+    # duplicate first frame is harmless (the page applies views idempotently,
+    # guarded by monotonic versions).
+    await room.attach(websocket, seat)
     try:
-        await send({"type": "match", "match": room.view(seat)})
         while True:
             if getattr(plugin, "stopping", False):
                 await send({"type": "error", "code": "not_ready", "message": "插件正在停止"})
@@ -1113,4 +1122,5 @@ async def serve_ws(
             if str(data.get("type") or "") == "ping":
                 await send({"type": "pong", "t": data.get("t")})
     finally:
+        await room.detach(websocket)
         ws_hub.unsubscribe(room.match.id, websocket)
