@@ -1,43 +1,60 @@
-"""Request-scoped tools for a notice-driven turn: ``play_<match>`` + ``state_<match>``.
+"""Request-scoped turn surface: the ``play_<match>`` tag + ``state_<match>`` tool.
 
-KiraAI has no ``ctx.session_tools``; a turn grant is expressed as a
-``BaseTool`` pair added to ``req.tool_set`` for one request only
-(``main.py``'s ``@on.llm_request`` handler calls
-``director.tools_for(sid)``, which builds the pair for the session's
-active grant).
+KiraAI has no ``ctx.session_tools``; a turn grant is expressed per request by
+``main.py``'s ``@on.llm_request`` handler (``host/prompt.py``):
 
-- ``play_<match_id>`` — the actual move of this turn. Bound to one grant
-  (match / seat / grant key), never registered globally, never reused across
-  turns. Parameters are ``move`` (required) plus an optional short ``say``
-  line (truncated to ``settings.max_say_len``). A successful move calls
-  ``event.stop()`` so the same reply does not repeat itself (the finalize
-  stage still saves memory) and returns a short confirmation; an illegal move
-  or a stale/revoked grant always reports failure.
-- ``state_<match_id>`` — read-only seat-scoped view of the bound match.
+- ``state_<match>`` joins ``req.tool_set`` for one request (``build_turn_tools``);
+- ``play_<match>`` is a **root control tag** registered on the per-request
+  ``tag_set`` (``PlayTurnTag``), submitted by ``submit_play_from_actions``
+  during ``AFTER_XML_PARSE``.
+
+Why the move rides a tag instead of a native tool: glm-tier models imitate
+whatever structured emission already sits in the session history. Kira's own
+output format teaches a ``<msg>`` XML envelope with escaped inner tags, and
+one text-form ``<tool_call>`` reply poisons the native tool channel for the
+whole session (the model then writes escaped ``<tool_call>`` blocks that no
+executor reads). The tag channel has no second channel to slip into: the move
+travels in the reply text itself, parsed by the same machinery that reads
+``<msg>``/``<emoji>``, and the model already follows those envelope
+conventions reliably.
 
 Discipline:
 
-- tools are built per turn (grant captured at construction time) and dropped
-  by simply not adding them to the next request;
-- ``event.extra["gamehub_turn"]`` is the bound context key
-  (``{"match_id", "seat", "kind", "grant"}``), produced by
-  :func:`build_turn_context`;
-- the move is applied through ``plugin._director.submit_play`` when the turn
-  director is present (it owns the grant lifecycle) and otherwise through the
-  room layer (``apply_ai_move`` / ``apply_delegated_move``) with the same
-  seat/version checks, so a stale grant can never take a later turn.
+- both surfaces are built per turn (grant captured at construction time) and
+  dropped by simply not adding them to the next request;
+- the move is applied through ``plugin._director.submit_play`` — the same
+  grant-bound, race-checked path the old tool used, so a stale or revoked
+  grant can never land a move into a later turn;
+- the table talk stays in the reply's ``<msg>`` lane (never a tag attribute:
+  one stray quote there would fail the whole reply's XML parse) and is
+  attached to the move as the atomic ``say``.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+try:  # production: the host tag machinery (request-scoped tag_set dispatch)
+    from core.tag import BaseTag as TagBase
+except ImportError:  # standalone tests import this module as top-level
+    class TagBase:  # type: ignore[no-redef]
+        """Minimal duck-typed stand-in for ``core.tag.BaseTag``."""
+
+        parent: str | None = None
+
 try:  # production: plugin package (``<plugin>.tools_turn``)
     from .tools import BaseTool, GameStateTool, NOTICE_ACTOR, TURN_KEY
 except ImportError:  # standalone tests import this module as top-level
     from tools import BaseTool, GameStateTool, NOTICE_ACTOR, TURN_KEY
 
-_LEGACY_SUCCESS_PREFIXES = ("已落子", "已执行动作", "已完成动作")
+try:  # production: KiraAI host logging (AGENTS.md)
+    from core.plugin import logger
+except ImportError:  # standalone tests outside the host: a plain stdlib logger
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+
 _NO_GRANT = "本回合没有有效的落子授权（可能已被停止或已结束）。"
 
 
@@ -70,11 +87,11 @@ def _safe_id(match_id: str) -> str:
 
 
 def play_tool_name(match_id: str) -> str:
-    """Turn-scoped move tool name: ``play_<match_id>`` (per-match disambiguation).
+    """Turn-scoped move surface name: ``play_<match_id>``.
 
     Several matches may share one target session, so the name carries the
-    match id: a bare ``play`` would silently replace another match's tool in
-    the request tool set. Match ids are hex, hence safe as a suffix.
+    match id: a bare ``play`` would collide across concurrent matches (the
+    name is shared by the old native tool and today's root tag).
     """
     return f"play_{_safe_id(match_id) or 'turn'}"
 
@@ -83,37 +100,21 @@ def state_tool_name(match_id: str) -> str:
     return f"state_{_safe_id(match_id) or 'turn'}"
 
 
-def _play_description(move_help: str) -> str:
+def _play_tag_description(move_help: str) -> str:
+    body = "标签内填本手动作字符串"
     if move_help:
-        return (
-            "在当前对局执行一步。move 的格式由本局规则决定"
-            f"（{move_help}），可配合文本输出一起使用。"
-        )
-    return "在当前对局执行一步。move 的格式由本局规则决定，可配合文本输出一起使用。"
-
-
-def _play_parameters(move_help: str) -> dict[str, Any]:
-    move_description = (
-        f"游戏动作字符串；本局格式：{move_help}。"
-        if move_help
-        else "游戏动作字符串；具体格式以本局规则/move_help 为准。"
+        body += f"（本局格式：{move_help}）"
+    else:
+        body += "，格式以本局规则为准"
+    return (
+        "落子控制标签，与<msg>同级（放在回复末尾，不要放进<msg>内）。"
+        f"{body}。轮到你行动的回合必须输出一次本标签完成落子；"
+        "只在正文里写出动作不算落子。"
     )
-    return {
-        "type": "object",
-        "properties": {
-            "move": {"type": "string", "description": move_description},
-            "say": {
-                "type": "string",
-                "description": "可选：本轮同回合说的一句短话（超长会被截断）。",
-            },
-        },
-        "required": ["move"],
-        "additionalProperties": False,
-    }
 
 
 def _truncate_say(plugin: Any, say: Any) -> str:
-    """Cut the optional table-talk line to the configured limit."""
+    """Cut the table-talk line to the configured limit."""
     text = str(say or "").strip()
     if not text:
         return ""
@@ -125,206 +126,122 @@ def _truncate_say(plugin: Any, say: Any) -> str:
     return text[:limit] if limit > 0 else text
 
 
-def _applied_move(text: str, fallback: str) -> str:
-    """Read the actually applied move out of ``已落子 X。...`` (else fallback)."""
-    body = str(text or "").strip()
-    for prefix in _LEGACY_SUCCESS_PREFIXES:
-        if body.startswith(prefix):
-            body = body[len(prefix):].lstrip()
-            break
-    else:
-        return fallback
-    for sep in ("。", "，", " ", "\n"):
-        index = body.find(sep)
-        if index > 0:
-            body = body[:index]
-            break
-    body = body.strip().rstrip("。")
-    return body or fallback
+class PlayTurnTag(TagBase):
+    """``play_<match_id>`` root control tag: the tag-channel move submission.
 
+    Scoping is request-level, mirroring ``tools_for``: ``host/prompt.py``
+    registers the tag on the per-request ``tag_set`` while the session holds
+    a live grant. ``parse_xml`` recognises the element only through that same
+    ``tag_set``, so other sessions can neither see nor execute it, and a
+    resolved grant simply stops registering it.
 
-def _parse_result(result: Any, fallback_move: str) -> tuple[str, bool, str, str]:
-    """Normalise a director result to ``(text, ok, applied_move, label)``.
-
-    Accepts both the legacy ``(text, terminal)`` tuple and the typed result
-    (``ok`` / ``status`` / ``text`` / ``error`` / ``move``). Success is only
-    reported from an explicit ok/status or a legacy success prefix — never
-    guessed from arbitrary text.
+    ``handle`` is a deliberate no-op: the real submission happens earlier,
+    during ``AFTER_XML_PARSE`` (``submit_play_from_actions``), where the
+    reply's ``<msg>`` texts are still in reach to ride as the atomic ``say``.
+    The tag element itself never becomes a message.
     """
-    if isinstance(result, tuple):
-        text = str(result[0] if result else "")
-        terminal = bool(result[1]) if len(result) > 1 else False
-        label = next(
-            (p for p in _LEGACY_SUCCESS_PREFIXES if text.startswith(p)), "已落子"
-        )
-        ok = terminal and text.startswith(_LEGACY_SUCCESS_PREFIXES)
-        applied = _applied_move(text, fallback_move) if ok else fallback_move
-        return text, ok, applied, label
 
-    ok = bool(getattr(result, "ok", False))
-    status = str(getattr(result, "status", "") or "")
-    text = str(getattr(result, "text", "") or getattr(result, "error", "") or "")
-    applied = str(getattr(result, "move", "") or "") or fallback_move
-    return text, bool(ok and status in ("", "played")), applied, "已落子"
+    parent = None  # root-level control tag, outside <msg>
 
-
-def _finish_turn(event: Any, text: str) -> str:
-    """Stop the current reply after a successful move (memory is still saved)."""
-    stop = getattr(event, "stop", None)
-    if callable(stop):
-        stop()
-    return text
-
-
-class PlayTool(BaseTool):
-    """``play_<match_id>``: submit this turn's move for the bound grant."""
-
-    def __init__(
-        self,
-        plugin: Any,
-        grant: Any,
-        *,
-        match_kind: str = "",
-        ctx: Any = None,
-    ) -> None:
-        super().__init__(ctx=ctx)
+    def __init__(self, plugin: Any, grant: Any, *, match_kind: str = "") -> None:
         self._plugin = plugin
         self._grant = grant
-        self._bound = build_turn_context(grant)
-        kind = (
-            match_kind
-            or str(getattr(grant, "match_kind", "") or "")
-            or str(getattr(grant, "kind", "") or "")
-        )
-        module = _module_of(kind)
+        module = _module_of(str(match_kind or ""))
         move_help = str(getattr(module, "move_help", "") or "").strip()
         self.name = play_tool_name(grant.match_id)
-        self.description = _play_description(move_help)
-        self.parameters = _play_parameters(move_help)
+        self.description = _play_tag_description(move_help)
 
-    def get_schema(self) -> dict[str, Any]:
-        """Per-instance schema: the tool name carries the match id.
+    def handle(self, value: str = "", **kwargs: Any) -> None:
+        """No-op by contract — see ``submit_play_from_actions``."""
+        return None
 
-        ``BaseTool.get_schema`` is a classmethod reading class attributes, but
-        turn tools are bound per grant, so the instance values must win — the
-        host builds ``request.tools`` from ``ToolSet.to_list()``.
-        """
-        return {
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.parameters,
-        }
 
-    # -- validation ----------------------------------------------------
-    def _bound_of(self, event: Any) -> dict[str, Any] | None:
-        """Bound context of this call; must still match the captured grant."""
-        bound = None
-        extra = getattr(event, "extra", None)
-        if isinstance(extra, dict):
-            candidate = extra.get(TURN_KEY)
-            if isinstance(candidate, dict):
-                bound = candidate
-        if bound is None:
-            bound = self._bound
-        if not bound:
-            return None
-        if str(bound.get("match_id") or "") != str(self._grant.match_id):
-            return None
-        if str(bound.get("grant") or "") != str(self._grant.key):
-            return None
-        return bound
+def _action_is_play_tag(action: Any, tag_name: str) -> bool:
+    tag = getattr(action, "tag", None)
+    return str(getattr(tag, "name", "") or "") == tag_name
 
-    async def _via_rooms(
-        self, bound: dict[str, Any], move: str, say: str
-    ) -> tuple[str, bool]:
-        """Fallback path: apply through the room layer with grant checks.
 
-        Used when no turn director is attached (e.g. the watchdog-free setup):
-        seat kind, waiting seat and move count are validated in the room lock,
-        so a stale or revoked grant cannot slip a move into a later turn.
-        """
-        rooms = self._plugin.rooms
-        match_id = str(bound.get("match_id") or "")
-        loader = getattr(rooms, "get_or_load", None)
-        room = await loader(match_id) if callable(loader) else None
-        if room is None:
-            return "通知回合绑定的对局不存在或已结束。", False
-        match = room.match
-        seat = int(bound.get("seat") or -1)
-        if not 0 <= seat < len(match.seats):
-            return "没有这个座位。", False
-        delegated = str(bound.get("kind") or "") == "delegated_human"
-        expect_kind = "human" if delegated else "ai"
-        if match.seats[seat].kind != expect_kind:
-            return "本回合的行动座位与对局不一致，本手作废。", False
-        expected = getattr(self._grant, "move_count", None)
-        try:
-            expected = int(expected) if expected is not None else None
-        except (TypeError, ValueError):
-            expected = None
-        if delegated:
-            applied_match, error = await room.apply_delegated_move(
-                seat,
-                move,
-                expected_move_count=expected,
-                grant_key=str(bound.get("grant") or ""),
-                say=say or None,
-            )
-        else:
-            applied_match, error = await room.apply_ai_move(
-                seat,
-                move,
-                expected_move_count=expected,
-                say=say or None,
-            )
-        if applied_match is None:
-            return f"落子 {move} 失败：{error}", False
-        return f"已落子 {move}。", True
+def _chain_texts(actions: Any) -> str:
+    """The reply's ``<msg>`` texts, joined (the tag-channel ``say`` source).
 
-    # -- execution -----------------------------------------------------
-    async def execute(
-        self, event: Any = None, move: str = "", say: str = "", **kwargs: Any
-    ) -> str:
-        bound = self._bound_of(event)
-        if bound is None:
-            return _NO_GRANT
-        move = str(move or "").strip()
-        if not move:
-            return "没有写这步棋。"
-        # A hallucinated extra say from older prompts must never break the move.
-        say = _truncate_say(self._plugin, say)
-        match_id = str(bound.get("match_id") or "")
-        grant_key = str(bound.get("grant") or "")
+    Duck-typed on ``MessageChain.message_list``; only ``Text`` elements carry
+    a ``.text`` string, so emoji/media elements never leak into the line.
+    """
+    parts: list[str] = []
+    for action in actions or ():
+        for element in getattr(action, "message_list", ()) or ():
+            text = getattr(element, "text", "")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return " ".join(parts)
 
-        director = getattr(self._plugin, "_director", None)
-        submit = getattr(director, "submit_play", None)
-        if callable(submit):
-            # The one-line remark rides the same atomic write as the move so
-            # the seat bubble and the match page can never disagree (atomic: only a legal
-            # move writes it) and shows up as the opponent bubble.
-            if say:
-                result = await submit(match_id, grant_key, move, say, persist_say=True)
-            else:
-                result = await submit(match_id, grant_key, move)
-            text, ok, applied, label = _parse_result(result, move)
-        else:
-            text, ok = await self._via_rooms(bound, move, say)
-            applied, label = move, "已落子"
 
-        if not ok:
-            return text or "这步没有走成。"
-        return _finish_turn(
-            event,
-            f"{label} {applied}。本次行动授权已完成，"
-            "请勿重复调用本局落子或状态工具。",
+async def submit_play_from_actions(
+    plugin: Any,
+    director: Any,
+    grant: Any,
+    actions: Any,
+    sid: str,
+) -> bool:
+    """Submit the move a ``play_<match>`` root tag carries (AFTER_XML_PARSE).
+
+    Called from the plugin's ``@on.after_xml_parse`` hook — before any
+    message of this reply is delivered — so the atomic move+say lands before
+    the table talk reaches the chat window. ``grant`` is the session's live
+    grant (the hook resolves it per ``sid``); a resolved or replaced grant
+    makes ``submit_play`` refuse, so a late or duplicate tag can never land
+    in a later turn — the same race-safety the old native tool had.
+
+    An ``invalid`` result (illegal move / empty action) re-opens the feedback
+    loop through ``director.note_tag_rejected`` — the tag channel has no
+    tool-result lane, so without it a mistyped action would sit silently
+    until the watchdog fill.
+    """
+    tag_name = play_tool_name(grant.match_id)
+    move = ""
+    for action in actions or ():
+        if _action_is_play_tag(action, tag_name):
+            move = str(getattr(action, "value", "") or "").strip()
+            break
+    if not move:
+        return False
+    say = _truncate_say(plugin, _chain_texts(actions))
+    note = getattr(director, "note_tool_progress", None)
+    if callable(note):
+        note(str(sid or ""))  # stand down a pending corrective nudge
+    submit = getattr(director, "submit_play", None)
+    if not callable(submit):
+        return True
+    if say:
+        result = await submit(grant.match_id, grant.key, move, say, persist_say=True)
+    else:
+        result = await submit(grant.match_id, grant.key, move)
+    if bool(getattr(result, "ok", False)):
+        logger.info(
+            "turn director: play tag submitted (%s seat %s <- %s)",
+            grant.match_id, grant.seat, move,
         )
+    else:
+        status = str(getattr(result, "status", "") or "")
+        error = str(getattr(result, "error", "") or "")
+        logger.warning(
+            "turn director: play tag rejected (%s seat %s <- %s: %s)",
+            grant.match_id, grant.seat, move, status or error or "unknown",
+        )
+        if status == "invalid":
+            reject_note = getattr(director, "note_tag_rejected", None)
+            if callable(reject_note):
+                await reject_note(str(sid or ""), grant, move, error)
+    return True
 
 
 class BoundStateTool(GameStateTool):
     """``state_<match_id>``: seat-scoped view bound to one grant.
 
     The match id keeps two concurrent matches in one session from replacing
-    each other's tool (same reasoning as ``play_<match_id>``).
+    each other's tool (same reasoning as ``play_<match_id>``). Unlike the
+    move, a read query needs a request/response round trip, so this stays a
+    native tool next to the tag channel.
     """
 
     def __init__(self, plugin: Any, grant: Any, *, ctx: Any = None) -> None:
@@ -350,23 +267,33 @@ class BoundStateTool(GameStateTool):
 def build_turn_tools(
     plugin: Any, grant: Any, *, match_kind: str = ""
 ) -> list[BaseTool]:
-    """Tools visible for one notice turn: ``[play_<id>, state_<id>]``.
+    """Tools visible for one notice turn: ``[state_<id>]``.
 
-    ``match_kind`` only refines the ``play`` schema (move format of the bound
-    game); omitting it keeps a generic move description.
+    The move no longer rides a native tool (see ``PlayTurnTag``);
+    ``match_kind`` is accepted for signature compatibility and unused here —
+    the move-format hint now lives in the tag description
+    (``PlayTurnTag(match_kind=...)``).
     """
     return [
-        PlayTool(plugin, grant, match_kind=match_kind),
         BoundStateTool(plugin, grant),
     ]
+
+
+def build_play_tag(
+    plugin: Any, grant: Any, *, match_kind: str = ""
+) -> PlayTurnTag:
+    """The tag-channel counterpart of ``build_turn_tools`` for the move."""
+    return PlayTurnTag(plugin, grant, match_kind=match_kind)
 
 
 __all__ = [
     "NOTICE_ACTOR",
     "BoundStateTool",
-    "PlayTool",
+    "PlayTurnTag",
+    "build_play_tag",
     "build_turn_context",
     "build_turn_tools",
     "play_tool_name",
     "state_tool_name",
+    "submit_play_from_actions",
 ]

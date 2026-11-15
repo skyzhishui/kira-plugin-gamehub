@@ -84,8 +84,8 @@ def test_gomoku_notice_is_header_only():
     )
     assert "play_m2" in text
     assert "汐祈（Seki）" in text
-    # The mandatory-tool guidance survives the slimming.
-    assert "一次回复只调用一次" in text
+    # The mandatory-tag guidance survives the slimming.
+    assert "一次回复只输出一个落子标签" in text
     assert "注意你是棋手，不是解说" in text
     # Board / coordinate content lives in the injected block now.
     assert "H8" not in text
@@ -115,7 +115,7 @@ def test_every_turn_notice_has_the_same_header_shape():
         assert "gamehub_context" in text and "state_m3" in text
         assert "规则（完整）" not in text
         assert "完整局面" not in text
-        assert "一次回复只调用一次" in text
+        assert "一次回复只输出一个落子标签" in text
     # Only the trigger facts differ between the two turns.
     assert "刚落子" in first and "刚落子" in later
 
@@ -133,18 +133,19 @@ def test_delegated_notice_keeps_its_wording():
 
 
 def test_nudge_notice_spells_out_the_call_syntax():
-    """F2：催促通知必须给出具体的调用格式（含合法示例 move）。
+    """F2：催促通知必须给出具体的标签格式（含合法示例动作）。
 
     事件复盘：故障切换到 flash 级模型后，模型决策正确（叫3）却把结果
-    写成正文。通知只说「调用工具」不够，要给出 move 参数的填写示例。
+    写成正文。通知只说「输出标签」不够，要给出完整可照抄的标签示例。
     """
     text = build_nudge_notice(
         _gomoku_match("m4"), seat=1, tool_name="play_m4", plugin=_plugin()
     )
     assert "play_m4" in text
-    assert 'move 参数填' in text
+    assert "<play_m4>" in text and "</play_m4>" in text
     assert "示例只展示格式" in text
     assert "只在正文里写结果不算行动" in text
+    assert "与<msg>同级" in text
 
     # Text-only variant (F1): names the exact mistake and keeps the syntax.
     corrective = build_nudge_notice(
@@ -152,7 +153,7 @@ def test_nudge_notice_spells_out_the_call_syntax():
         text_only=True,
     )
     assert "刚才只发了文字" in corrective
-    assert "play_m4" in corrective and 'move 参数填' in corrective
+    assert "<play_m4>" in corrective and "</play_m4>" in corrective
 
 
 def test_doudizhu_bid_nudge_example_is_a_bid_or_pass():
@@ -160,4 +161,4 @@ def test_doudizhu_bid_nudge_example_is_a_bid_or_pass():
         _doudizhu_match(), seat=1, tool_name="play_m1", plugin=_plugin()
     )
     # Bidding phase: the example must be a bid/pass form, never a card string.
-    assert 'move 参数填 "bid' in text or 'move 参数填 "pass"' in text
+    assert "<play_m1>bid 1</play_m1>" in text or "<play_m1>pass</play_m1>" in text

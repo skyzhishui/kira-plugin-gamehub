@@ -3,7 +3,8 @@
 Covers: teammate-perspective ``game_state``, notice-turn
 (``message.is_notice`` / bound ``gamehub_turn``) refusing
 ``game_new`` / ``game_resign``, bound state without actor lookup, and the
-turn-scoped ``play_<match>`` / ``state_<match>`` tool pair.
+turn-scoped ``state_<match>`` tool (the move rides the ``play_<match>``
+tag channel — see ``test_turn_tag.py``).
 """
 
 from __future__ import annotations
@@ -13,9 +14,9 @@ from typing import Any
 
 import modes
 from tools import game_new, game_resign, game_state
-from tools_turn import build_turn_context, build_turn_tools
+from tools_turn import build_play_tag, build_turn_context, build_turn_tools
 
-from test_tools import _Event, _Room, _Rooms, _plugin
+from test_tools import _Event, _Rooms, _plugin
 
 NOTICE_SID = "gamehub:dm:admin"
 
@@ -148,13 +149,13 @@ async def test_bound_state_tool_reads_event_binding():
     match = await _make_foreign_match(rooms)
     grant = _StubGrant(match.id, 1, "k1", "nori_turn")
     plugin = _plugin(rooms)
-    _play, state = build_turn_tools(plugin, grant)
+    state = build_turn_tools(plugin, grant)[0]
     text = await state.execute(_Event(extra={"gamehub_turn": build_turn_context(grant)}))
     assert "seat 1" in text
 
 
 # ----------------------------------------------------------------------
-#  Turn-scoped play tool
+#  Turn-scoped surfaces: state tool + play tag
 # ----------------------------------------------------------------------
 class _StubGrant:
     def __init__(self, match_id: str, seat: int, key: str, kind: str) -> None:
@@ -183,92 +184,6 @@ def _turn_plugin(rooms: _Rooms, director: Any = None) -> SimpleNamespace:
     )
 
 
-async def test_bound_play_tool_calls_director_and_stops_the_turn():
-    rooms = _Rooms()
-    match = await _make_foreign_match(rooms)
-    grant = _StubGrant(match.id, 1, "k1", "nori_turn")
-    director = _StubDirector()
-    play, _state = build_turn_tools(_turn_plugin(rooms, director), grant)
-    assert play.name == f"play_{match.id}"
-    event = _Event(extra={"gamehub_turn": build_turn_context(grant)})
-    text = await play.execute(event, move="H8")
-    assert "本次行动授权已完成" in text
-    assert event.stopped is True  # duplicate final reply prevented
-    assert director.calls == [(match.id, "k1", "H8", None)]
-    # Descriptions stay free of persona / rival / behaviour guidance.
-    for token in ("人设", "本局对手名", "称呼对手", "同一次回复里写一两句"):
-        assert token not in str(play.description)
-
-
-async def test_play_tool_rejects_foreign_bound_context():
-    rooms = _Rooms()
-    match = await _make_foreign_match(rooms)
-    grant = _StubGrant(match.id, 1, "k1", "nori_turn")
-    director = _StubDirector()
-    play, _state = build_turn_tools(_turn_plugin(rooms, director), grant)
-    event = _Event(
-        extra={
-            "gamehub_turn": {
-                "match_id": match.id,
-                "seat": 1,
-                "kind": "nori_turn",
-                "grant": "other-key",
-            }
-        }
-    )
-    text = await play.execute(event, move="H8")
-    assert "授权" in text
-    assert event.stopped is False
-    assert director.calls == []
-
-
-async def test_play_tool_without_director_uses_room_layer():
-    class _AppliedRoom(_Room):
-        def __init__(self, match) -> None:
-            super().__init__(match)
-            self.calls: list[tuple] = []
-
-        async def apply_ai_move(self, seat, move, **kwargs):
-            self.calls.append((seat, move, kwargs))
-            return self.match, ""
-
-    rooms = _Rooms()
-    match = await _make_foreign_match(rooms)
-    room = _AppliedRoom(match)
-    rooms.match = match
-    rooms.get_or_load = lambda match_id: _await(room)
-    grant = _StubGrant(match.id, 1, "k1", "nori_turn")
-    play, _state = build_turn_tools(_turn_plugin(rooms), grant)
-    event = _Event(extra={"gamehub_turn": build_turn_context(grant)})
-    text = await play.execute(event, move="H8", say="该你了")
-    assert "本次行动授权已完成" in text
-    assert event.stopped is True
-    assert room.calls == [
-        (1, "H8", {"expected_move_count": 0, "say": "该你了"})
-    ]
-
-
-async def test_play_tool_reports_room_layer_rejection():
-    class _RejectingRoom(_Room):
-        async def apply_ai_move(self, seat, move, **kwargs):
-            return None, "这里已经有子了"
-
-    rooms = _Rooms()
-    match = await _make_foreign_match(rooms)
-    rooms.match = match
-    rooms.get_or_load = lambda match_id: _await(_RejectingRoom(match))
-    grant = _StubGrant(match.id, 1, "k1", "nori_turn")
-    play, _state = build_turn_tools(_turn_plugin(rooms), grant)
-    event = _Event(extra={"gamehub_turn": build_turn_context(grant)})
-    text = await play.execute(event, move="H8")
-    assert "失败" in text and "已经有子" in text
-    assert event.stopped is False
-
-
-async def _await(value):
-    return value
-
-
 def test_build_turn_context_shape():
     grant = _StubGrant("m1", 1, "k1", "delegated_human")
     assert build_turn_context(grant) == {
@@ -279,19 +194,26 @@ def test_build_turn_context_shape():
     }
 
 
-def test_turn_tool_names_are_match_scoped():
+def test_turn_surfaces_are_state_tool_only_and_match_scoped():
+    """The move rides the tag channel; only the read view stays a tool."""
     a = _StubGrant("aaaa1111", 1, "k1", "nori_turn")
     b = _StubGrant("bbbb2222", 1, "k2", "nori_turn")
-    names_a = [tool.name for tool in build_turn_tools(_turn_plugin(_Rooms()), a)]
-    names_b = [tool.name for tool in build_turn_tools(_turn_plugin(_Rooms()), b)]
-    assert names_a == ["play_aaaa1111", "state_aaaa1111"]
-    assert names_b == ["play_bbbb2222", "state_bbbb2222"]
-    assert not set(names_a) & set(names_b)
+    tools_a = build_turn_tools(_turn_plugin(_Rooms()), a)
+    tools_b = build_turn_tools(_turn_plugin(_Rooms()), b)
+    assert [tool.name for tool in tools_a] == ["state_aaaa1111"]
+    assert [tool.name for tool in tools_b] == ["state_bbbb2222"]
+    assert not {tools_a[0].name} & {tools_b[0].name}
+    # The tag channel keeps the match-scoped naming too.
+    tag_a = build_play_tag(_turn_plugin(_Rooms()), a)
+    tag_b = build_play_tag(_turn_plugin(_Rooms()), b)
+    assert tag_a.name == "play_aaaa1111"
+    assert tag_b.name == "play_bbbb2222"
+    assert not {tag_a.name} & {tag_b.name}
 
 
-def test_turn_tools_accept_match_kind_for_move_format():
+def test_move_format_hint_lives_in_the_tag_description():
     grant = _StubGrant("m1", 1, "k1", "nori_turn")
-    play, _state = build_turn_tools(
-        _turn_plugin(_Rooms()), grant, match_kind="reversi"
-    )
-    assert "D6" in play.parameters["properties"]["move"]["description"]
+    tag = build_play_tag(_turn_plugin(_Rooms()), grant, match_kind="reversi")
+    assert "D6" in tag.description
+    state = build_turn_tools(_turn_plugin(_Rooms()), grant)[0]
+    assert state.name == "state_m1"

@@ -24,7 +24,7 @@ import modes
 from director import PlayResult, TurnDirector
 from engine.types import GameModule
 from room import RoomManager
-from tools_turn import play_tool_name, state_tool_name
+from tools_turn import play_tool_name, state_tool_name, submit_play_from_actions
 
 from test_talk import _settings
 
@@ -173,8 +173,8 @@ async def test_human_move_triggers_mandatory_notice_with_full_board_minus_plan()
     assert "H8" in text  # this move
     assert "放水" not in text  # minus plan
     assert room.match.seats[1].plan["text"] == "这局放水，别堵活四"
-    # The guidance: call play once, may speak in the same reply.
-    assert "一次回复只调用一次" in text
+    # The guidance: emit the play tag once, may speak in the same reply.
+    assert "一次回复只输出一个落子标签" in text
     assert "同一次回复" in text
     grant = director.grant_of(room.match.id)
     assert grant is not None and grant.kind == "nori_turn"
@@ -734,8 +734,8 @@ async def test_tools_for_only_the_announced_session():
 
     tools = director.tools_for(session_id)
     names = {tool.name for tool in tools}
-    assert play_tool_name(room.match.id) in names
-    assert state_tool_name(room.match.id) in names
+    # The move rides the play tag channel; only the read view stays a tool.
+    assert names == {state_tool_name(room.match.id)}
     assert director.tools_for("private-other") == []  # other sessions: nothing
     assert director.tools_for("") == []
 
@@ -764,7 +764,6 @@ async def test_turn_tool_schemas_are_named_for_the_model():
     tools = director.tools_for(session_id)
     assert tools
     schemas = {tool.get_schema()["name"]: tool.get_schema() for tool in tools}
-    assert play_tool_name(room.match.id) in schemas
     assert state_tool_name(room.match.id) in schemas
     for name, schema in schemas.items():
         assert name, "tool schema must carry a name"
@@ -793,12 +792,12 @@ async def test_multi_match_same_target_gets_distinct_tools_no_overwrite():
     )
     await _wait(lambda: len(recorder.sent) == 2)
 
-    # One session, two grants: tools_for returns one bound pair; both matches
-    # are individually reachable through their own grants.
+    # One session, two grants: tools_for exposes one grant's read tool; both
+    # matches are individually reachable through their own grants.
     names = {tool.name for tool in director.tools_for("qq:group:100:nori")}
     assert names in (
-        {play_tool_name(room_a.match.id), state_tool_name(room_a.match.id)},
-        {play_tool_name(room_b.match.id), state_tool_name(room_b.match.id)},
+        {state_tool_name(room_a.match.id)},
+        {state_tool_name(room_b.match.id)},
     )
 
     grant_a = director.grant_of(room_a.match.id)
@@ -810,32 +809,31 @@ async def test_multi_match_same_target_gets_distinct_tools_no_overwrite():
     await director.stop()
 
 
-async def test_play_tool_through_grant_stops_the_turn():
-    """The real ``play_<match>`` tool submits via the director and stops."""
-    from test_tools import _Event
-
-    rooms, _plugin, _recorder, director = _harness_bound()
+async def test_play_tag_through_grant_submits_the_move():
+    """The ``play_<match>`` tag path submits via the director; duplicates refuse."""
+    rooms, plugin, _recorder, director = _harness_bound()
     room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
     await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
     await _wait(lambda: director.grant_of(room.match.id) is not None)
     grant = director.grant_of(room.match.id)
 
-    play = next(
-        tool
-        for tool in director.tools_for(grant.session_id)
-        if tool.name == play_tool_name(room.match.id)
+    actions = [
+        SimpleNamespace(message_list=[SimpleNamespace(text="J9，堵你。")]),
+        SimpleNamespace(tag=SimpleNamespace(name=play_tool_name(room.match.id)), value="J9"),
+    ]
+    submitted = await submit_play_from_actions(
+        plugin, director, grant, actions, grant.session_id
     )
-    event = _Event(extra={"gamehub_turn": {"match_id": room.match.id, "seat": 1,
-                                           "kind": "nori_turn", "grant": grant.key}})
-    text = await play.execute(event, move="J9")
-    assert "本次行动授权已完成" in text
-    assert event.stopped is True
+    assert submitted is True
     assert grant.state == "played"
     assert len(room.match.log) == 2
 
-    # A late duplicate call is refused without lying about success.
-    late = await play.execute(event, move="K9")
-    assert "授权" in late and "已完成" not in late
+    # A late duplicate tag is refused without a second move.
+    late = await submit_play_from_actions(
+        plugin, director, grant, actions, grant.session_id
+    )
+    assert late is True  # attempted, then refused inside submit_play
+    assert grant.state == "played"
     assert len(room.match.log) == 2
     await director.stop()
 
@@ -941,24 +939,22 @@ async def test_cancel_match_closes_the_grant_and_revokes_tools():
     await director.stop()
 
 
-async def test_say_is_truncated_by_settings_on_the_tool_path():
-    """``max_say_len`` truncates the optional line before it reaches the room."""
-    from test_tools import _Event
-
-    rooms, _plugin, _recorder, director = _harness_bound(max_say_len=4)
+async def test_say_is_truncated_by_settings_on_the_tag_path():
+    """``max_say_len`` truncates the tag-path line before it reaches the room."""
+    rooms, plugin, _recorder, director = _harness_bound(max_say_len=4)
     room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
     await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
     await _wait(lambda: director.grant_of(room.match.id) is not None)
     grant = director.grant_of(room.match.id)
-    play = next(
-        tool
-        for tool in director.tools_for(grant.session_id)
-        if tool.name == play_tool_name(room.match.id)
-    )
-    event = _Event(extra={"gamehub_turn": {"match_id": room.match.id, "seat": 1,
-                                           "kind": "nori_turn", "grant": grant.key}})
-    await play.execute(event, move="J9", say="这句太长了会被截断")
+    actions = [
+        SimpleNamespace(message_list=[SimpleNamespace(text="这句太长了会被截断")]),
+        SimpleNamespace(tag=SimpleNamespace(name=play_tool_name(room.match.id)), value="J9"),
+    ]
+    assert await submit_play_from_actions(
+        plugin, director, grant, actions, grant.session_id
+    ) is True
     assert grant.state == "played"
+    assert room.match.chat and room.match.chat[-1].text == "这句太长"
     await director.stop()
 
 
@@ -1007,7 +1003,7 @@ async def test_notice_is_header_only_and_points_to_the_injected_block():
     assert "完整局面" not in first
     assert "gamehub_context" in first
     assert f"state_{room.match.id}" in first
-    assert "一次回复只调用一次" in first
+    assert "一次回复只输出一个落子标签" in first
 
     result = await director.submit_play(room.match.id, grant.key, "J9")
     assert result.ok
@@ -1088,7 +1084,7 @@ async def test_text_only_reply_gets_corrective_nudge_and_fast_fill():
     await _wait(lambda: any("刚才只发了文字" in t for _s, t in recorder.sent))
     corrective = next(t for _s, t in recorder.sent if "刚才只发了文字" in t)
     assert play_tool_name(room.match.id) in corrective
-    assert "move 参数填" in corrective  # F2: concrete call syntax
+    assert f"<{play_tool_name(room.match.id)}>H9</" in corrective  # F2: concrete tag syntax
 
     # The shortened deadline fills the turn quickly (the watchdog's sleep
     # granularity caps wake-up at 5s, so "fast" means << the 30s timeout).
@@ -1280,9 +1276,9 @@ async def test_dead_run_mark_expires_and_cannot_wedge_the_turn():
 
 
 async def test_shared_session_nudges_only_the_grant_whose_tools_were_offered():
-    """F4 守卫：同一会话多 grant 时，只有拿到 play 工具的 grant 会被催。
+    """F4 守卫：同一会话多 grant 时，只有拿到回合表面的 grant 会被催。
 
-    ``tools_for`` 每个请求只暴露一个 grant 的工具——另一个 grant 的
+    ``tools_for``/标签注册每个请求只暴露一个 grant 的表面——另一个 grant 的
     模型根本无法提交，催它「只说不做」既错误又烧预算。
     """
     rooms, plugin, recorder, director = _harness_bound(

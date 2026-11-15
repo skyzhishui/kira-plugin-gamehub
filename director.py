@@ -8,10 +8,15 @@ talk / the local judge / the plugin game agent all step aside.
 What changed from nori:
 
 - **Grants are request-scoped.** KiraAI has no ``ctx.session_tools``; the
-  grant only remembers the session it was announced to and
-  :meth:`TurnDirector.tools_for` hands ``play_<match>`` / ``state_<match>`` to
-  the next request of that session (``host/prompt.py`` calls it). Revocation
-  is implicit: no tools are added on the following request.
+  grant only remembers the session it was announced to and the next request
+  of that session gets the turn surface (``host/prompt.py`` calls it):
+  ``state_<match>`` as a native tool via :meth:`TurnDirector.tools_for`, and
+  the ``play_<match>`` **root control tag** on the per-request ``tag_set``
+  (the tag channel — glm-tier models imitate whatever structured emission
+  already sits in the session history, so a native move tool loses the
+  channel to the ``<msg>`` envelope's escape conventions; the tag has no
+  second channel to slip into). Revocation is implicit: the next request
+  without the grant simply registers neither.
 - **Notices go through ``host.notices.send_notice``** (``ctx.publish_notice``),
   so there is no dispatcher to wait for: the notice is published and the host
   chat pipeline replies on its own.
@@ -156,6 +161,9 @@ class TurnGrant:
     nudged: bool = False
     # F1: corrective nudges for text-only replies (capped, shortened window).
     text_nudges: int = 0
+    # Bounded retry notices for rejected play tags (illegal move in the tag;
+    # the tag channel has no tool-result lane to report failures in).
+    tag_retries: int = 0
     text_task: asyncio.Task[Any] | None = None
     # F1 short-window mode: once a corrective nudge fired, progress signals
     # can no longer push the deadline past ``short_deadline`` — only an open
@@ -288,7 +296,7 @@ def build_turn_notice(
     """Action-turn notice: the turn header only.
 
     The notice is the turn trigger and carries only per-turn instructions:
-    who moved, whose turn it is, the mandatory ``play_<match>`` call and the
+    who moved, whose turn it is, the mandatory ``play_<match>`` tag and the
     behavioral boundaries. The board snapshot, full rules, move syntax,
     recent moves and threat analysis ride the per-request
     ``gamehub_context`` block instead (``context.build_game_state_context``),
@@ -303,9 +311,9 @@ def build_turn_notice(
     - a same-seat continuation (reversi auto-pass) says "you just played X;
       the opponent has no legal move" instead of blaming the opponent.
 
-    The guidance asks for **one** ``play_<match>`` call in this reply and
-    explicitly allows talking in the same reply (KiraAI has no separate
-    envelope lane), so the model never invents an extra "say" tool call.
+    The guidance asks for **one** ``play_<match>`` tag in this reply and
+    explicitly allows talking in the same reply (the tag carries the move,
+    the ``<msg>`` envelope carries the table talk).
     """
     agent = _agent_name(plugin)
     state_tool = state_tool_name(str(getattr(match, "id", "") or ""))
@@ -329,10 +337,11 @@ def build_turn_notice(
         )
         return (
             f"[System: 斗地主行动回合：{players}。{identity}。"
-            "这是你的对局回合：必须在本轮回复里调用 " + tool_name + " 工具提交动作"
-            "——只在正文里写出牌不算数，没有这次调用就等于你没有行动，"
+            "这是你的对局回合：必须在本轮回复里输出一次 <" + tool_name + ">动作"
+            "</" + tool_name + "> 落子控制标签（与<msg>同级，放在回复末尾）提交动作"
+            "——只在正文里写出牌不算数，没有这个标签就等于你没有行动，"
             "系统会替你随手打一张。"
-            "一次回复只调用一次；同一次回复可以聊公开牌型、调侃与局势气氛，"
+            "一次回复只输出一个落子标签；同一次回复可以聊公开牌型、调侃与局势气氛，"
             "但禁止透露自己的未出手牌或私有策略。"
             "不得代替其他席位行动，不得沿用其他局的名字。注意你是玩家，不是解说。"
             f"{fallback_line}]"
@@ -356,10 +365,11 @@ def build_turn_notice(
     )
     identity_line = "注意你是棋手，不是解说。"
     call_line = (
-        f"这是你的对局回合：必须在本轮回复里调用 {tool_name} 工具落子——"
-        "只在正文里写出坐标不算数，没有这次调用就等于你没有落子，"
+        f"这是你的对局回合：必须在本轮回复里输出一次 <{tool_name}>动作"
+        f"</{tool_name}> 落子控制标签（与<msg>同级，放在回复末尾）——"
+        "只在正文里写出坐标不算数，没有这个标签就等于你没有落子，"
         "系统会替你随手下一手。"
-        "一次回复只调用一次；同一次回复可以照常说一两句玩家口吻的短话，"
+        "一次回复只输出一个落子标签；同一次回复可以照常说一两句玩家口吻的短话，"
         "关键赛点/高光时刻/情绪激动时可搭配表情包、语音等非文本消息。"
     )
 
@@ -433,7 +443,7 @@ def build_stage_notice(match: Any, stage: str, *, plugin: Any = None) -> str:
         return (
             f"[System: 对局开始 · {title}：{seat_desc}。"
             "这是你们的对局，不是解说。请用一两句玩家口吻自然开场；"
-            "不用调用对局工具，想表达可以配合表情或语音。]"
+            "不用输出落子控制标签，想表达可以配合表情或语音。]"
         )
     status = status_of(match)
     result = status.result_text or (
@@ -441,7 +451,7 @@ def build_stage_notice(match: Any, stage: str, *, plugin: Any = None) -> str:
     )
     return (
         f"[System: 对局结束 · {title}：{result}。{seat_desc}。"
-        "请用一两句玩家口吻自然回应；不用调用对局工具。]"
+        "请用一两句玩家口吻自然回应；不用输出落子控制标签。]"
     )
 
 
@@ -482,11 +492,11 @@ def build_nudge_notice(
     """Short reminder for a turn the host answered without acting (F2).
 
     The model sometimes replies to the action notice with plain text (e.g.
-    "这手牌有王有对子，我抢地主。") instead of calling ``play_<match>`` — the
-    decision is right, only the format is wrong, which players perceived as
-    "the opponent timed out". The reminder therefore spells out the exact
-    call syntax with a legal example move, so even a failover-tier model
-    cannot misread *how* to submit.
+    "这手牌有王有对子，我抢地主。") instead of emitting the ``play_<match>``
+    tag — the decision is right, only the format is wrong, which players
+    perceived as "the opponent timed out". The reminder therefore spells out
+    the exact tag syntax with a legal example move, so even a failover-tier
+    model cannot misread *how* to submit.
 
     ``text_only=True`` is the immediate corrective variant (F1): sent right
     after a completed reply that did not submit, with a shortened deadline.
@@ -497,16 +507,17 @@ def build_nudge_notice(
     example = _example_move(match, seat)
     opening = (
         f"[System: 你（{agent}，座位{seat}，{seat_label}）刚才只发了文字，"
-        "没有调用工具提交动作。"
+        "没有输出落子控制标签提交动作。"
         if text_only
         else f"[System: 你（{agent}，座位{seat}，{seat_label}）还没有提交动作。"
     )
     return (
         opening
-        + f"请立刻在这一次回复里调用 {tool_name} 工具提交，"
-        f'调用格式示例：move 参数填 "{example}"'
+        + f"请立刻在这一次回复里输出 <{tool_name}>动作</{tool_name}> 控制标签提交"
+        "（与<msg>同级，放在回复末尾），"
+        f"格式示例：<{tool_name}>{example}</{tool_name}>"
         "（示例只展示格式，具体动作请按你的手牌/当前盘面决定）。"
-        "只在正文里写结果不算行动。如果这次仍不调用，系统会替你随手出一手。]"
+        "只在正文里写结果不算行动。如果这次仍不输出标签，系统会替你随手出一手。]"
     )
 
 
@@ -547,11 +558,14 @@ class TurnDirector:
     def tools_for(self, sid: str) -> list[Any]:
         """Request-scoped tools for the active grant announced to ``sid``.
 
-        Returns ``[]`` when this session holds no live grant, which is also how
-        a grant is revoked: the tools are simply not added to the next request.
-        When several grants share a session only the first one's tools are
-        offered — the mapping is remembered (``_tools_grant``) so F1 corrective
-        nudges never blame a grant whose tool the model cannot even call.
+        Returns the bound ``state_<match>`` read tool (the move rides the
+        ``play_<match>`` tag channel — see ``tools_turn.PlayTurnTag``).
+        Returns ``[]`` when this session holds no live grant, which is also
+        how a grant is revoked: the tool is simply not added to the next
+        request. When several grants share a session only the first one's
+        tool is offered — the mapping is remembered (``_tools_grant``) so F1
+        corrective nudges never blame a grant whose surface the model cannot
+        even see.
         """
         target = str(sid or "").strip()
         if not target or self._stopping:
@@ -603,6 +617,10 @@ class TurnDirector:
         room = getter(match_id) if callable(getter) else None
         match = getattr(room, "match", None)
         return str(getattr(match, "kind", "") or "")
+
+    def match_kind_of(self, match_id: str) -> str:
+        """Public alias of :meth:`_match_kind` (the play tag description)."""
+        return self._match_kind(match_id)
 
     def prune_grants(
         self, *, now: float | None = None, retention_s: float = _GRANT_RETENTION_S
@@ -691,15 +709,17 @@ class TurnDirector:
                 continue
             grant.last_tool_progress = now
 
-    def note_response(self, sid: str) -> None:
+    def note_response(self, sid: str, content: str = "") -> None:
         """A full LLM response completed for ``sid`` (F1 entry point).
 
         First the ordinary progress bookkeeping (the host demonstrably
         replied, so the watchdog must not fire mid-flight), then — when the
         turn grant is still unresolved a short grace later — a corrective
         nudge with a shortened deadline. The grace window lets a response
-        that *contains* the ``play_<match>`` call submit first (tool results
-        land after the response hook), which cancels the nudge naturally.
+        that *carries* the ``play_<match>`` tag submit first (the tag is
+        submitted during ``AFTER_XML_PARSE``, right after this hook), which
+        cancels the nudge naturally; ``content`` makes that check exact — a
+        reply that contains the tag never arms the corrective at all.
 
         Arming is conservative (a false "you only talked" nudge wastes the
         budget and can preempt a slow-but-correct model):
@@ -709,9 +729,9 @@ class TurnDirector:
           (the incident's opening-line run) and the model has not even seen
           the notice yet;
         - when several grants share the session, only the grant whose
-          ``play`` tool was actually offered on the last request can be
+          surface was actually offered on the last request can be
           nudged — the others cannot submit at all (``tools_for`` exposes one
-          grant's tools per request).
+          grant's turn surface per request).
         """
         target = str(sid or "").strip()
         if not target or self._stopping:
@@ -730,7 +750,9 @@ class TurnDirector:
             if run_started_after_notice <= grant.notice_sent_at:
                 continue  # the response predates the notice's own run
             if self._tools_grant.get(target, grant.match_id) != grant.match_id:
-                continue  # this grant's play tool was not offered
+                continue  # this grant's turn surface was not offered
+            if content and f"<{play_tool_name(grant.match_id)}" in str(content):
+                continue  # the reply carries the tag; AFTER_XML_PARSE submits it
             if grant.text_task is not None and not grant.text_task.done():
                 continue  # one corrective in flight is enough
             grant.text_task = asyncio.create_task(
@@ -824,6 +846,35 @@ class TurnDirector:
             grant.seat,
             grant.text_nudges,
             int(_cfg(self._plugin, "turn_text_retry_max", 2)),
+        )
+
+    async def note_tag_rejected(
+        self, sid: str, grant: TurnGrant, move: str, error: str
+    ) -> None:
+        """Bounded corrective notice for a rejected play tag (invalid action).
+
+        The tag channel has no tool-result lane to report failures in, so an
+        illegal move would otherwise sit silently until the watchdog fill.
+        The notice re-opens the feedback loop; budgeted like the text nudges
+        (``turn_text_retry_max``) so a confused model cannot loop unnoticed.
+        """
+        if self._stopping or not self._is_current(grant):
+            return
+        cap = int(_cfg(self._plugin, "turn_text_retry_max", 2))
+        if grant.tag_retries >= max(0, cap):
+            return
+        grant.tag_retries += 1
+        name = play_tool_name(grant.match_id)
+        text = (
+            f"[System: 你输出的 <{name}>{move}</{name}> 无法落子："
+            f"{error or '动作无效'}。请立刻在这一次回复里重新输出 "
+            f"<{name}>正确动作</{name}> 控制标签（与<msg>同级，放在回复末尾）。]"
+        )
+        if not await send_notice(self._plugin, str(sid or ""), text):
+            return
+        logger.info(
+            "turn director: play tag rejected, retry notice sent (%s seat %s, %s/%s)",
+            grant.match_id, grant.seat, grant.tag_retries, cap,
         )
 
     async def _handle_event(self, room: Any, event: dict[str, Any]) -> None:

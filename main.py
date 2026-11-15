@@ -312,9 +312,11 @@ class GamehubPlugin(BasePlugin):
 
         ``ON_STEP_RESULT`` only fires after a text delivery, so a tool-only
         step would otherwise look like silence. A *completed* response also
-        feeds F1: if the reply came back text-only, the director sends a
-        corrective nudge with a shortened deadline instead of idling out the
-        full silence window.
+        feeds F1: if the reply came back without the play tag, the director
+        sends a corrective nudge with a shortened deadline instead of idling
+        out the full silence window. The reply text rides along so the
+        director can see the tag and skip arming (``AFTER_XML_PARSE`` below
+        submits it).
         """
         director = self._director
         sid = str(getattr(event, "sid", "") or "")
@@ -322,11 +324,41 @@ class GamehubPlugin(BasePlugin):
             return
         responder = getattr(director, "note_response", None)
         if callable(responder):
-            responder(sid)
+            content = ""
+            for attr in ("text_response", "content"):
+                value = getattr(response, attr, None)
+                if isinstance(value, str) and value:
+                    content = value
+                    break
+            responder(sid, content)
             return
         note = getattr(director, "note_progress", None)
         if callable(note):
             note(sid)
+
+    @on.after_xml_parse(priority=Priority.LOW)
+    async def submit_turn_play_tag(self, event, actions=None, *args, **kwargs):
+        """The ``play_<match>`` root tag: submit the move before delivery.
+
+        ``AFTER_XML_PARSE`` runs right after the reply text is parsed and
+        before any of its messages is sent, so the atomic move+say lands
+        first and the envelope table talk follows through the normal send
+        path. The tag is only registered for the session that owes the move
+        (request-scoped ``tag_set``), and the grant binding makes a late or
+        duplicate tag a safe no-op.
+        """
+        sid = str(getattr(event, "sid", "") or "")
+        if not sid or not isinstance(actions, list) or not actions:
+            return
+        director = getattr(self, "_director", None)
+        if director is None or getattr(director, "_stopping", False):
+            return
+        grant = director.active_grant_for(sid)
+        if grant is None:
+            return
+        from .tools_turn import submit_play_from_actions
+
+        await submit_play_from_actions(self, director, grant, actions, sid)
 
     @on.step_result(priority=Priority.LOW)
     async def note_turn_progress(self, event, step_result=None, *args, **kwargs):
