@@ -2,19 +2,34 @@
 
 from __future__ import annotations
 
+import inspect
+from collections import OrderedDict
 from typing import Any
 
 from core.plugin import logger
 
 from ..engine.match import SOURCE_CHAT, SOURCE_WEBUI
 from ..game_agent import GameAgent
-from ..modes import DRIVER_BOT, DRIVER_TURN, seat_driver_of
+from ..modes import DRIVER_AGENT, DRIVER_BOT, DRIVER_TURN, seat_driver_of
 from ..notice_judge import NoticeJudge
 from ..room import RoomManager
 from ..talk import TableTalk
 from .bridge import set_outbound_sink, ws_hub
 from .session import GAME_SID
 from .store import MatchStore
+
+# Fixed identity of the plugin-owned game_agent inside the shared game group.
+GAME_AGENT_UID = "game_agent"
+# Upper bound on the move-event fingerprints remembered for say deduplication.
+_AGENT_SAY_CACHE_LIMIT = 256
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await ``value`` only when it is awaitable (hooks may be sync)."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
 
 try:  # the director module is optional until the turn wave lands
     from ..director import TurnDirector
@@ -36,6 +51,9 @@ class GamehubRuntime:
         self.director: Any = None
         self.agent: Any = None
         self._started = False
+        # Move-event fingerprints whose agent say was already published, so a
+        # replayed/duplicated event never posts the same line twice.
+        self._agent_say_seen: OrderedDict[tuple[str, int, str], None] = OrderedDict()
 
     async def start(self) -> None:
         plugin = self.plugin
@@ -148,13 +166,95 @@ class GamehubRuntime:
     #  Room event fan-out
     # ------------------------------------------------------------------
 
-    def _dispatch_event(self, room: Any, event: dict[str, Any]) -> Any:
-        """Director (mandatory turn notices) first, then table talk."""
+    async def _dispatch_event(self, room: Any, event: dict[str, Any]) -> Any:
+        """Buffer the agent say, then director (turn notices), then table talk.
+
+        The room dispatches events from a task, so this hook may await. The
+        game_agent's own public line must reach the shared group buffer *before*
+        the director's notice for the same move, otherwise the notice's turn
+        would answer before the line is visible; the director/table-talk hooks
+        are still fire-and-forget and can never block each other.
+        """
+        try:
+            await self._publish_agent_say(room, event)
+        except Exception as e:  # noqa: BLE001 - group chat is cosmetic
+            logger.warning(f"gamehub: game_agent group say failed: {e}", exc_info=True)
         if self.director is not None:
-            self.director.on_event(room, event)
+            await _maybe_await(self.director.on_event(room, event))
         if self.talk is None:
             return None
-        return self.talk.on_event(room, event)
+        return await _maybe_await(self.talk.on_event(room, event))
+
+    async def _publish_agent_say(self, room: Any, event: dict[str, Any]) -> None:
+        """Mirror one successful game_agent move line into the shared group chat.
+
+        Only a legal move by a ``DRIVER_AGENT`` seat carries a public ``say``:
+        host-delegated moves, rule-bot steps and internal reasoning are never
+        forwarded. The event's own ``match`` snapshot supplies the driver and
+        identity, so a later ``room.match`` advance cannot misclassify the
+        line. The original ``Match.chat`` bubble is left untouched; this only
+        adds the spectator-role group event plus the match-scoped chat read
+        model and its ``chat_message`` WS frame. Every step is best-effort and
+        never blocks the director/table-talk dispatch.
+        """
+        if str(event.get("type") or "") != "move":
+            return
+        text = str(event.get("say") or "").strip()
+        if not text:
+            return
+        seat = event.get("seat")
+        match = event.get("match") or getattr(room, "match", None)
+        if match is None or not isinstance(seat, int):
+            return
+        try:
+            driver = seat_driver_of(match, seat)
+        except Exception:  # noqa: BLE001 - a bad snapshot must not break dispatch
+            logger.debug("gamehub: agent say driver lookup failed", exc_info=True)
+            return
+        if driver != DRIVER_AGENT:
+            return
+        match_id = str(getattr(match, "id", "") or "")
+        if not match_id:
+            return
+        fingerprint = (match_id, int(getattr(match, "version", 0) or 0), text)
+        if fingerprint in self._agent_say_seen:
+            return
+        self._agent_say_seen[fingerprint] = None
+        self._agent_say_seen.move_to_end(fingerprint)
+        while len(self._agent_say_seen) > _AGENT_SAY_CACHE_LIMIT:
+            self._agent_say_seen.popitem(last=False)
+
+        name = str(getattr(self.plugin.settings, "agent_name", "") or "").strip() or "agent"
+        # 1) Shared group session: the line is buffered (spectator role only,
+        #    never arming a host reply) before this call returns, so the main
+        #    AI can never be triggered and the buffer precedes the director.
+        try:
+            from .group_chat import publish_agent_say
+
+            await publish_agent_say(
+                self.plugin, GAME_AGENT_UID, name, text, match_id=match_id,
+            )
+        except Exception as e:  # noqa: BLE001 - group chat is cosmetic
+            logger.warning(f"gamehub: agent say publish failed ({match_id}): {e}")
+
+        # 2) Match-page read model + WS fan-out (same read model as player
+        #    lines): one stored row keyed by id/ts, then one chat_message frame.
+        line: dict[str, Any] | None = None
+        if self.store is not None:
+            try:
+                line = await self.store.chat_append(
+                    "agent", name, text, match_id=match_id, uid=GAME_AGENT_UID,
+                )
+            except Exception:  # noqa: BLE001 - read model is cosmetic
+                logger.debug("gamehub: agent say chat record failed", exc_info=True)
+        payload = line or {
+            "role": "agent", "sender": name, "text": text,
+            "match_id": match_id, "uid": GAME_AGENT_UID,
+        }
+        try:
+            await ws_hub.broadcast(match_id, {"type": "chat_message", **payload})
+        except Exception:  # noqa: BLE001 - WS fan-out is cosmetic
+            logger.debug("gamehub: agent say broadcast failed", exc_info=True)
 
     async def _drive_ai(self, room: Any, seat: int) -> None:
         """Route AI seats by driver: turn = notice-driven, bot = rules, agent = LLM."""

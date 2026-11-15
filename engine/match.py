@@ -757,6 +757,9 @@ def agent_view_text(
     plan_review: bool = False,
     chat_limit: int = 3,
     threat_analysis: bool = True,
+    include_rules: bool = True,
+    include_move_syntax: bool = True,
+    include_instructions: bool = True,
 ) -> str:
     """``game_agent`` 的整盘 user prompt（不含旧 ``MOVE:`` 文本协议）。
 
@@ -769,6 +772,18 @@ def agent_view_text(
 
     ``threat_analysis=False`` 时完全不调用游戏模块的威胁摘要；模块没有
     ``threat_summary`` 时也直接跳过，因此未来没有该能力的游戏不会报错。
+
+    Default output stays complete (rules / move format / seat identity and
+    turn instructions), so existing callers keep their behaviour.
+    ``game_agent`` moves the stable items into the per-match prefix and passes
+    the matching flags as ``False`` explicitly, leaving the dynamic snapshot
+    with the current position, public chat, plan and threat only. This avoids
+    repeating rule/format/identity/speech instructions within one request.
+    ``include_instructions=False`` also drops the seat identity line, the
+    ``YOUR TURN`` play/speech instruction and the doudizhu table-talk block;
+    only ``Status: YOUR TURN.`` remains as the action-right fact. Seat labels
+    (landlord/farmer) are dynamic sides and remain in the current snapshot's
+    Seats/position block.
     """
     mod = games.get(match.kind)
     labels = mod.seat_labels(match.state)
@@ -778,10 +793,11 @@ def agent_view_text(
         f"Game {match.id} · {mod.name['en']} ({mod.name['zh']}) · "
         f"{len(match.seats)} players"
     ]
-    out.append(
-        f"You are {names[seat]} in seat {seat}"
-        f" ({labels[seat] if seat < len(labels) else ''})."
-    )
+    if include_instructions:
+        out.append(
+            f"You are {names[seat]} in seat {seat}"
+            f" ({labels[seat] if seat < len(labels) else ''})."
+        )
     out.append(
         "Seats: "
         + " · ".join(
@@ -792,27 +808,42 @@ def agent_view_text(
         )
     )
     rules = str(getattr(mod, "rules", "") or "").strip()
-    if rules:
+    if rules and include_rules:
         out.append("")
         out.append("Rules:")
         out.append(rules)
-    out.append(f"Move syntax: {mod.move_help}.")
+    move_help = str(getattr(mod, "move_help", "") or "").strip()
+    if move_help and include_move_syntax:
+        out.append(f"Move syntax: {move_help}.")
     out.append("")
     out.append("Current position:")
     if status.result_text:
         out.append(f"GAME OVER: {status.result_text}.")
     elif seat in status.waiting_on:
-        out.append(
-            "Status: YOUR TURN. Call the `play` tool with your move now, "
-            "and include one or two short player-style lines in the same "
-            "reply; do not reply with text only."
-        )
+        if include_instructions:
+            out.append(
+                "Status: YOUR TURN. Call the `play` tool with your move now, "
+                "and include one or two short player-style lines in the same "
+                "reply; do not reply with text only."
+            )
+        else:
+            # Action right only: speech/play instructions live in the stable
+            # prefix, never in the per-turn snapshot.
+            out.append("Status: YOUR TURN.")
     else:
         out.append(
             f"Status: waiting for {', '.join(names[s] for s in status.waiting_on)}."
         )
-    out.append(mod.describe(match.state, seat, names))
-    if match.kind == "doudizhu":
+    description = mod.describe(match.state, seat, names)
+    if not include_instructions:
+        # The snapshot must carry the position only. Some modules embed a
+        # speech constraint in their private-hand label; the stable prefix
+        # already owns that boundary, so drop the parenthetical here.
+        description = description.replace(
+            " (do not repeat in table speech)", ""
+        )
+    out.append(description)
+    if match.kind == "doudizhu" and include_instructions:
         # 牌类有隐藏信息：规则里“只能聊公开动作/张数”容易被读成“不要
         # 说话”。这里给一条正向许可，配合系统 prompt 的同轮短话要求，
         # 让模型知道可以聊公开信息与气氛，只是不能报私牌。

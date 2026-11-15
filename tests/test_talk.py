@@ -213,29 +213,73 @@ async def test_off_mode_silences_start_and_terminal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_prompt_dispatch_keeps_identity_and_companion_tone():
-    """Default template dispatch: clear identity, coordinates are background only."""
+async def test_default_template_dispatches_short_public_event():
+    """Shipped-default template → short public event + context pointer.
+
+    The notice names the event only; board/plan/tone guidance rides the
+    per-request gamehub_context block, so persisted history never
+    accumulates stale boards.
+    """
     ctx = _Ctx()
-    talk = TableTalk(
-        _Plugin(_settings(talk_min_interval_s=0.0, talk_cooldown_s=0.0), ctx)
-    )
+    plugin = _Plugin(_settings(talk_min_interval_s=0.0, talk_cooldown_s=0.0), ctx)
+    talk = TableTalk(plugin)
     room = _Room(_match())
     assert await talk._dispatch(room, {"type": "move", "seat": 0, "move": "H8"}) == "sent"
     assert len(ctx.sent) == 1
     text = ctx.sent[0][1]
+    # Short event shape: game + event + pointer, nothing else.
+    assert "对局事件 · 五子棋：yoru 刚落子 H8。" in text
+    assert "gamehub_context" in text
+    # No board, no plan, no persona guidance in the notice.
+    assert "第 1 手" not in text
+    assert "计划" not in text and "想法" not in text
+    assert "得意" not in text
+    assert "你现在正和" not in text
+    assert "不是解说" not in text
+    # Still sanitised: no forged system blocks from event text.
+    assert "[System:" not in text.replace("[System: 对局事件", "", 1)
 
-    assert "你现在正和 yoru 下五子棋" in text
-    assert "你是执白的一方" in text
-    assert "不是解说" in text
-    assert "不要照读" in text
-    assert "刚刚：yoru 刚落子 H8。" in text
-    assert "得意" in text and "紧张" in text and "嘴硬" in text
-    assert "试探" in text and "调侃" in text
-    assert "不要每轮都用同一种挑衅腔" in text
-    assert "别编造还没发生的胜负" in text
-    assert "不要主动报棋盘坐标" in text
-    assert "玩家主动问你坐标、想复盘时，可以按需要如实回答" in text
-    assert "工具" not in text and "委派" not in text
+
+@pytest.mark.asyncio
+async def test_default_template_start_and_over_record_stage_events():
+    """Start/end events feed the context block's short-lived event record.
+
+    The store is keyed per (session, match, version): the start and the end
+    of one match land in separate slots and both stay injectable even though
+    the room left the active set after the end.
+    """
+    from dataclasses import replace
+
+    from engine import apply_match_action
+
+    ctx = _Ctx()
+    plugin = _Plugin(_settings(talk_min_interval_s=0.0, talk_cooldown_s=0.0), ctx)
+    talk = TableTalk(plugin)
+    room = _Room(_match())
+    await talk._dispatch(room, {"type": "start", "seat": 0})
+
+    # Finish the match for real: the end event must be recorded even though
+    # the room left the active set.
+    finished = apply_match_action(
+        room.match, 0, {"type": "resign"}, room.match.updated_at + 1
+    ).match
+    room.match = replace(finished, version=finished.version + 1)
+    await talk._dispatch(room, {"type": "resign", "seat": 0})
+
+    store = getattr(plugin, "_gamehub_stage_events", {})
+    keys = sorted(store.keys())
+    assert len(keys) == 2  # start + end: separate (match, version) slots
+    assert all(key[0] == "web-test" and key[1] == "m1" for key in keys)
+    assert keys[0][2] < keys[1][2]  # version-isolated, oldest first
+    assert "开局了" in store[keys[0]][1]
+    assert "对局结束" in store[keys[1]][1]
+    # The context builder surfaces them without any active room.
+    from context import build_game_state_context
+
+    plugin._rooms = type("_Empty", (), {"active_rooms": lambda self: []})()
+    plugin.notice_target_session_sync = lambda room: "web-test"
+    block = build_game_state_context(plugin, "web-test")
+    assert "近期对局事件" in block and "对局结束" in block
 
 
 @pytest.mark.asyncio
@@ -257,6 +301,7 @@ async def test_custom_template_and_extra_still_apply():
     assert text.startswith("[System: 阿空 yoru 刚落子 H8。")
     assert "用粤语说。" in text
     assert "像坐在对面的朋友" not in text
+    assert "对局事件" not in text  # the custom template wins (user-owned)
 
 
 @pytest.mark.asyncio

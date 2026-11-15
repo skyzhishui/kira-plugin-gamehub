@@ -169,13 +169,16 @@ async def test_human_move_triggers_mandatory_notice_with_full_board_minus_plan()
     await _wait(lambda: bool(recorder.sent))
 
     text = _notice_text(recorder)
-    assert play_tool_name(room.match.id) in text  # the per-match play tool
+    assert f"state_{room.match.id}" in text  # the pointer names the bound tool
     assert "H8" in text  # this move
     assert "放水" not in text  # minus plan
     assert room.match.seats[1].plan["text"] == "这局放水，别堵活四"
-    # The guidance: emit the play tag once, may speak in the same reply.
-    assert "一次回复只输出一个落子标签" in text
-    assert "同一次回复" in text
+    # The notice is a short event: no call discipline, no threats, no speech
+    # guidance — the action contract rides the ephemeral context block.
+    assert "一次回复只输出一个落子标签" not in text
+    assert "同一次回复" not in text
+    assert "系统会替你随手" not in text
+    assert "盘面与规则见本轮 gamehub_context 注入块" in text
     grant = director.grant_of(room.match.id)
     assert grant is not None and grant.kind == "nori_turn"
     assert grant.state == "active"
@@ -193,13 +196,12 @@ async def test_nori_mode_start_and_over_send_tool_free_stage_notices_once():
     start = recorder.stage[0][1]
     assert start.startswith("[System: 对局开始 · 五子棋")
     assert "执黑" in start and "执白" in start
-    assert "不是解说" in start
     assert "play" not in start
     assert director.grant_of(room.match.id) is None
 
     await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
     await _wait(lambda: bool(recorder.sent))
-    assert play_tool_name(room.match.id) in _notice_text(recorder)
+    assert f"state_{room.match.id}" in _notice_text(recorder)
     assert director.grant_of(room.match.id) is not None
 
     # Resign: the in-flight grant closes, the end notice still goes once.
@@ -209,6 +211,7 @@ async def test_nori_mode_start_and_over_send_tool_free_stage_notices_once():
     assert over.startswith("[System: 对局结束 · 五子棋")
     assert "认输" in over
     assert "play" not in over
+    assert "轮到你" not in over  # the end never authorizes a move
     assert director.grant_of(room.match.id) is None
     await director.stop()
 
@@ -352,8 +355,13 @@ async def test_stalled_turn_gets_one_reminder_before_the_bot_fill():
     assert director.grant_of(room.match.id).state == "active"
     assert len(room.match.log) == 1, "a reminder must not play for the host"
     nudge = recorder.nudges[0][1]
-    assert play_tool_name(room.match.id) in nudge
+    assert f"state_{room.match.id}" in nudge
     assert "还没有提交动作" in nudge
+    # Short retry: status + pointer only; format/example/threat live in the
+    # context block now.
+    assert "<play_" not in nudge
+    assert "系统会替你随手" not in nudge
+    assert "gamehub_context" in nudge
 
     # Still no move → the bot fills, and only one reminder was ever sent.
     await _wait(lambda: director.grant_of(room.match.id).state == "filled", timeout=5.0)
@@ -599,7 +607,10 @@ async def test_delegation_enable_when_waiting_human_turn_grants_immediately():
     assert grant is not None and grant.kind == "delegated_human"
     await _wait(lambda: len(recorder.sent) == 1)
     text = _notice_text(recorder)
-    assert "代下" in text or "委托" in text
+    # The delegated identity stays one short clause folded into the turn
+    # phrase ("代 <human>"); no seat definition is stuffed into the notice.
+    assert " 代 " in text
+    assert "轮到你" in text
     await director.stop()
 
 
@@ -1005,7 +1016,8 @@ async def test_notice_is_header_only_and_points_to_the_injected_block():
     assert "完整局面" not in first
     assert "gamehub_context" in first
     assert f"state_{room.match.id}" in first
-    assert "一次回复只输出一个落子标签" in first
+    assert "一次回复只输出一个落子标签" not in first
+    assert "系统会替你随手" not in first
 
     result = await director.submit_play(room.match.id, grant.key, "J9")
     assert result.ok
@@ -1085,8 +1097,12 @@ async def test_text_only_reply_gets_corrective_nudge_and_fast_fill():
     director.note_response(sid)
     await _wait(lambda: any("刚才只发了文字" in t for _s, t in recorder.sent))
     corrective = next(t for _s, t in recorder.sent if "刚才只发了文字" in t)
-    assert play_tool_name(room.match.id) in corrective
-    assert f"<{play_tool_name(room.match.id)}>H9</" in corrective  # F2: concrete tag syntax
+    # Short corrective: the state + the block pointer. The concrete tag
+    # syntax/example lives in the context requirements now.
+    assert play_tool_name(room.match.id) not in corrective
+    assert "gamehub_context" in corrective
+    assert f"state_{room.match.id}" in corrective
+    assert "系统会替你随手" not in corrective
 
     # The shortened deadline fills the turn quickly (the watchdog's sleep
     # granularity caps wake-up at 5s, so "fast" means << the 30s timeout).

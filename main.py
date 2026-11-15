@@ -332,11 +332,16 @@ class GamehubPlugin(BasePlugin):
 
         ``ON_STEP_RESULT`` only fires after a text delivery, so a tool-only
         step would otherwise look like silence. A *completed* response also
-        feeds F1: if the reply came back without the play tag, the director
-        sends a corrective nudge with a shortened deadline instead of idling
-        out the full silence window. The reply text rides along so the
-        director can see the tag and skip arming (``AFTER_XML_PARSE`` below
-        submits it).
+        feeds F1: if the turn is still unresolved a short grace later, the
+        director sends a corrective nudge with a shortened deadline. The
+        reply text is deliberately NOT used to suppress arming: a reply can
+        contain the ``play_<match>`` substring without ever submitting it
+        (a tag nested inside ``<msg>`` is a core-level no-op, an
+        attribute-form tag parses with an empty body). The authoritative
+        stand-down signals are parse-level: ``submit_play_from_actions``
+        reports tool progress when a tag was really parsed, and a successful
+        submission resolves the grant. ``note_response`` also clears the
+        previous step's misplaced-tag marker here.
         """
         director = self._director
         sid = str(getattr(event, "sid", "") or "")
@@ -344,13 +349,7 @@ class GamehubPlugin(BasePlugin):
             return
         responder = getattr(director, "note_response", None)
         if callable(responder):
-            content = ""
-            for attr in ("text_response", "content"):
-                value = getattr(response, attr, None)
-                if isinstance(value, str) and value:
-                    content = value
-                    break
-            responder(sid, content)
+            responder(sid)
             return
         note = getattr(director, "note_progress", None)
         if callable(note):
@@ -372,7 +371,7 @@ class GamehubPlugin(BasePlugin):
         a safe no-op.
         """
         sid = str(getattr(event, "sid", "") or "")
-        if not sid or not isinstance(actions, list) or not actions:
+        if not sid or not isinstance(actions, list):
             return
         director = getattr(self, "_director", None)
         if director is None or getattr(director, "_stopping", False):
@@ -382,6 +381,11 @@ class GamehubPlugin(BasePlugin):
             return
         from .tools_turn import submit_play_from_actions
 
+        # Empty actions are intentional input: a reply whose only play tag
+        # was nested inside <msg> parses to no MessageChain and no
+        # RootTagAction, and the submission path must still run to consume
+        # the parse-level misplaced-tag marker and send the explicit format
+        # rejection.
         await submit_play_from_actions(self, director, grant, actions, sid, event=event)
 
     @on.step_result(priority=Priority.LOW)

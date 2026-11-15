@@ -34,6 +34,7 @@ from game_agent import (
     PLAY_TOOL_DEF,
     TEXT_ONLY_REMINDER,
     GameAgent,
+    _stable_rules_block,
     build_play_tool_def,
 )
 from host import llm as host_llm
@@ -1435,8 +1436,9 @@ async def test_threat_analysis_flag_is_forwarded_to_current_view(tmp_path) -> No
     await disabled_agent.run(disabled_room, 1)
     disabled_view = _current_user(disabled_router.calls[-1])["content"]
     assert "Threat analysis" not in disabled_view
-    # 规则与当前局面仍然在最新 user 消息里。
-    assert "Rules:" in disabled_view
+    # Rules live in the stable prefix (init user); the snapshot stays dynamic.
+    assert "本局规则" in disabled_router.calls[-1]["user_prompt"]
+    assert "Rules:" not in disabled_view
     assert "Current position:" in disabled_view
 
 
@@ -1507,7 +1509,8 @@ def test_system_prompt_uses_configured_identity_not_model_alias(tmp_path) -> Non
     assert "蕾依" in prompt and "机敏猫娘" in prompt
     assert "game_agent" not in prompt  # 模型清单别名不当成人名
     init = agent._init_prompt(teammate, 1)
-    assert "蕾依" in init and "诺里" not in init
+    # Identity appears once in the stable prefix (system); init does not repeat.
+    assert "蕾依" not in init and "诺里" not in init
 
 
 def test_agent_identity_falls_back_to_generic_agent_without_persona(tmp_path) -> None:
@@ -1552,11 +1555,14 @@ def test_system_prompt_keeps_configured_persona_for_nori_seat(tmp_path) -> None:
     prompt = agent._system_prompt(match, 1)
     assert "Nori" in prompt and "ORIGINAL-PERSONA" in prompt
     assert "保持原样" in prompt
-    # 默认 system 全模板：首行身份/棋种/座位 + 可选人设行 + 三段行为说明
+    # Stable system: identity/seat line + optional persona line + four
+    # behaviour paragraphs (speech, text-only, hidden-info safety, priority).
+    # Rule text and move format live once in the stable init user prompt
+    # (move format is also declared by the play tool schema).
     paragraphs = prompt.split("\n")
     assert paragraphs[0] == (
-        "你是Nori，正在参与一局五子棋，坐在第1席；"
-        "具体身份、局面表示与动作格式以本局规则和最新局面为准。"
+        "你是Nori，正在参与一局五子棋；你在本局固定坐在第1席（座位名：对手）。"
+        "具体局面、身份阵营与行动权以最新局面为准。"
     )
     assert paragraphs[1] == (
         "以下是你原本的身份/人设，保持原样，不要因为游戏改写或覆盖："
@@ -1565,21 +1571,43 @@ def test_system_prompt_keeps_configured_persona_for_nori_seat(tmp_path) -> None:
     assert paragraphs[2:] == [
         (
             "轮到你时调用 play 工具执行本局动作，提交本手动作时需根据局势"
-            "在同一次回复的普通正文里写一两句保持你原本人设的玩家短话；"
-            "不要解说，也不要只发一条没有工具调用的纯文字消息。"
-            "动作成功后结束，不续模型轮。"
+            "和群聊信息在同一次回复的普通正文里说一两句符合你人设的玩家"
+            "短话；不要复述你的落子计划，不要解说，也不要只发一条没有"
+            "工具调用的纯文字消息。动作成功后结束，不续模型轮。"
         ),
         (
             "短话写在同一回复的普通正文里，和工具调用一起提交，不通过"
             "工具参数传递，也不要只写在 reasoning/思考里；只有本手合法"
             "动作成功时才会作为你的发言被对手看到，失败时不会发出，也"
-            "不需要为说话重试或改写动作。"
+            "不需要为说话重试或改写动作。本局发言只支持文本。"
+        ),
+        (
+            "有隐藏信息的对局只依据公开信息发言，绝不透露或复述私有"
+            "手牌/策略。"
         ),
         (
             "主 agent 的总体指令优先；本局策略与 plan 是战术提示，"
             "即使偏离默认目标也优先遵从，但必须符合规则。"
         ),
     ]
+
+    init = agent._init_prompt(match, 1)
+    init_lines = init.split("\n")
+    assert init_lines[0] == "本局是五子棋（Gomoku）。"
+    assert init_lines[1] == "本局规则（整局有效）："
+    # The static rule text keeps the rules but drops the embedded "Moves:"
+    # clause; the move format is declared once by the play tool schema.
+    stable_rules = _stable_rules_block(games.get("gomoku"))
+    assert init_lines[2] == stable_rules
+    assert "Moves:" not in stable_rules
+    assert games.get("gomoku").move_help not in stable_rules
+    assert "Freestyle gomoku" in stable_rules
+    assert init_lines[3] == (
+        "动作格式以 play 工具定义中的 move 说明为准"
+        "（即本局 move_help），正文不要重复抄写。"
+    )
+    assert games.get("gomoku").move_help not in init
+    assert "位于跨手历史之后、本手工具交互之前" in init
 
 
 def test_default_settings_identity_is_nori(tmp_path) -> None:
@@ -1600,20 +1628,29 @@ def test_prompts_request_text_in_same_response_without_say_param(tmp_path) -> No
 
     system = agent._system_prompt(match, 0)
     init = agent._init_prompt(match, 0)
+    # Behaviour instructions are stated once in the stable system; init only
+    # explains the conversation structure.
+    assert "在同一次回复的普通正文里说一两句" in system
+    assert "在同一次回复的普通正文里" not in init
     for text in (system, init):
-        assert "在同一次回复的普通正文里写一两句" in text
         assert "say" not in text
-        assert "纯文字" in text  # 明确禁止只发文字不落子
-        # 肯定式要求，而不是「可以/想说话时」的可选项
-        assert "可以" not in text or "可以同时" not in text
-        # 已移除的战术解释/额外 plan 禁令不得回归
+        # Removed tactical explanations / extra plan bans must not come back.
         assert "不要设置或修改 plan" not in text
         assert "判断要点" not in text
         assert "如需简短说明" not in text
-        assert "和工具调用一起提交，不通过工具参数传递" in text
-        # 提示词泛化：共享 prompt 不写死棋类动作词（斗地主也要适用）。
-        assert "落子" not in text and "棋手" not in text
+        # Generic prompt: no hardcoded chess action vocabulary.
+        assert "棋手" not in text
+    # Only the user's requested phrase may contain "落子".
+    assert system.replace("不要复述你的落子计划", "").count("落子") == 0
+    assert "纯文字" in system  # explicitly forbids text-only replies
+    assert "和工具调用一起提交，不通过工具参数传递" in system
     assert "不要解说" in system
+    assert "不要复述你的落子计划" in system
+    # Text-only agent: the boundary is stated briefly, without a long list.
+    assert "本局发言只支持文本" in system
+    assert "表情包" not in system and "语音" not in system
+    assert "绝不透露或复述私有" in system
+    assert system.count("play 工具") == 1  # submit instruction stated once
 
 
 def test_system_prompt_has_no_gomoku_assumptions(tmp_path) -> None:
@@ -1624,13 +1661,16 @@ def test_system_prompt_has_no_gomoku_assumptions(tmp_path) -> None:
     assert black.seats[0].kind == "ai"
     prompt = agent._system_prompt(black, 0)
     assert "play 工具" in prompt
-    for token in ("15x15", "GTP", "A-P", "X", "O", "黑", "白", "坐标"):
-        assert token not in prompt
+    # Rule text and move format come only from this game module (stable init
+    # user + play tool schema), never from shared behaviour instructions or
+    # hardcoded board symbols.
+    assert _stable_rules_block(games.get("gomoku")) not in prompt
 
     init_prompt = agent._init_prompt(black, 0)
-    assert "play 工具" in init_prompt
-    assert "第0席" in init_prompt
-    for text in (prompt, init_prompt):
+    assert "第0席" not in init_prompt  # identity appears once in default system
+    assert _stable_rules_block(games.get("gomoku")) in init_prompt
+    assert games.get("gomoku").move_help not in init_prompt
+    for text in (prompt,):
         for token in (
             "15x15",
             "GTP",
@@ -1964,7 +2004,11 @@ async def test_non_gomoku_three_seat_non_coordinate_module(
 
     current = _current_user(call)["content"]
     assert "测试计划" in current
-    assert module.move_help in current
+    # Move format is declared by the play tool schema; the stable prompt only
+    # references it and the dynamic snapshot never repeats it.
+    assert module.move_help not in current
+    assert module.move_help not in call["user_prompt"]
+    assert module.move_help in tool_dump
     assert "Threat analysis" not in current  # 模块无 threat_summary 时正常跳过
 
     entries = _history_entry(agent, room.match.id, 1)

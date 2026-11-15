@@ -72,6 +72,14 @@ except ImportError:  # standalone tests outside the host: a plain stdlib logger
 
     logger = logging.getLogger(__name__)
 
+try:  # production: plugin package (``<plugin>.context``)
+    from .context import note_stage_event as _note_stage_event
+except ImportError:  # standalone tests import modules as top-level
+    try:
+        from context import note_stage_event as _note_stage_event
+    except ImportError:  # pragma: no cover - context unavailable
+        _note_stage_event = None  # type: ignore[assignment]
+
 # Grant states.
 ST_ACTIVE = "active"
 ST_PLAYED = "played"
@@ -164,6 +172,16 @@ class TurnGrant:
     # Bounded retry notices for rejected play tags (illegal move in the tag;
     # the tag channel has no tool-result lane to report failures in).
     tag_retries: int = 0
+    # Last rejected submission as ``(move, error)`` for the *context* block:
+    # notices stay short (status + pointer), the details ride the ephemeral
+    # ``gamehub_context`` requirements section. Cleared on a successful play.
+    last_rejection: tuple[str, str] | None = None
+    # A ``play_<match>`` element the model NESTED inside <msg> (core parse_xml
+    # invokes the tag's no-op ``handle`` there and produces no RootTagAction).
+    # Consumed by the AFTER_XML_PARSE path for explicit format feedback;
+    # cleared at every ``note_response`` so stale markers cannot misfire.
+    tag_misplaced: str = ""
+    tag_misplaced_at: float = 0.0
     text_task: asyncio.Task[Any] | None = None
     # F1 short-window mode: once a corrective nudge fired, progress signals
     # can no longer push the deadline past ``short_deadline`` — only an open
@@ -235,20 +253,6 @@ def _notice_target_of(plugin: Any) -> Any:
     return None
 
 
-def _mover_of(event: dict[str, Any], match: Any) -> int:
-    """Seat that made the last move (embedded bot replies share one apply)."""
-    log = getattr(match, "log", ()) or ()
-    if log:
-        try:
-            return int(getattr(log[-1], "seat", -1))
-        except (TypeError, ValueError):
-            return -1
-    try:
-        return int(event.get("seat", -1))
-    except (TypeError, ValueError, AttributeError):
-        return -1
-
-
 def _label(labels: list[str], seat: int | None, fallback: str = "棋手") -> str:
     if seat is None or not 0 <= seat < len(labels) or not labels[seat]:
         return fallback
@@ -284,6 +288,114 @@ async def send_notice(plugin: Any, sid: str, text: str) -> bool:
         return False
 
 
+def _doudizhu_move_text(cards: Any) -> str:
+    """Concrete public card faces for one played combo (engine's own text).
+
+    Falls back to the raw card codes when the engine module is unavailable —
+    the notice must show the real public move, never an instruction or only
+    a combo name that hides the faces.
+    """
+    values = list(cards or [])
+    if not values:
+        return ""
+    try:  # production: plugin package
+        from .engine.games.doudizhu.cards import move_text
+    except ImportError:  # standalone tests import engine as a top-level package
+        try:
+            from engine.games.doudizhu.cards import move_text
+        except ImportError:  # pragma: no cover - engine unavailable
+            return " ".join(str(card) for card in values)
+    try:
+        return str(move_text(values))
+    except Exception:  # noqa: BLE001 - cosmetic, never break a notice
+        return " ".join(str(card) for card in values)
+
+
+def _doudizhu_situation(match: Any, names: list[str]) -> str:
+    """The public situation that triggered this doudizhu turn — facts only.
+
+    Bidding: first bid / previous bid (with actor and bid) / redeal. Playing:
+    the landlord-lead fact, the re-lead fact after two passes, or the most
+    recent public action with its actor and concrete card faces (a pass
+    reads as ``<actor> 不要``). No action prompts ("压过或不要") — those
+    live in the context block; the acting seat is always ``state["turn"]``.
+    """
+    state = getattr(match, "state", None)
+    if not isinstance(state, dict):
+        return "轮到你行动"
+    phase = str(state.get("phase") or "")
+    bids = list(state.get("bids") or [])
+    redeals = int(state.get("redeals") or 0)
+    trick = state.get("trick")
+    plays = list(state.get("plays") or [])
+    if phase == "bid":
+        if not bids and redeals:
+            return "三家都不叫，已重新发牌"
+        if not bids:
+            return "首次叫分"
+        last = bids[-1]
+        try:
+            index = int(last.get("seat", -1))
+            bid = int(last.get("bid") or 0)
+        except (TypeError, ValueError):
+            index, bid = -1, 0
+        prev = names[index] if 0 <= index < len(names) else "上一家"
+        return f"上一家 {prev} 叫 {bid} 分" if bid else f"上一家 {prev} 不叫"
+    if phase == "play":
+        if trick is None:
+            if not plays:
+                return "地主先出"
+            return "两家都不要，重新领出"
+        if plays:
+            last = plays[-1]
+            try:
+                actor_index = int(last.get("seat", -1))
+            except (TypeError, ValueError):
+                actor_index = -1
+            actor = names[actor_index] if 0 <= actor_index < len(names) else "上家"
+            cards = _doudizhu_move_text(last.get("cards"))
+            return f"{actor} 出了 {cards}" if cards else f"{actor} 不要"
+        owner_index = trick.get("seat")
+        try:
+            owner_index = int(owner_index)
+        except (TypeError, ValueError):
+            owner_index = -1
+        owner = names[owner_index] if 0 <= owner_index < len(names) else "上家"
+        return f"{owner} 出了 {_doudizhu_move_text(trick.get('cards'))}"
+    return "轮到你行动"
+
+
+def _chess_situation(
+    match: Any, seat: int, names: list[str]
+) -> tuple[str, str, str]:
+    """The public event that triggered this chess (gomoku/reversi) turn.
+
+    Returns ``(fact, turn_prefix, turn_suffix)``: the fact sentence and the
+    turn-phrase pieces (``现在``/``仍`` plus an optional suffix such as
+    ``先行``), so the notice folds the actor into one
+    "…，现在轮到你（<agent>，执<label>）" clause instead of a second
+    identity sentence.
+    """
+    log = list(getattr(match, "log", None) or ())
+    state = getattr(match, "state", None)
+    auto_pass = bool(state.get("passed")) if isinstance(state, dict) else False
+    if not log:
+        return "对局开始", "现在", "先行"
+    try:
+        mover = int(getattr(log[-1], "seat", -1))
+    except (TypeError, ValueError):
+        mover = -1
+    move = str(getattr(log[-1], "move", "") or "")
+    mover_name = names[mover] if 0 <= mover < len(names) else "对手"
+    if mover == seat:
+        if auto_pass:
+            return f"你刚落子 {move}；对手无合法落点已自动过手", "仍", ""
+        return f"你刚落子 {move}", "仍", ""
+    if auto_pass:
+        return f"{mover_name} 刚落子 {move}；对手无合法落点已自动过手", "仍", ""
+    return f"{mover_name} 刚落子 {move}", "现在", ""
+
+
 def build_turn_notice(
     match: Any,
     *,
@@ -293,136 +405,81 @@ def build_turn_notice(
     tool_name: str = "play",
     plugin: Any = None,
 ) -> str:
-    """Action-turn notice: the turn header only.
+    """Action-turn notice: short event + actor + fallback pointer, nothing else.
 
-    The notice is the turn trigger and carries only per-turn instructions:
-    who moved, whose turn it is, the mandatory ``play_<match>`` tag and the
-    behavioral boundaries. The board snapshot, full rules, move syntax,
-    recent moves and threat analysis ride the per-request
-    ``gamehub_context`` block instead (``context.build_game_state_context``),
-    so the persisted session history never accumulates stale boards or
-    private cards. The header ends with a fallback pointer: if the injected
-    block is missing, the model must call ``state_<match>`` before acting.
+    The notice is persisted history, so it carries ONLY the trigger facts in
+    the confirmed template shape:
 
-    - ``nori_turn``: the AI's own seat ("the opponent just played X; you are
-      up");
-    - ``delegated_human``: the delegated human seat ("the opponent answered
-      X; you play this one for <human>");
-    - a same-seat continuation (reversi auto-pass) says "you just played X;
-      the opponent has no legal move" instead of blaming the opponent.
+    - chess: ``[System: 对局通知 · N 手：<mover> 刚落子 <move>，现在轮到你
+      （<host agent>, <seat label>）。盘面与规则见本轮 gamehub_context
+      注入块；若缺失，先调用 state_<match> 查看局面再行动。]``
+    - doudizhu: ``[System: 对局通知 · 斗地主第<N>局：<situation>，现在轮到你
+      （…）。局势与规则见本轮 gamehub_context 注入块；…]`` — the situation
+      names the most recent public move/pass with its actor (concrete card
+      faces via the engine's own move text); the landlord-lead fact stays.
+    - a delegated grant folds a short play-for-the-human clause into the
+      turn phrase（你（<agent> 代 <human>，<label>））— no seat definition
+      is stuffed back into the notice; the full identity lives in the
+      context requirements section.
 
-    The guidance asks for **one** ``play_<match>`` tag in this reply and
-    explicitly allows talking in the same reply (the tag carries the move,
-    the ``<msg>`` envelope carries the table talk).
+    The action contract (tag syntax, move format + example, feedback
+    semantics, speech boundaries), rules and the board ride the ephemeral
+    ``gamehub_context`` block (``context.build_game_state_context``), so no
+    stale instructions accumulate here.
+
+    ``tool_name`` is accepted for call-site compatibility only: the notice
+    never teaches tag syntax any more — the action contract (including the
+    tag name and a legal example) lives in the context requirements section.
     """
     agent = _agent_name(plugin)
     state_tool = state_tool_name(str(getattr(match, "id", "") or ""))
+    seats = list(getattr(match, "seats", ()) or ())
+    names = [_seat_name(s, i, agent) for i, s in enumerate(seats)]
+    labels = _seat_labels(match)
+    seat_label = _label(labels, seat)
+
+    def _turn_phrase(prefix: str, *, suffix: str = "") -> str:
+        """The folded turn phrase; a delegated grant keeps one short clause."""
+        if kind == DELEGATED:
+            human = names[seat] if 0 <= seat < len(names) else "玩家"
+            who = f"{agent} 代 {human}"
+        else:
+            who = agent
+        return f"{prefix}轮到你（{who}，执{seat_label}）{suffix}"
+
+    if getattr(match, "kind", "") == "doudizhu":
+        fallback_line = (
+            "局势与规则见本轮 gamehub_context 注入块；"
+            f"若缺失，先调用 {state_tool} 查看局面再行动。"
+        )
+        state = getattr(match, "state", None)
+        hand_no = (
+            int(state.get("handNo") or 1) if isinstance(state, dict) else 1
+        )
+        situation = _doudizhu_situation(match, names)
+        return (
+            f"[System: 对局通知 · 斗地主第{hand_no}局：{situation}，"
+            f"{_turn_phrase('现在')}。{fallback_line}]"
+        )
+
     fallback_line = (
         "盘面与规则见本轮 gamehub_context 注入块；"
         f"若缺失，先调用 {state_tool} 查看局面再行动。"
     )
-
-    if getattr(match, "kind", "") == "doudizhu":
-        seats = list(getattr(match, "seats", ()) or ())
-        names = [_seat_name(s, i, agent) for i, s in enumerate(seats)]
-        labels = _seat_labels(match)
-        players = "，".join(
-            f"座位{i}「{name}」（{_label(labels, i)}）" for i, name in enumerate(names)
-        )
-        human_name = names[seat] if 0 <= seat < len(names) else "玩家"
-        identity = (
-            f"你（{agent}）正在代{human_name}操作座位{seat}"
-            if kind == DELEGATED
-            else f"你是座位{seat}「{human_name}」"
-        )
-        return (
-            f"[System: 斗地主行动回合：{players}。{identity}。"
-            "这是你的对局回合：必须在本轮回复里输出一次 <" + tool_name + ">动作"
-            "</" + tool_name + "> 落子控制标签（与<msg>同级，放在回复末尾）提交动作"
-            "——只在正文里写出牌不算数，没有这个标签就等于你没有行动，"
-            "系统会替你随手打一张。"
-            "一次回复只输出一个落子标签；同一次回复可以聊公开牌型、调侃与局势气氛，"
-            "但禁止透露自己的未出手牌或私有策略。"
-            "不得代替其他席位行动，不得沿用其他局的名字。注意你是玩家，不是解说。"
-            f"{fallback_line}]"
-        )
-
-    seats = list(getattr(match, "seats", ()) or ())
-    names = [_seat_name(s, i, agent) for i, s in enumerate(seats)]
-    labels = _seat_labels(match)
-    status = status_of(match)
-    log = getattr(match, "log", ()) or ()
-    mover = _mover_of({"seat": -1}, match)
-    move = ""
-    if log:
-        move = str(getattr(log[-1], "move", "") or "")
-    mover_name = names[mover] if 0 <= mover < len(names) else "对手"
-    seat_label = _label(labels, seat)
-    same_seat = mover == seat
-    auto_pass = bool((getattr(match, "state", None) or {}).get("passed"))
-    continuation = (
-        "对手无合法落点，已自动过手，现在仍轮到你" if auto_pass else "现在仍轮到你"
-    )
-    identity_line = "注意你是棋手，不是解说。"
-    call_line = (
-        f"这是你的对局回合：必须在本轮回复里输出一次 <{tool_name}>动作"
-        f"</{tool_name}> 落子控制标签（与<msg>同级，放在回复末尾）——"
-        "只在正文里写出坐标不算数，没有这个标签就等于你没有落子，"
-        "系统会替你随手下一手。"
-        "一次回复只输出一个落子标签；同一次回复可以照常说一两句玩家口吻的短话，"
-        "关键赛点/高光时刻/情绪激动时可搭配表情包、语音等非文本消息。"
+    situation, prefix, suffix = _chess_situation(match, seat, names)
+    return (
+        f"[System: 对局通知 · {move_count} 手：{situation}，"
+        f"{_turn_phrase(prefix, suffix=suffix)}。{fallback_line}]"
     )
 
-    if kind == DELEGATED:
-        human_name = names[seat] if 0 <= seat < len(names) else "玩家"
-        if same_seat:
-            head = (
-                f"[System: 对局通知 · {move_count} 手：你（{agent}，代 {human_name} "
-                f"执{seat_label}）刚落子 {move or '一手'}；{continuation}，"
-                "这一手仍由你代下。"
-                f"{call_line}"
-                f"{identity_line}"
-                "不要代替对手落子。"
-                f"{fallback_line}]"
-            )
-        else:
-            head = (
-                f"[System: 对局通知 · {move_count} 手：对手 {mover_name} 刚落子 "
-                f"{move or '一手'}。{human_name} 已把这一局的人类座位委托给你"
-                f"（{agent}），这一手由你代下（执{seat_label}）。"
-                f"{call_line}"
-                f"{identity_line}"
-                "不要代替对手落子。"
-                f"{fallback_line}]"
-            )
-    elif same_seat:
-        head = (
-            f"[System: 对局通知 · {move_count} 手：你（{agent}）刚落子 "
-            f"{move or '一手'}（执{seat_label}）；{continuation}。"
-            f"{call_line}"
-            f"{identity_line}"
-            f"{fallback_line}]"
-        )
-    else:
-        head = (
-            f"[System: 对局通知 · {move_count} 手：{mover_name} 刚落子 "
-            f"{move or '一手'}，现在轮到你（{agent}，执{seat_label}）。"
-            f"{call_line}"
-            f"{identity_line}"
-            f"{fallback_line}]"
-        )
 
-    if status.outcome is not None:
-        head += (
-            "\n对局已结束：" + str(status.result_text or status.outcome.text)
-        )
-    return head
+def stage_event_text(match: Any, stage: str, *, plugin: Any = None) -> str:
+    """The context-side rendering of a start/end event (no pointer, no grant).
 
-
-def build_stage_notice(match: Any, stage: str, *, plugin: Any = None) -> str:
-    """Tool-free start/end notice: result + seats, no board, no grant.
-
-    Only used for ``driver=turn`` matches (teammate matches keep table talk).
+    Recorded through ``context.note_stage_event`` right before the notice is
+    published, so the turn the event triggers can inject it even when the
+    room has already left the active set (end-of-match). Carries the same
+    facts as the notice: title, seats and (for the end) the result.
     """
     agent = _agent_name(plugin)
     module = _module_of(getattr(match, "kind", ""))
@@ -440,45 +497,32 @@ def build_stage_notice(match: Any, stage: str, *, plugin: Any = None) -> str:
             parts.append(f"{name} 执{label}")
     seat_desc = "，".join(parts)
     if stage == "start":
-        return (
-            f"[System: 对局开始 · {title}：{seat_desc}。"
-            "这是你们的对局，不是解说。请用一两句玩家口吻自然开场；"
-            "不用输出落子控制标签，想表达可以配合表情或语音。]"
-        )
+        return f"对局开始 · {title}：{seat_desc}。"
     status = status_of(match)
     result = status.result_text or (
         status.outcome.text if status.outcome is not None else "对局结束"
     )
-    return (
-        f"[System: 对局结束 · {title}：{result}。{seat_desc}。"
-        "请用一两句玩家口吻自然回应；不用输出落子控制标签。]"
-    )
+    return f"对局结束 · {title}：{result}；{seat_desc}。"
 
 
-def _example_move(match: Any, seat: int) -> str:
-    """A legal example move for the nudge's tool-call syntax line (F2).
+def build_stage_notice(match: Any, stage: str, *, plugin: Any = None) -> str:
+    """Tool-free start/end notice: short event + pointer, no authorization.
 
-    Prefers the rule bot's own move for the current state (always legal);
-    falls back to a phase-appropriate constant. The nudge labels it as a
-    format example, so the model is told *how* to call, not *what* to play.
+    Only used for ``driver=turn`` matches (teammate matches keep table talk).
+    The event facts (title/seats/result) also go to the session's
+    short-lived stage-event record (see ``stage_event_text``), so the block
+    is injectable without an active room. The end notice never grants or
+    requests a move — no play tag, no state-tool action guidance beyond the
+    read-only pointer.
     """
-    kind = str(getattr(match, "kind", "") or "")
-    state = getattr(match, "state", None)
-    try:
-        module = games.get(kind)
-    except Exception:  # noqa: BLE001 - the example is cosmetic
-        module = None
-    if module is not None and state is not None:
-        try:
-            move = module.bot(state, seat)
-        except Exception:  # noqa: BLE001
-            move = ""
-        if move:
-            return str(move)
-    if kind == "doudizhu":
-        phase = str((state or {}).get("phase") or "") if isinstance(state, dict) else ""
-        return "pass" if phase == "play" else "bid 1"
-    return "H8"
+    event = stage_event_text(match, stage, plugin=plugin)
+    if stage == "start":
+        return (
+            f"[System: {event}"
+            "盘面与规则见本轮 gamehub_context 注入块；"
+            "若缺失，先调用 game_state 查看局面。]"
+        )
+    return f"[System: {event}对局详情见本轮 gamehub_context 注入块。]"
 
 
 def build_nudge_notice(
@@ -489,35 +533,29 @@ def build_nudge_notice(
     plugin: Any = None,
     text_only: bool = False,
 ) -> str:
-    """Short reminder for a turn the host answered without acting (F2).
+    """Short retry notice: the state only, plus the pointer to the block.
 
-    The model sometimes replies to the action notice with plain text (e.g.
-    "这手牌有王有对子，我抢地主。") instead of emitting the ``play_<match>``
-    tag — the decision is right, only the format is wrong, which players
-    perceived as "the opponent timed out". The reminder therefore spells out
-    the exact tag syntax with a legal example move, so even a failover-tier
-    model cannot misread *how* to submit.
-
-    ``text_only=True`` is the immediate corrective variant (F1): sent right
-    after a completed reply that did not submit, with a shortened deadline.
+    The model sometimes replies to the action notice with plain text (the
+    decision is right, only the format is wrong). The reminder states the
+    fact and points at the per-request ``gamehub_context`` block, which now
+    carries the whole action contract — tag syntax, move format and a legal
+    example (F2's payload moved into the block so no notice stays long
+    enough to accumulate in history). No threat, no duplicated example.
     """
     agent = _agent_name(plugin)
     labels = _seat_labels(match)
     seat_label = _label(labels, seat)
-    example = _example_move(match, seat)
+    state_tool = state_tool_name(str(getattr(match, "id", "") or ""))
     opening = (
         f"[System: 你（{agent}，座位{seat}，{seat_label}）刚才只发了文字，"
-        "没有输出落子控制标签提交动作。"
+        "没有提交动作。"
         if text_only
         else f"[System: 你（{agent}，座位{seat}，{seat_label}）还没有提交动作。"
     )
     return (
         opening
-        + f"请立刻在这一次回复里输出 <{tool_name}>动作</{tool_name}> 控制标签提交"
-        "（与<msg>同级，放在回复末尾），"
-        f"格式示例：<{tool_name}>{example}</{tool_name}>"
-        "（示例只展示格式，具体动作请按你的手牌/当前盘面决定）。"
-        "只在正文里写结果不算行动。如果这次仍不输出标签，系统会替你随手出一手。]"
+        + "盘面与规则见本轮 gamehub_context 注入块"
+        f"（含落子标签格式与示例）；若缺失，先调用 {state_tool} 查看局面再行动。]"
     )
 
 
@@ -715,11 +753,21 @@ class TurnDirector:
         First the ordinary progress bookkeeping (the host demonstrably
         replied, so the watchdog must not fire mid-flight), then — when the
         turn grant is still unresolved a short grace later — a corrective
-        nudge with a shortened deadline. The grace window lets a response
-        that *carries* the ``play_<match>`` tag submit first (the tag is
-        submitted during ``AFTER_XML_PARSE``, right after this hook), which
-        cancels the nudge naturally; ``content`` makes that check exact — a
-        reply that contains the tag never arms the corrective at all.
+        nudge with a shortened deadline. The grace window lets the same
+        step's ``AFTER_XML_PARSE`` submission land first; when the tag really
+        was parsed, ``submit_play_from_actions`` reports tool progress
+        (``note_tool_progress``), which stands the pending nudge down.
+
+        ``content`` is kept for signature compatibility but deliberately NOT
+        used for suppression any more: the old ``"<play_…" in content``
+        substring check suppressed the corrective whenever the reply *looked*
+        like it carried the tag — but core ``parse_xml`` silently no-ops a
+        root play tag NESTED inside ``<msg>`` (and an attribute-form tag
+        yields an empty body), so a reply can contain the substring without
+        ever submitting. The correction then never fired and the turn idled
+        to the watchdog fill. The authoritative signals are parse-level:
+        ``note_tool_progress`` from the submission path, plus the grant
+        resolving on success.
 
         Arming is conservative (a false "you only talked" nudge wastes the
         budget and can preempt a slow-but-correct model):
@@ -745,18 +793,19 @@ class TurnDirector:
         for grant in list(self._grants.values()):
             if grant.state != ST_ACTIVE or str(grant.session_id or "") != target:
                 continue
+            # New step: last reply's misplaced-tag marker is stale now.
+            grant.tag_misplaced = ""
+            grant.tag_misplaced_at = 0.0
             if not grant.notice_sent or grant.text_nudges >= max(0, cap):
                 continue
             if run_started_after_notice <= grant.notice_sent_at:
                 continue  # the response predates the notice's own run
             if self._tools_grant.get(target, grant.match_id) != grant.match_id:
                 continue  # this grant's turn surface was not offered
-            if content and f"<{play_tool_name(grant.match_id)}" in str(content):
-                continue  # the reply carries the tag; AFTER_XML_PARSE submits it
             if grant.text_task is not None and not grant.text_task.done():
                 continue  # one corrective in flight is enough
             grant.text_task = asyncio.create_task(
-                self._text_nudge(grant),
+                self._text_nudge(grant, spawned_at=now),
                 name=f"gamehub-turn-textnudge-{grant.match_id}",
             )
             self._tasks.add(grant.text_task)
@@ -777,8 +826,14 @@ class TurnDirector:
             for sid in sorted(marks, key=marks.get)[: len(marks) - keep]:
                 marks.pop(sid, None)
 
-    async def _text_nudge(self, grant: TurnGrant) -> None:
+    async def _text_nudge(self, grant: TurnGrant, *, spawned_at: float) -> None:
         """Corrective nudge after a text-only reply (F1); shortens the window.
+
+        ``spawned_at`` is the arming instant captured by ``note_response``
+        (before the task's first slice): the same step's parse/submit always
+        happens after it, so a tag that really was parsed stands the nudge
+        down via ``last_tool_progress > spawned_at`` — deterministically,
+        even when the submission raced ahead of this coroutine's start.
 
         Aborts (without consuming the budget) when the turn resolved during
         the grace period, the grant went stale, real tool work started (the
@@ -789,7 +844,6 @@ class TurnDirector:
         turn timeout; an open run can still extend afterwards, but never
         past ``short_ceiling`` (corrective time + full silence window).
         """
-        spawned_at = time.monotonic()
         sid = str(grant.session_id or "")
         grace = max(0.0, float(_cfg(self._plugin, "turn_text_grace_s", 4.0)))
         if grace:
@@ -849,32 +903,50 @@ class TurnDirector:
         )
 
     async def note_tag_rejected(
-        self, sid: str, grant: TurnGrant, move: str, error: str
+        self,
+        sid: str,
+        grant: TurnGrant,
+        move: str,
+        error: str,
+        *,
+        reason: str = "invalid",
     ) -> None:
-        """Bounded corrective notice for a rejected play tag (invalid action).
+        """Bounded corrective notice for a rejected play tag.
 
         The tag channel has no tool-result lane to report failures in, so an
-        illegal move would otherwise sit silently until the watchdog fill.
-        The notice re-opens the feedback loop; budgeted like the text nudges
-        (``turn_text_retry_max``) so a confused model cannot loop unnoticed.
+        illegal or malformed move would otherwise sit silently until the
+        watchdog fill. The notice stays short — status + pointer to the
+        per-request ``gamehub_context`` block — while the specifics (the
+        move, the error, the required format) are recorded on the grant and
+        ride the block's requirement section on the retry request. Budgeted
+        like the text nudges (``turn_text_retry_max``) so a confused model
+        cannot loop unnoticed; past the budget the rejection is still
+        recorded, so the context keeps carrying the feedback.
+
+        ``reason="format"`` marks a syntactic rejection (tag nested in
+        ``<msg>``, attribute-form / empty body) versus an illegal action.
         """
         if self._stopping or not self._is_current(grant):
             return
+        # Record first: even a budgeted-out rejection keeps its context trail.
+        grant.last_rejection = (str(move or "").strip(), str(error or "").strip())
         cap = int(_cfg(self._plugin, "turn_text_retry_max", 2))
         if grant.tag_retries >= max(0, cap):
             return
         grant.tag_retries += 1
-        name = play_tool_name(grant.match_id)
+        state_tool = state_tool_name(grant.match_id)
+        hint = "格式错误" if reason == "format" else "动作无效"
         text = (
-            f"[System: 你输出的 <{name}>{move}</{name}> 无法落子："
-            f"{error or '动作无效'}。请立刻在这一次回复里重新输出 "
-            f"<{name}>正确动作</{name}> 控制标签（与<msg>同级，放在回复末尾）。]"
+            "[System: 你这一回合的落子提交没有生效（"
+            + hint
+            + "）。盘面与规则见本轮 gamehub_context 注入块"
+            f"（含反馈与格式）；若缺失，先调用 {state_tool} 查看局面再行动。]"
         )
         if not await send_notice(self._plugin, str(sid or ""), text):
             return
         logger.info(
-            "turn director: play tag rejected, retry notice sent (%s seat %s, %s/%s)",
-            grant.match_id, grant.seat, grant.tag_retries, cap,
+            "turn director: play tag rejected, retry notice sent (%s seat %s, %s/%s, %s)",
+            grant.match_id, grant.seat, grant.tag_retries, cap, hint,
         )
 
     async def _handle_event(self, room: Any, event: dict[str, Any]) -> None:
@@ -937,17 +1009,29 @@ class TurnDirector:
             return
         self._stage_inflight.add(key)
         try:
+            session_id = await self._resolve_session(room, match_id)
+            if not session_id:
+                logger.info("turn director: no target for %s notice (%s)", stage, match_id)
+                return
             try:
                 text = build_stage_notice(match, stage, plugin=self._plugin)
+                # Record before publishing: the triggered reply's request
+                # must already see the event (the room may not be in the
+                # active set any more, especially after a match ends).
+                recorder = _note_stage_event
+                if callable(recorder):
+                    recorder(
+                        self._plugin,
+                        session_id,
+                        str(getattr(match, "id", "") or ""),
+                        getattr(match, "version", 0),
+                        stage_event_text(match, stage, plugin=self._plugin),
+                    )
             except Exception:  # noqa: BLE001 - losing one notice is acceptable
                 logger.warning(
                     "turn director: stage notice build failed (%s)", match_id,
                     exc_info=True,
                 )
-                return
-            session_id = await self._resolve_session(room, match_id)
-            if not session_id:
-                logger.info("turn director: no target for %s notice (%s)", stage, match_id)
                 return
             if not await send_notice(self._plugin, session_id, text):
                 return
@@ -1657,4 +1741,5 @@ __all__ = [
     "build_stage_notice",
     "build_turn_notice",
     "send_notice",
+    "stage_event_text",
 ]

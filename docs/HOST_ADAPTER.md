@@ -79,6 +79,74 @@ Resolves the session and calls
 `ctx.publish_notice(session, MessageChain([Text(text)]), is_mentioned=True)`.
 A notice triggers the Game Hub group router → flush → full IM pipeline.
 
+### Notice body contract (short public event + context pointer)
+
+Every main-AI notice is a **short public event**: the trigger facts
+(situation + acting identity) plus a pointer to the per-request
+`gamehub_context` block ("盘面与规则见本轮 gamehub_context 注入块；若缺失，
+先调用 `state_<match>` 查看局面再行动。"). Notices persist into session
+history, so they never carry rules, boards, tag syntax, examples, threats or
+speech guidance — all of that rides the ephemeral block (persist=False).
+
+- Turn notices (`director.build_turn_notice`) follow one confirmed shape:
+  chess ``[System: 对局通知 · N 手：<mover> 刚落子 <move>，现在轮到你
+  （<agent>，执<label>）。盘面与规则见本轮 gamehub_context 注入块；若缺失，
+  先调用 state_<match> 查看局面再行动。]`` (first move / auto-pass reuse the
+  same clause shape); doudizhu ``[System: 对局通知 · 斗地主第<N>局：
+  <situation>，现在轮到你（…）。局势与规则见本轮 gamehub_context 注入块；…]``
+  where the situation is the most recent public move/pass with its actor and
+  concrete card faces (the landlord-lead/re-lead facts stay, no action
+  prompts). A delegated grant folds a short ``<agent> 代 <human>`` clause
+  into the turn phrase — no seat definition and no second identity sentence;
+  the full identity lives in the context requirements section. The granted
+  seat stays the highest-priority viewer, so a delegated seat never reads as
+  a sideline teammate.
+- Retry notices (`build_nudge_notice`, `note_tag_rejected`): status only +
+  pointer. Errors, the move, tag syntax and examples are recorded on the
+  grant (`TurnGrant.last_rejection`) and rendered by the block's requirement
+  section; the "系统会替你随手一手"-style threat wording is gone (bounded
+  retries + context feedback replaced it).
+- Start/end stage notices (`build_stage_notice`): short event (title,
+  seats, result) + pointer, **never an action authorization** at endgame.
+  The event is recorded per `(session, match_id, version)` slot through
+  `context.note_stage_event` before publishing — a flat bounded map with
+  TTL eviction (no second state machine) — so the end-of-match context
+  stays injectable even when the room has left the active set (no
+  `active_rooms` dependency) and sibling matches sharing a session never
+  mix. Short-term retry state (`TurnGrant.last_rejection`, the misplaced
+  tag marker) is grant-scoped: per match by construction, cleared on a
+  successful submission, bounded by the grant retention/prune.
+- Table talk / companion notices (`talk.py`): with the shipped-default
+  template the notice is one short public event line + context pointer;
+  board/plan/tone guidance rides the block. A user-customised
+  `table_talk_prompt_template` (identity-compared with the shipped default)
+  still renders exactly as configured — its richness is a user-owned
+  choice; that is the deliberate compatibility boundary. Tier gates,
+  cooldowns and dedup are unchanged.
+
+### Tag submission contract and explicit format rejections
+
+The move travels as a `play_<match>` **root control tag**: same level as
+`<msg>`, at the end of the reply, move as the tag **body**. Core
+`parse_xml` silently no-ops a root play tag NESTED inside `<msg>` (it
+invokes the tag handler as an in-message tag, producing no
+`RootTagAction`) and parses an attribute-form tag (`<play move="pass"/>`)
+into a RootTagAction with an empty body. The plugin closes both silent
+paths without touching core:
+
+- `PlayTurnTag.handle` records a fresh nested-tag attempt on the grant
+  (`tag_misplaced`); `note_response` clears the marker at every new step so
+  stale markers cannot misfire;
+- `submit_play_from_actions` turns both cases (nested / empty body) into a
+  bounded **format rejection** through `director.note_tag_rejected` (same
+  budget as the text nudges) and records the specifics on
+  `grant.last_rejection` for the context block;
+- `director.note_response` no longer suppresses the F1 corrective based on
+  the reply substring — a substring proves nothing. The authoritative
+  stand-down signals are parse-level: `note_tool_progress` reported by the
+  submission path (with the arming instant captured at `note_response`
+  time, so the race is deterministic) and the grant resolving on success.
+
 ## Invitation-only spectator listener
 
 Only the spectator surface runs on a separate aiohttp listener. The lobby and
@@ -142,18 +210,22 @@ plugin-private `DeclarativeBase` (same `gamehub_matches` columns as nori).
 
 KiraAI has no `ctx.session_tools`; grants are request-scoped:
 
-- `tools_turn.py` (plugin root) defines the `BaseTool` subclasses whose `name` is
-  `play_<match_id>` / `state_<match_id>`.
+- `tools_turn.py` (plugin root) defines the tag/tool pair whose `name` is
+  `play_<match_id>` (root control tag, the move channel) / `state_<match_id>`
+  (native read tool).
 - `director.py::TurnDirector.tools_for(sid)` returns the tool instances that must
   be visible for the current request (empty when it is not the AI's turn).
 - `main.py`'s `@on.llm_request` handler calls
-  `req.tool_set.add(*director.tools_for(event.sid))`; the host re-derives
+  `req.tool_set.add(*director.tools_for(event.sid))` and registers
+  `PlayTurnTag` on the per-request `tag_set`; the host re-derives
   `request.tools` from `request.tool_set` afterwards, so the tools reach the model.
 - Revocation = not adding them on the next request. The watchdog (90 s) still
   lives in `director.py` and fills with the rule bot when no legal move arrives.
 - `BaseTool.execute(self, event, **args)` receives the `KiraMessageBatchEvent`
   first; return a string. To end the turn after a successful move, call
   `event.stop()` (FinalizeStage still saves memory).
+- Tag rejections are bounded (`turn_text_retry_max`) and never silent: see
+  "Tag submission contract and explicit format rejections" above.
 
 ## Rule-bot pacing
 
@@ -176,6 +248,25 @@ so the move lands as a separate version bump + WS broadcast.
 `host/prompt.py` builds the per-session board block (nori `context.py` logic) and
 appends a `Prompt(name="gamehub_context", source="user", persist=False, content=...)`
 to `req.user_prompt`, so the system-prompt cache prefix stays stable.
+
+While a turn grant is live, the block additionally carries the **turn
+requirement section** (`context._turn_requirements`) for the granted match:
+authorization identity (grant seat first — 代打 when delegated), the granted
+seat, `play_<match>` tag syntax (root level, end of reply, move as the tag
+body, never an attribute), the move format with a legal **example**
+(`context.example_move`, labelled format-only), feedback semantics (a
+rejection produces one short notice; correct against the latest snapshot)
+and the unified speech line. Doudizhu adds the private-card boundary
+(never reveal unplayed cards / private strategy in public speech).
+
+The requirement section survives every budget-degradation level of the
+block (full payload → summary → minimal): the block may exceed its nominal
+character budget by exactly that bounded section rather than lose identity,
+format or feedback. `TurnGrant.last_rejection` adds the "上次提交未生效"
+line until the next successful submission clears it. The unified speech
+line is carried verbatim (`context.SPEECH_LINE`, ending at
+"不要复述你的落子计划") with the media sentence (`SPEECH_MEDIA_LINE`)
+appended after it.
 
 ## Game agent
 

@@ -17,9 +17,12 @@ arming (``note_response`` content check).
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 from tools_turn import (
+    _EMPTY_BODY_ERROR,
+    _MISPLACED_ERROR,
     PlayTurnTag,
     build_play_tag,
     build_turn_tools,
@@ -70,8 +73,11 @@ class _Director:
     def note_tool_progress(self, sid) -> None:
         self.notes.append(sid)
 
-    async def note_tag_rejected(self, sid, grant, move, error) -> None:
-        self.rejected.append((sid, move, error))
+    async def note_tag_rejected(
+        self, sid, grant, move, error, *, reason: str = "invalid"
+    ) -> None:
+        # Same uniform signature as the real director (no legacy fallback).
+        self.rejected.append((sid, move, error, reason))
 
 
 class _Runtime:
@@ -219,13 +225,112 @@ async def test_missing_or_foreign_tag_is_a_noop():
     assert await submit_play_from_actions(
         plugin, director, grant, [_TagAction("play_other", "H8")], "s1", event
     ) is None
-    assert await submit_play_from_actions(
-        plugin, director, grant, [_TagAction(play_tool_name("m-tag"), "  ")], "s1", event
-    ) is None
     assert director.calls == []
     assert director.notes == []
+    assert director.rejected == []
     assert event.stopped is False
     assert runtime.lines == []
+
+
+async def test_empty_body_tag_is_rejected_as_a_format_error():
+    """Attribute-form / empty-body tags are never silent: an explicit format
+    rejection fires and the trail is recorded on the grant.
+
+    Core ``parse_xml`` parses ``<play move="pass"/>`` into a RootTagAction
+    with an empty body — the old code returned None and the move vanished.
+    Now the submission path reports tool progress (standing the text nudge
+    down) and routes an explicit bounded format rejection.
+    """
+    director = _Director()
+    grant = _Grant()
+    plugin = _plugin(director)
+    actions = [_TagAction(play_tool_name("m-tag"), "   ")]
+    assert await submit_play_from_actions(
+        plugin, director, grant, actions, "s1", _Event()
+    ) is False
+    assert director.calls == []  # nothing was submitted
+    assert director.notes == ["s1"]  # the parsed tag stands the nudge down
+    assert director.rejected == [("s1", "格式错误", _EMPTY_BODY_ERROR, "format")]
+
+
+async def test_nested_tag_attempt_is_rejected_with_format_feedback():
+    """A tag nested inside <msg> (core no-op swallow) is recorded at parse
+    time and rejected explicitly by the submission path.
+
+    Core calls ``PlayTurnTag.handle`` for a tag nested inside ``<msg>`` and
+    produces no RootTagAction — the old path saw neither a submission nor a
+    failure, while ``note_response`` saw the substring and suppressed the
+    correction. Now the parse-level marker makes the AFTER_XML_PARSE path
+    reject explicitly.
+    """
+    director = _Director()
+    grant = _Grant()
+    plugin = _plugin(director)
+    tag = build_play_tag(plugin, grant)
+    # The model nested the tag inside <msg>: core invokes handle() as a no-op.
+    await tag.handle("pass")
+    assert await submit_play_from_actions(
+        plugin, director, grant, [_Chain("我要叫分")], "s1", _Event()
+    ) is False
+    assert director.calls == []
+    assert director.notes == ["s1"]
+    assert director.rejected == [("s1", "格式错误", _MISPLACED_ERROR, "format")]
+    # The marker is consumed: a follow-up tag-less reply is an ordinary
+    # text reply (F1 territory), not a second format rejection.
+    assert await submit_play_from_actions(
+        plugin, director, grant, [_Chain("还想说一句")], "s1", _Event()
+    ) is None
+    assert len(director.rejected) == 1
+
+
+async def test_nested_empty_body_tag_still_earns_format_feedback():
+    """A nested tag with an EMPTY body is still an attempt: the marker is
+    keyed on the timestamp, so the explicit format rejection fires instead
+    of the generic F1 text nudge mislabeling the mistake as "only talked"."""
+    director = _Director()
+    grant = _Grant()
+    plugin = _plugin(director)
+    tag = build_play_tag(plugin, grant)
+    await tag.handle("")  # <play_…></play_…> nested inside <msg>
+    # actions=[] is the realistic shape: no MessageChain, no RootTagAction.
+    assert await submit_play_from_actions(
+        plugin, director, grant, [], "s1", _Event()
+    ) is False
+    assert director.calls == []
+    assert director.notes == ["s1"]
+    assert director.rejected == [("s1", "格式错误", _MISPLACED_ERROR, "format")]
+    # The marker is consumed either way.
+    assert await submit_play_from_actions(
+        plugin, director, grant, [], "s1", _Event()
+    ) is None
+
+
+async def test_stale_misplaced_marker_does_not_misfire():
+    """A stale marker left over from a previous reply (e.g. a root-level
+    dispatch writing back) must not reject the next, tag-less reply."""
+    director = _Director()
+    grant = _Grant()
+    plugin = _plugin(director)
+    grant.tag_misplaced = "pass"
+    grant.tag_misplaced_at = time.monotonic() - 3600.0
+    assert await submit_play_from_actions(
+        plugin, director, grant, [_Chain("普通文字")], "s1", _Event()
+    ) is None
+    assert director.rejected == []
+
+
+async def test_successful_submission_clears_rejection_trail():
+    director = _Director()
+    grant = _Grant()
+    grant.last_rejection = ("ZZ99", "这里已经有子")
+    grant.tag_misplaced = "H8"
+    grant.tag_misplaced_at = time.monotonic()
+    actions = [_TagAction(play_tool_name("m-tag"), "K9")]
+    assert await submit_play_from_actions(
+        _plugin(director), director, grant, actions, "s1", _Event()
+    ) is True
+    assert grant.last_rejection is None
+    assert grant.tag_misplaced == ""
 
 
 async def test_invalid_result_asks_for_a_bounded_retry_and_keeps_delivery():
@@ -236,7 +341,7 @@ async def test_invalid_result_asks_for_a_bounded_retry_and_keeps_delivery():
     assert await submit_play_from_actions(
         _plugin(director, runtime=runtime), director, _Grant(), actions, "s1", event
     ) is False
-    assert director.rejected == [("s1", "K9", "这里已经有子")]
+    assert director.rejected == [("s1", "K9", "这里已经有子", "invalid")]
     assert event.stopped is False  # a rejected tag never terminates the reply
     assert runtime.lines == []
 
@@ -263,7 +368,9 @@ async def test_terminal_failure_does_not_ask_for_retry():
 # ----------------------------------------------------------------------
 #  Director integration (real harness)
 # ----------------------------------------------------------------------
-async def test_rejected_tag_notice_is_budgeted():
+async def test_rejected_tag_notice_is_budgeted_and_records_the_details():
+    """The rejection notice carries status + pointer only; the specifics are
+    recorded on the grant and rendered by the context block."""
     rooms, _plugin, recorder, director = _harness_bound(
         turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05
     )
@@ -274,16 +381,35 @@ async def test_rejected_tag_notice_is_budgeted():
 
     await director.note_tag_rejected(grant.session_id, grant, "ZZ99", "这里已经有子")
     assert grant.tag_retries == 1
-    assert any("ZZ99" in text for _sid, text in recorder.sent)
-    # Budget: turn_text_retry_max (default 2) — beyond it the notice is silent.
+    assert grant.last_rejection == ("ZZ99", "这里已经有子")
+    notice = next(text for _sid, text in recorder.sent if "没有生效" in text)
+    # Short status + pointer; the move/error live in the context block.
+    assert "ZZ99" not in notice
+    assert "这里已经有子" not in notice
+    assert "gamehub_context" in notice
+    assert f"state_{room.match.id}" in notice
+    # Budget: turn_text_retry_max (default 2) — beyond it the notice is
+    # silent but the context trail keeps updating.
     await director.note_tag_rejected(grant.session_id, grant, "YY88", "x")
-    await director.note_tag_rejected(grant.session_id, grant, "XX77", "x")
+    await director.note_tag_rejected(grant.session_id, grant, "XX77", "新错误")
     assert grant.tag_retries == 2
+    assert grant.last_rejection == ("XX77", "新错误")
+    assert len([t for _s, t in recorder.sent if "没有生效" in t]) == 2
     await director.stop()
 
 
-async def test_note_response_tag_content_skips_the_corrective():
-    """A reply that carries the play tag never arms the text-only nudge."""
+async def test_note_response_suppression_is_parse_level_not_substring():
+    """The substring no longer suppresses the corrective: only a really
+    parsed tag (reported as tool progress) means "submitted".
+
+    Incident: the model wrote ``<play_x>…</play_x>`` inside ``<msg>`` (a
+    core-level no-op swallow) or in attribute form (empty body) — the reply
+    contained the tag substring without ever submitting, the old
+    ``note_response`` substring check suppressed the correction, and the
+    turn idled silently to the watchdog fill. Now the substring arms (it
+    proves nothing); the submission path reports tool progress when a tag
+    was really parsed, standing the corrective down.
+    """
     rooms, _plugin, _recorder, director = _harness_bound(
         turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05,
         turn_text_grace_s=0.05, turn_text_retry_s=0.5,
@@ -296,15 +422,39 @@ async def test_note_response_tag_content_skips_the_corrective():
     director.tools_for(sid)
 
     name = play_tool_name(room.match.id)
+    # (a) A reply that merely CONTAINS the tag substring arms the corrective:
+    # the substring proves nothing (the tag may have been swallowed).
     director.note_llm_request(sid)
     director.note_response(sid, f"想堵你这里。<{name}>J9</{name}>")
-    await asyncio.sleep(0.3)
-    assert grant.text_nudges == 0
-    assert grant.text_task is None
-
-    # A genuinely text-only reply still arms the corrective.
-    director.note_llm_request(sid)
-    director.note_response(sid, "J9，堵你。")
     await _wait(lambda: grant.text_task is not None and grant.text_task.done())
     assert grant.text_nudges == 1
+
+    # (b) A fresh reply whose tag was really parsed and submitted stands the
+    # nudge down through tool progress, never arming a corrective.
+    grant.text_task = None
+    director.note_llm_request(sid)
+    director.note_response(sid)
+    director.note_tool_progress(sid)  # what submit_play_from_actions reports
+    await asyncio.sleep(0.3)
+    assert grant.text_nudges == 1  # unchanged: the second one never armed
+
+    await director.stop()
+
+
+async def test_note_response_clears_the_misplaced_marker_each_step():
+    """Every new step clears the previous reply's leftover misplaced marker."""
+    rooms, _plugin, _recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05,
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    sid = grant.session_id
+
+    grant.tag_misplaced = "pass"
+    grant.tag_misplaced_at = time.monotonic()
+    director.note_response(sid)
+    assert grant.tag_misplaced == ""
+    assert grant.tag_misplaced_at == 0.0
     await director.stop()

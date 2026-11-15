@@ -4,9 +4,22 @@ Pipeline:
 
     match event (start / move / over / resign)
       -> tier + cooldown/dedup gate in this module
-      -> render the ``table_talk_prompt_template`` into a system notice
+      -> render the notice body
       -> ``host.notices.send_notice`` publishes it into the game session
       -> the host chat pipeline replies inside that session
+
+Notice body (short public event + context pointer):
+
+- With the shipped-default template the notice is one short public event
+  line (event + actors) plus a pointer to the per-request
+  ``gamehub_context`` block; board/plan/guidance ride that ephemeral block,
+  so the persisted history never accumulates stale boards.
+- A user-customised ``table_talk_prompt_template`` still renders exactly as
+  configured (identity comparison with the shipped default selects the
+  short path) — its richness stays a user-owned choice, which is the
+  documented compatibility boundary.
+- Start/end events are also recorded for the context block's short-lived
+  event section, so an end event stays injectable without active rooms.
 
 Design constraints (unchanged from nori):
 
@@ -60,6 +73,39 @@ DEFAULT_LANE_HINT = "只用一两句玩家口吻的话回应，别做别的事�
 _QUEUE_MAX = 4
 _SEEN_TTL_S = 600.0
 _SEEN_MAX = 256
+
+
+def _default_template() -> str:
+    """The shipped default table-talk template (for the short-event check)."""
+    try:  # production: plugin package
+        from .host.settings import DEFAULT_TABLE_TALK_PROMPT
+    except ImportError:  # standalone tests import host as a top-level package
+        try:
+            from host.settings import DEFAULT_TABLE_TALK_PROMPT
+        except ImportError:  # pragma: no cover - settings absent
+            return ""
+    return str(DEFAULT_TABLE_TALK_PROMPT or "").strip()
+
+
+def _record_stage_event(
+    plugin: Any, sid: str, match_id: str, version: Any, text: str
+) -> None:
+    """Feed the context block's short-lived event record (deferred import).
+
+    ``context`` imports ``talk._safe``, so the import happens lazily here to
+    avoid a cycle. Failures are cosmetic: the notice still goes out.
+    """
+    try:  # production: plugin package
+        from .context import note_stage_event
+    except ImportError:  # standalone tests import modules as top-level
+        try:
+            from context import note_stage_event
+        except ImportError:  # pragma: no cover - context unavailable
+            return
+    try:
+        note_stage_event(plugin, sid, match_id, version, text)
+    except Exception:
+        logger.debug("table_talk: stage event record failed", exc_info=True)
 
 # Control markers / XML-ish tags stripped from untrusted event text so a name
 # or plan cannot forge a system block inside the notice prompt.
@@ -541,10 +587,35 @@ class TableTalk:
             room.last_talk_ts = now
 
         fields = self._fields(match, event, status)
+        event_text = _safe(str(fields.get("event") or "").strip())
+        game_name = _safe(str(fields.get("game") or "").strip())
+        # Record start/end events for the context block BEFORE publishing:
+        # the triggered reply must see them even after the room left the
+        # active set (an end event never depends on active_rooms). Keyed per
+        # (session, match, version) on the context side — no extra state here.
+        if event_type == "start" or over:
+            _record_stage_event(
+                self._plugin,
+                session_id,
+                str(getattr(match, "id", "") or ""),
+                getattr(match, "version", 0),
+                f"{game_name}对局：{event_text}" if game_name else event_text,
+            )
         template = str(getattr(cfg, "table_talk_prompt_template", "") or "")
-        extra = str(getattr(cfg, "table_talk_prompt_extra", "") or "").strip()
-        lane_hint = DEFAULT_LANE_HINT + (f" {extra}" if extra else "")
-        text = build_prompt(template, **fields, lane_hint=lane_hint)
+        if template.strip() and template.strip() == _default_template():
+            # Shipped-default template → the short public-event form: the
+            # notice names the event only; board/plan/guidance ride the
+            # per-request gamehub_context block (persist=False), so nothing
+            # stale accumulates in history. A user-customised template keeps
+            # rendering exactly as configured (user-owned boundary).
+            text = (
+                f"[System: 对局事件 · {game_name}：{event_text}"
+                "盘面与详情见本轮 gamehub_context 注入块。]"
+            )
+        else:
+            extra = str(getattr(cfg, "table_talk_prompt_extra", "") or "").strip()
+            lane_hint = DEFAULT_LANE_HINT + (f" {extra}" if extra else "")
+            text = build_prompt(template, **fields, lane_hint=lane_hint)
         if not text:
             return "empty_prompt"
 

@@ -21,11 +21,24 @@ Discipline:
   teammate matches show the human's view, opponent matches the AI's own
   seat. Doudizhu follows the same rule — the block is ephemeral and its only
   reader is this session's host AI, so private cards may appear here but
-  never in history.
+  never in history. The grant also decides the *stance wording*: a delegated
+  seat is rendered as 代打 (playing for the human), never as a sideline
+  teammate that does not move — the notice and the block must not disagree.
+- **Turn requirements ride the block**: the action contract for a granted
+  turn (identity, seat, ``play_<match>`` tag syntax, move format + example,
+  feedback semantics, speech boundaries) is part of the granted match's
+  block. Notices carry only the trigger event, so this ephemeral block is
+  the single carrier of everything the model needs to act — budget
+  degradation may shrink the board payload but never drops identity,
+  format or feedback.
+- **Short-lived stage events**: start/end events are recorded per session
+  (``note_stage_event``) with a small TTL so the end-of-match context is
+  still injectable after the room left the active set (the end notice must
+  never depend on ``active_rooms``).
 - **Atomic block budgeting**: the active (or newest) match gets the full
   payload; others get a summary plus an explicit "no full board, call
   game_state". A payload that does not fit degrades the whole block — never
-  a half board.
+  a half board (the grant's requirement section is exempt, see above).
 - **Anti-spoof**: user-controlled names/uid/plan text go through
   ``talk._safe`` so they cannot forge system blocks in the prompt.
 - Failures degrade to an empty block; never break a chat turn.
@@ -74,6 +87,32 @@ RECENT_TURNS = 6
 # Omission-tail reserve (4 digits covers any realistic match count).
 _TAIL_RESERVE = 64
 
+# Short-lived stage events (start/end) recorded per session: they keep the
+# end-of-match context injectable after the room left the active set.
+# Keyed by ``(sid, match_id, version)`` — one slot per match state, so the
+# same event never accumulates and different matches sharing a session never
+# mix. A flat bounded map with TTL eviction, deliberately not a state machine.
+_STAGE_TTL_S = 300.0
+_STAGE_MAX_ENTRIES = 128
+_STAGE_MAX_PER_SID = 4
+
+# Grant kinds (mirrors director.NORI_TURN / director.DELEGATED; kept literal
+# here because director imports this module and the values are stable
+# serialized contract values).
+_GRANT_DELEGATED = "delegated_human"
+
+# Unified speech guidance — single source, referenced by the block instead of
+# being rephrased in notices. ``SPEECH_LINE`` is the mandatory verbatim
+# sentence; ``SPEECH_MEDIA_LINE`` is the optional media sentence that may
+# follow it (attached with the same comma as the original wording, so the
+# combined line stays byte-identical to the user-approved text).
+SPEECH_LINE = (
+    "可以根据局势和群聊信息说一两句的符合你人设的发言，但不要复述你的落子计划"
+)
+SPEECH_MEDIA_LINE = (
+    "，关键赛点/高光时刻/情绪激动时可搭配表情包、语音等非文本消息。"
+)
+
 _BLOCK_HEADER = "# 当前对局（与当前会话相关，供回复参考）"
 _BLOCK_INSTRUCTION = (
     "以上对局信息仅供你自然回应时理解局面，完整规则、动作格式与盘面以本块为准。"
@@ -97,7 +136,9 @@ def build_game_state_context(plugin: Any, session_id: str) -> str:
     Pure reads (no await); called by ``host/prompt.py`` on every request. The
     block carries the full payload (rules / move syntax / snapshot / recent
     moves / assistance) for the active match — the newest by default, or the
-    match holding a live turn grant whose viewer seat it also uses.
+    match holding a live turn grant whose viewer seat and action requirements
+    it also carries. Short-lived stage events (start/end) are appended so an
+    ended match stays visible without any active room.
     """
     sid = str(session_id or "").strip()
     if not sid:
@@ -124,8 +165,10 @@ def build_game_state_context(plugin: Any, session_id: str) -> str:
             matched.append(room)
         except Exception:
             logger.debug("gamehub context: skipping broken room", exc_info=True)
+
+    events = _stage_events_section(plugin, sid)
     if not matched:
-        return ""
+        return events
 
     # Grant match first, then newest first (multi-match is defensive only).
     matched.sort(
@@ -144,7 +187,10 @@ def build_game_state_context(plugin: Any, session_id: str) -> str:
     parts = [_BLOCK_HEADER]
     if blocks:
         parts.append("\n\n".join(blocks))
-    parts.append(_BLOCK_INSTRUCTION)
+    if events:
+        parts.append(events)
+    if blocks:
+        parts.append(_BLOCK_INSTRUCTION)
     return "\n\n".join(parts) + tail
 
 
@@ -161,6 +207,12 @@ def _alloc_blocks(plugin: Any, shown: list[Any], grant: Any = None) -> list[str]
     recent turns / assistance); if it does not fit it degrades to a summary
     with snapshot, then a bare summary, then minimal identification — never a
     half board. The instruction and tail budgets are pre-deducted.
+
+    A live grant prepends the turn-requirement section to the first block,
+    and that section survives every degradation level (identity, format and
+    feedback are the minimum viable action surface — the block may exceed
+    the nominal capacity by exactly that bounded section rather than lose
+    the contract).
     """
     if not shown:
         return []
@@ -173,26 +225,43 @@ def _alloc_blocks(plugin: Any, shown: list[Any], grant: Any = None) -> list[str]
     blocks: list[str] = []
     used = 0
     for index, room in enumerate(shown):
+        match = getattr(room, "match", None)
+        grant_here = _grant_for_match(grant, grant_match_id, match)
         if index == 0:
-            viewer = _viewer_seat_of(
-                room.match, _grant_seat(grant, grant_match_id, room)
+            viewer = _viewer_seat_of(match, _grant_seat(grant, grant_match_id, room))
+            requirement = (
+                _turn_requirements(plugin, match, grant_here) if grant_here else ""
             )
-            block = _full_payload_block(plugin, room, viewer)
-            if len(block) > capacity:
-                block = _describe_room(plugin, room, snapshot=True, viewer_seat=viewer)
-            if len(block) > capacity:
-                block = _describe_room(plugin, room, snapshot=False, viewer_seat=viewer)
-            if len(block) > capacity:
+            body = _full_payload_block(plugin, room, viewer, grant=grant_here)
+            if len(body) > capacity:
+                body = _describe_room(
+                    plugin, room, snapshot=True, viewer_seat=viewer, grant=grant_here
+                )
+            if len(body) > capacity:
+                body = _describe_room(
+                    plugin, room, snapshot=False, viewer_seat=viewer, grant=grant_here
+                )
+            if len(body) > capacity:
                 # Summary still too big (e.g. a huge plan): minimal identification.
-                block = _minimal_block(room)
+                body = _minimal_block(room)
+            block = f"{requirement}\n{body}" if requirement else body
         else:
             block = _describe_room(plugin, room, snapshot=False)
         extra = len(block) + (2 if blocks else 0)
-        if used + extra > capacity:
+        if used + extra > capacity and index > 0:
             break
         blocks.append(block)
         used += extra
     return blocks
+
+
+def _grant_for_match(grant: Any, grant_match_id: str, match: Any) -> Any:
+    """The grant when it belongs to ``match``, else ``None``."""
+    if grant is None or not grant_match_id:
+        return None
+    if str(getattr(match, "id", "") or "") != grant_match_id:
+        return None
+    return grant
 
 
 def _active_grant(plugin: Any, sid: str) -> Any:
@@ -222,6 +291,182 @@ def _grant_seat(grant: Any, grant_match_id: str, room: Any) -> int | None:
     return seat if isinstance(seat, int) else None
 
 
+# ----------------------------------------------------------------------
+#  Short-lived stage events (start/end): context without active_rooms
+# ----------------------------------------------------------------------
+def note_stage_event(
+    plugin: Any, sid: str, match_id: str, version: Any, text: str
+) -> None:
+    """Record one short-lived match event for ``sid``'s next context build.
+
+    Called by the director (start/end stage notices) and table talk so the
+    end-of-match context stays injectable after the room left the active
+    room set. The store is a flat bounded map keyed by
+    ``(sid, match_id, version)``: re-notifying the same match state
+    overwrites in place, different matches (or versions) sharing one session
+    stay isolated, and every write first drops expired entries plus the
+    oldest inserts past the total cap. Memory-only; any failure just drops
+    the record — it must never break a notice turn.
+    """
+    target = str(sid or "").strip()
+    body = str(text or "").strip()
+    key_match = str(match_id or "").strip()
+    if not target or not body or not key_match:
+        return
+    try:
+        store = getattr(plugin, "_gamehub_stage_events", None)
+        if not isinstance(store, dict):
+            store = {}
+            plugin._gamehub_stage_events = store
+        now = time.monotonic()
+        try:
+            key_version = int(version)
+        except (TypeError, ValueError):
+            key_version = 0
+        for key in [k for k, v in store.items() if now - v[0] >= _STAGE_TTL_S]:
+            store.pop(key, None)
+        while len(store) >= _STAGE_MAX_ENTRIES:
+            store.pop(min(store, key=lambda k: store[k][0]), None)
+        store[(target, key_match, key_version)] = (now, body[:200])
+    except Exception:
+        logger.debug("gamehub context: stage event record failed", exc_info=True)
+
+
+def _stage_events_section(plugin: Any, sid: str) -> str:
+    """Fresh events for ``sid`` — one line per (match, version), oldest first.
+
+    Read-only (write-side cleanup keeps the map bounded); "" when nothing is
+    fresh for this session.
+    """
+    store = getattr(plugin, "_gamehub_stage_events", None)
+    if not isinstance(store, dict):
+        return ""
+    try:
+        now = time.monotonic()
+        entries = sorted(
+            (
+                (stamp, text)
+                for (key_sid, _match, _version), (stamp, text) in store.items()
+                if key_sid == sid and now - stamp < _STAGE_TTL_S
+            ),
+            key=lambda item: item[0],
+        )
+    except Exception:
+        logger.debug("gamehub context: stage event read failed", exc_info=True)
+        return ""
+    if not entries:
+        return ""
+    lines = [f"- {str(text)}" for _stamp, text in entries[-_STAGE_MAX_PER_SID:]]
+    return "近期对局事件（短期记忆，未持久化）：\n" + "\n".join(lines)
+
+
+# ----------------------------------------------------------------------
+#  Turn requirements (the ephemeral action contract of a granted turn)
+# ----------------------------------------------------------------------
+def example_move(match: Any, seat: int | None) -> str:
+    """A legal example action for the current state (format illustration only).
+
+    Prefers the rule bot's own move for the current state (always legal);
+    falls back to a phase-appropriate constant. Callers must label it as a
+    format example: it teaches *how* to submit, never *what* to play.
+    """
+    kind = str(getattr(match, "kind", "") or "")
+    state = getattr(match, "state", None)
+    try:
+        module = games.get(kind)
+    except Exception:  # noqa: BLE001 - the example is cosmetic
+        return ""
+    if module is not None and state is not None and isinstance(seat, int):
+        try:
+            move = module.bot(state, seat)
+        except Exception:  # noqa: BLE001
+            move = ""
+        if move:
+            return str(move)
+    if kind == "doudizhu":
+        phase = (
+            str((state or {}).get("phase") or "") if isinstance(state, dict) else ""
+        )
+        return "pass" if phase == "play" else "bid 1"
+    return "H8"
+
+
+def _turn_requirements(plugin: Any, match: Any, grant: Any) -> str:
+    """The ephemeral action contract for the session's live turn grant.
+
+    Everything the model needs to act correctly — authorization identity,
+    seat, ``play_<match>`` tag syntax (root level, move as the tag body),
+    move format + example, feedback semantics, speech boundaries — lives in
+    this request-scoped section instead of the persisted notice (notices
+    carry only the trigger event). Rebuilt against the latest snapshot every
+    request; budget degradation keeps it while shrinking the board payload.
+    """
+    match_id = str(getattr(match, "id", "") or "")
+    safe = "".join(ch for ch in match_id if ch.isalnum())[:24] or "turn"
+    play = f"play_{safe}"
+    seat = getattr(grant, "seat", None)
+    kind = str(getattr(grant, "kind", "") or "")
+    seats = list(getattr(match, "seats", None) or [])
+    labels = _seat_labels(match)
+    seat_index = seat if isinstance(seat, int) else None
+    label = _label(labels, seat_index)
+    seat_name = ""
+    if seat_index is not None and 0 <= seat_index < len(seats):
+        seat_name = str(getattr(seats[seat_index], "name", "") or "")
+    who = _bot_name(plugin)
+    if kind == _GRANT_DELEGATED:
+        identity = (
+            f"你（{who}）代 {seat_name or '玩家'} 操作座位{seat_index}（{label}）；"
+            "只操作这个授权座位，不代替其他席位行动"
+        )
+    else:
+        identity = f"你（{who}）是座位{seat_index}「{seat_name or '玩家'}」（{label}）"
+    lines = [
+        "本回合行动授权（临时生效，不写入记忆）：",
+        f"- 身份：{identity}。",
+        (
+            f"- 行动：在本轮回复末尾输出 <{play}>动作</{play}> 根控制标签完成本手"
+            "（与<msg>同级，放在回复末尾，不要放进<msg>内；"
+            "动作写在标签正文里，不要写成标签属性）。"
+        ),
+        f"- 发言：{SPEECH_LINE}{SPEECH_MEDIA_LINE}",
+    ]
+    move_help = ""
+    try:
+        move_help = str(games.get(match.kind).move_help or "").strip()
+    except Exception:  # noqa: BLE001 - unknown kind keeps the generic line
+        move_help = ""
+    format_bits: list[str] = []
+    if move_help:
+        format_bits.append(move_help + "。")
+    example = example_move(match, seat_index)
+    if example:
+        format_bits.append(
+            f"示例：<{play}>{example}</{play}>"
+            "（示例只展示格式，具体动作按本块最新局面决定）。"
+        )
+    if format_bits:
+        lines.append("- 格式：" + "".join(format_bits))
+    lines.append(
+        "- 反馈：非法或格式错误的提交不会生效，你会收到一条简短系统通知；"
+        "请按本块最新局面修正后重新提交，不要重复同样的非法动作。"
+    )
+    if str(getattr(match, "kind", "")) == "doudizhu":
+        lines.append("- 边界：不要在公开发言里透露自己的未出手牌或私有策略。")
+    rejection = getattr(grant, "last_rejection", None)
+    if isinstance(rejection, (tuple, list)) and len(rejection) >= 2:
+        move_text = str(rejection[0] or "").strip()
+        error_text = str(rejection[1] or "").strip()
+        if move_text or error_text:
+            shown = (
+                f"{move_text}（{error_text}）"
+                if move_text and error_text
+                else (move_text or error_text)
+            )
+            lines.append(f"- 上次提交未生效：{_safe(shown)}。请换一个合法动作。")
+    return "\n".join(lines)
+
+
 def _viewer_seat_of(match: Any, grant_seat: int | None = None) -> int | None:
     """Whose view the block shows.
 
@@ -240,7 +485,9 @@ def _viewer_seat_of(match: Any, grant_seat: int | None = None) -> int | None:
     return _ai_seat_index(match)
 
 
-def _full_payload_block(plugin: Any, room: Any, viewer_seat: int | None) -> str:
+def _full_payload_block(
+    plugin: Any, room: Any, viewer_seat: int | None, *, grant: Any = None
+) -> str:
     """The active match's full payload — the single carrier of rules/board.
 
     Fixed order: identification header, full snapshot, full ``module.rules``,
@@ -248,6 +495,9 @@ def _full_payload_block(plugin: Any, room: Any, viewer_seat: int | None) -> str:
     well-formed), the last ``RECENT_TURNS`` moves, optional threat summary /
     recommendation, and the plan line for opponent matches. Any single game
     hook failure degrades only its own section and never raises.
+    ``grant`` (when it belongs to this match) aligns the stance/turn wording
+    with the acting identity — a delegated seat never reads as a sideline
+    teammate here.
     """
     match = room.match
     teammate = modes.role_of(match) == ROLE_TEAMMATE
@@ -259,7 +509,7 @@ def _full_payload_block(plugin: Any, room: Any, viewer_seat: int | None) -> str:
     version = getattr(match, "version", 0)
     move_count = len(getattr(match, "log", None) or [])
 
-    lines = _header_lines(plugin, match)
+    lines = _header_lines(plugin, match, grant=grant)
 
     snapshot_text = _chat_snapshot(match, viewer_seat)
     if snapshot_text:
@@ -452,11 +702,14 @@ def _bot_name(plugin: Any) -> str:
     return _safe(name) if name else "你"
 
 
-def _header_lines(plugin: Any, match: Any) -> list[str]:
+def _header_lines(plugin: Any, match: Any, *, grant: Any = None) -> list[str]:
     """Identification lines shared by the summary and full-payload blocks.
 
     ID / stance / game / colors / turn. Summary and snapshot share the same
-    in-memory counters (no drift).
+    in-memory counters (no drift). ``grant`` (when it belongs to this match)
+    overrides the stance with the acting identity: a delegated seat is 代打,
+    never a sideline teammate that does not move — the notice and this block
+    must not disagree about who is playing.
     """
     seats = list(getattr(match, "seats", None) or [])
     role = modes.role_of(match)
@@ -465,6 +718,13 @@ def _header_lines(plugin: Any, match: Any) -> list[str]:
     human = _human_seat(match)
     human_seat = next((i for i, s in enumerate(seats) if s is human), None)
     labels = _seat_labels(match)
+    grant_seat = getattr(grant, "seat", None) if grant is not None else None
+    grant_kind = str(getattr(grant, "kind", "") or "") if grant is not None else ""
+    delegated = (
+        grant_kind == _GRANT_DELEGATED
+        and isinstance(grant_seat, int)
+        and (human_seat is None or grant_seat == human_seat)
+    )
     try:
         game_name = games.get(match.kind).name["zh"]
     except Exception:
@@ -481,14 +741,24 @@ def _header_lines(plugin: Any, match: Any) -> list[str]:
         ally = _safe(getattr(human, "name", "") or "你")
         uid = _safe(getattr(human, "actor", "") or "")
         ally_text = f"{ally}（userid：{uid}）" if uid else ally
-        stance = (
-            f"- 立场：{_bot_name(plugin)}和 {ally_text} 一边（队友视角，只帮腔"
-            f"不落子），对手：{opponent}"
-        )
-        colors = (
-            f"- 执色：{ally} 执{_safe(_label(labels, human_seat))}，"
-            f"对手执{_safe(_label(labels, rival_seat if rival_seat is not None else -1))}"
-        )
+        if delegated and human_seat is not None:
+            stance = (
+                f"- 立场：{_bot_name(plugin)}受 {ally} 委托代打其座位"
+                f"（执{_safe(_label(labels, human_seat))}），对手：{opponent}"
+            )
+            colors = (
+                f"- 执色：你（代{_safe(ally)}）执{_safe(_label(labels, human_seat))}，"
+                f"对手执{_safe(_label(labels, rival_seat if rival_seat is not None else -1))}"
+            )
+        else:
+            stance = (
+                f"- 立场：{_bot_name(plugin)}和 {ally_text} 一边（队友视角，只帮腔"
+                f"不落子），对手：{opponent}"
+            )
+            colors = (
+                f"- 执色：{ally} 执{_safe(_label(labels, human_seat))}，"
+                f"对手执{_safe(_label(labels, rival_seat if rival_seat is not None else -1))}"
+            )
     else:
         human_name = _safe(getattr(human, "name", "") or "对手")
         uid = _safe(getattr(human, "actor", "") or "")
@@ -501,10 +771,18 @@ def _header_lines(plugin: Any, match: Any) -> list[str]:
 
     if match.kind == "doudizhu":
         who = _bot_name(plugin)
-        stance = "- 立场：" + (
-            f"{who}为人类玩家的场边队友，不占席位"
-            if teammate else f"{who}占席参战；农民同队、地主独战，叫分前阵营待定"
-        )
+        human_label = _safe(_label(labels, human_seat))
+        if teammate:
+            stance = (
+                f"- 立场：{who}受 {ally} 委托代打座位{human_seat}（{human_label}）；"
+                "农民同队、地主独战，叫分前阵营待定"
+                if delegated and human_seat is not None
+                else f"- 立场：{who}为人类玩家的场边队友，不占席位"
+            )
+        else:
+            stance = (
+                f"- 立场：{who}占席参战；农民同队、地主独战，叫分前阵营待定"
+            )
         colors = "- 席位：" + "、".join(
             f"{_safe(s.name)}（{_safe(_label(labels, i))}）" for i, s in enumerate(seats)
         )
@@ -516,19 +794,26 @@ def _header_lines(plugin: Any, match: Any) -> list[str]:
         colors,
         (
             f"- 轮次：已行 {move_count} 手（version={version}，"
-            f"来源：本轮内存 match/log），{_turn_text(seats, status, teammate=teammate)}"
+            f"来源：本轮内存 match/log），"
+            f"{_turn_text(seats, status, teammate=teammate, grant=grant)}"
         ),
     ]
 
 
 def _describe_room(
-    plugin: Any, room: Any, *, snapshot: bool, viewer_seat: int | None = None
+    plugin: Any,
+    room: Any,
+    *,
+    snapshot: bool,
+    viewer_seat: int | None = None,
+    grant: Any = None,
 ) -> str:
     """Summary block: identification + short situational line + snapshot.
 
     The snapshot seat follows the unified viewer rule (grant → teammate human
     → AI seat); doudizhu has no special case — the block is ephemeral and its
-    only reader is this session's host AI.
+    only reader is this session's host AI. ``grant`` (when it belongs to this
+    match) aligns the stance wording with the acting identity.
     """
     match = room.match
     teammate = modes.role_of(match) == ROLE_TEAMMATE
@@ -539,7 +824,7 @@ def _describe_room(
     version = getattr(match, "version", 0)
     move_count = len(getattr(match, "log", None) or [])
 
-    lines = _header_lines(plugin, match)
+    lines = _header_lines(plugin, match, grant=grant)
 
     recent = _recent_moves(seats, match, teammate=teammate)
     if recent:
@@ -614,15 +899,26 @@ def _player_name(seat: Any, fallback: str = "棋手", *, teammate: bool = False)
     return _safe(getattr(seat, "name", "") or fallback)
 
 
-def _turn_text(seats: list[Any], status: Any, *, teammate: bool = False) -> str:
+def _turn_text(
+    seats: list[Any], status: Any, *, teammate: bool = False, grant: Any = None
+) -> str:
     waiting = list(getattr(status, "waiting_on", None) or [])
     if not waiting:
         return "对局已结束" if getattr(status, "outcome", None) is not None else "等待中"
+    grant_seat = getattr(grant, "seat", None) if grant is not None else None
+    grant_kind = str(getattr(grant, "kind", "") or "") if grant is not None else ""
     names = []
     for seat in waiting:
         if isinstance(seat, int) and 0 <= seat < len(seats):
             name = _player_name(seats[seat], f"座位{seat}", teammate=teammate)
-            if getattr(seats[seat], "kind", "") == "ai" and not teammate:
+            if isinstance(grant_seat, int) and seat == grant_seat:
+                # The granted seat is the reader: say so in the acting voice.
+                name = (
+                    f"{name}（你代打）"
+                    if grant_kind == _GRANT_DELEGATED
+                    else f"{name}（你）"
+                )
+            elif getattr(seats[seat], "kind", "") == "ai" and not teammate:
                 name = f"{name}（你）"
             names.append(name)
     return "轮到 " + "、".join(names) if names else "等待中"

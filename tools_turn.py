@@ -32,6 +32,7 @@ Discipline:
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 try:  # production: the host tag machinery (request-scoped tag_set dispatch)
@@ -101,15 +102,22 @@ def state_tool_name(match_id: str) -> str:
 
 
 def _play_tag_description(move_help: str) -> str:
-    body = "标签内填本手动作字符串"
+    """The tag's schema description: pure format, no behaviour, no threats.
+
+    The submission contract it teaches is the same one the ephemeral
+    ``gamehub_context`` requirements section carries: root level (outside
+    ``<msg>``), at the end of the reply, move as the tag BODY (never an
+    attribute). No "the system plays for you" style pressure — the
+    corrective loop (bounded retries + context feedback) handles misses.
+    """
+    body = "标签正文填本手动作字符串（不要写成标签属性）"
     if move_help:
         body += f"（本局格式：{move_help}）"
     else:
         body += "，格式以本局规则为准"
     return (
         "落子控制标签，与<msg>同级（放在回复末尾，不要放进<msg>内）。"
-        f"{body}。轮到你行动的回合必须输出一次本标签完成落子；"
-        "只在正文里写出动作不算落子。"
+        f"{body}。轮到你行动的回合输出本标签完成落子。"
     )
 
 
@@ -152,14 +160,62 @@ class PlayTurnTag(TagBase):
         self.description = _play_tag_description(move_help)
 
     async def handle(self, value: str = "", **kwargs: Any) -> None:
-        """No-op by contract — see ``submit_play_from_actions``.
+        """No-op for execution; records a misplaced nested attempt.
 
-        Must be a coroutine: the core awaits ``handle`` when it walks the
-        parsed actions (``execute.py``), so a plain ``def`` would explode
-        into an "object NoneType can't be used in 'await'" error log on
-        every reply that carries the tag.
+        Root-level tags reach ``submit_play_from_actions`` through the parsed
+        ``RootTagAction`` list. Core's ``parse_xml`` however also invokes
+        this ``handle`` when a ``<play_…>`` element is NESTED inside
+        ``<msg>`` (there it is treated as an in-message tag: the handler
+        returns nothing, no message element is produced and no
+        ``RootTagAction`` exists) — the move would vanish silently. Recording
+        the attempt on the grant lets the AFTER_XML_PARSE path reject the
+        reply with explicit format feedback instead. Must be a coroutine:
+        the core awaits ``handle`` when it walks parsed actions
+        (``execute.py``), so a plain ``def`` would explode into an "object
+        NoneType can't be used in 'await'" error log on every reply that
+        carries the tag.
         """
+        grant = self._grant
+        if grant is not None:
+            grant.tag_misplaced = str(value or "").strip()
+            grant.tag_misplaced_at = time.monotonic()
         return None
+
+
+_MISPLACED_ERROR = (
+    "落子标签必须放在回复末尾、与<msg>同级（不要放进<msg>内）"
+)
+_EMPTY_BODY_ERROR = (
+    "动作必须写在标签正文里，不要写成标签属性（如 <play>pass</play>）"
+)
+# Freshness window for a misplaced-tag marker recorded during this reply's
+# parse (``note_response`` clears stale markers at every new step too).
+_MISPLACED_FRESH_S = 30.0
+
+
+def _consume_misplaced(grant: Any) -> str | None:
+    """A fresh misplaced-tag attempt on ``grant``; consumed on read.
+
+    Presence is keyed on the timestamp, not the recorded body: a nested tag
+    with an EMPTY body (``<play_…></play_…>`` inside ``<msg>``) is still an
+    attempt and still earns the explicit format rejection — treating it as
+    "no attempt" would silently fall back to the generic F1 text nudge,
+    which mislabels a format mistake as "only talked". The returned body may
+    be "" and is only informational; the rejection message covers placement
+    and body form.
+    """
+    try:
+        value = str(getattr(grant, "tag_misplaced", "") or "").strip()
+        stamp = float(getattr(grant, "tag_misplaced_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not stamp:
+        return None
+    if time.monotonic() - stamp > _MISPLACED_FRESH_S:
+        return None
+    grant.tag_misplaced = ""
+    grant.tag_misplaced_at = 0.0
+    return value
 
 
 def _action_is_play_tag(action: Any, tag_name: str) -> bool:
@@ -199,32 +255,63 @@ async def submit_play_from_actions(
     makes ``submit_play`` refuse, so a late or duplicate tag can never land
     in a later turn — the same race-safety the old native tool had.
 
+    Format rejections are explicit, never silent (core ``parse_xml`` no-ops
+    a root play tag nested inside ``<msg>`` and yields an empty body for an
+    attribute-form tag — both would otherwise disappear):
+
+    - a fresh nested-tag attempt (recorded by ``PlayTurnTag.handle`` during
+      the parse) or an empty-body root tag → a bounded ``note_tag_rejected``
+      format notice, and the specifics ride the context requirements
+      section on the retry request;
+    - no tag at all → ``None`` (ordinary text reply; the F1 corrective
+      arming handles it — it now always arms, see ``director.note_response``).
+
     Returns ``None`` when the reply carries no play tag (the caller must not
-    touch the event), ``False`` when the tag was rejected (invalid/stale —
-    the reply keeps delivering normally and a bounded retry notice re-opens
-    the feedback loop through ``director.note_tag_rejected``), and ``True``
-    when the move was applied. On ``True`` the reply is terminated
-    (``event.stop()``): the agent loop ends, the remaining delivery tail is
-    skipped and ``final_result`` fires immediately, which releases the next
-    turn's pending trigger hours—er, seconds earlier. The table talk does
-    NOT ride the aborted delivery; it goes to the page window through
-    ``runtime.record_agent_line`` (same read-model row + WS frame the
-    delivery path produces) and stays on the match bubble via the atomic
-    ``say``. Session memory is unaffected — finalize saves it for stopped
-    turns by contract.
+    touch the event), ``False`` when the tag was rejected (invalid/stale or
+    malformed — the reply keeps delivering normally and a bounded retry
+    notice re-opens the feedback loop through ``director.note_tag_rejected``),
+    and ``True`` when the move was applied. On ``True`` the reply is
+    terminated (``event.stop()``): the agent loop ends, the remaining
+    delivery tail is skipped and ``final_result`` fires immediately, which
+    releases the next turn's pending trigger hours—er, seconds earlier. The
+    table talk does NOT ride the aborted delivery; it goes to the page
+    window through ``runtime.record_agent_line`` (same read-model row + WS
+    frame the delivery path produces) and stays on the match bubble via the
+    atomic ``say``. Session memory is unaffected — finalize saves it for
+    stopped turns by contract.
     """
     tag_name = play_tool_name(grant.match_id)
     move = ""
+    tag_seen = False
     for action in actions or ():
         if _action_is_play_tag(action, tag_name):
             move = str(getattr(action, "value", "") or "").strip()
+            tag_seen = True
             break
-    if not move:
+    if tag_seen:
+        # A play tag was actually parsed: stand down a pending corrective
+        # nudge before any submit outcome (even a rejection gives feedback).
+        note = getattr(director, "note_tool_progress", None)
+        if callable(note):
+            note(str(sid or ""))
+    elif _consume_misplaced(grant) is not None:
+        # A nested attempt this step (body may be empty — the marker is
+        # keyed on the timestamp): explicit bounded format feedback instead
+        # of a silent watchdog fill or a mislabeled text nudge.
+        note = getattr(director, "note_tool_progress", None)
+        if callable(note):
+            note(str(sid or ""))
+        await _reject(plugin, director, sid, grant, "格式错误", _MISPLACED_ERROR,
+                      reason="format")
+        return False
+    else:
         return None
+    if not move:
+        # Attribute-form / empty body: the move must be the tag body.
+        await _reject(plugin, director, sid, grant, "格式错误", _EMPTY_BODY_ERROR,
+                      reason="format")
+        return False
     say = _truncate_say(plugin, _chain_texts(actions))
-    note = getattr(director, "note_tool_progress", None)
-    if callable(note):
-        note(str(sid or ""))  # stand down a pending corrective nudge
     submit = getattr(director, "submit_play", None)
     if not callable(submit):
         return False
@@ -240,10 +327,10 @@ async def submit_play_from_actions(
             grant.match_id, grant.seat, move, status or error or "unknown",
         )
         if status == "invalid":
-            reject_note = getattr(director, "note_tag_rejected", None)
-            if callable(reject_note):
-                await reject_note(str(sid or ""), grant, move, error)
+            await _reject(plugin, director, sid, grant, move, error, reason="invalid")
         return False
+    grant.last_rejection = None  # the contract feedback is resolved
+    grant.tag_misplaced = ""  # any stale nested-tag marker is moot now
     logger.info(
         "turn director: play tag submitted (%s seat %s <- %s)",
         grant.match_id, grant.seat, move,
@@ -263,6 +350,33 @@ async def submit_play_from_actions(
     if callable(stop):
         stop()
     return True
+
+
+async def _reject(
+    plugin: Any,
+    director: Any,
+    sid: str,
+    grant: Any,
+    move: str,
+    error: str,
+    *,
+    reason: str,
+) -> None:
+    """Route one rejection through the director's bounded notice (fail-soft).
+
+    Single call, no compatibility retry: ``note_tag_rejected`` uniformly
+    takes ``reason`` inside this project, so a TypeError here is a real bug
+    and must surface (in the log) instead of being masked by a second
+    invocation. The guard only keeps a feedback failure from breaking the
+    reply delivery.
+    """
+    reject_note = getattr(director, "note_tag_rejected", None)
+    if not callable(reject_note):
+        return
+    try:
+        await reject_note(str(sid or ""), grant, move, error, reason=reason)
+    except Exception:  # noqa: BLE001 - feedback must not break the reply
+        logger.debug("gamehub: rejection notice failed", exc_info=True)
 
 
 class BoundStateTool(GameStateTool):

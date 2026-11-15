@@ -15,9 +15,12 @@
   气泡），绝不发会话 notice、绝不把纯文字轮/失败轮/过期轮正文落库。
 - 模型输入顺序固定为：
   ``[system(稳定), user(稳定初始化/说明), 跨手历史 native assistant/tool,
-  user(最新局面), 本手 transcript...]``。最新 user 消息由
-  ``agent_view_text`` 统一输出 rules → 当前 board/chat → plan →
-  threat_summary。
+  user(最新局面), 本手 transcript...]``。
+- Stable prefix (system + init user + ``play`` tool schema) carries identity,
+  rule text and move format exactly once per request. The latest user message
+  suppresses those stable sections via ``agent_view_text`` and keeps exactly
+  one dynamic snapshot: current board/own private hand/turn ownership/public
+  chat -> plan -> threat_summary.
 - 跨手历史按 ``(match_id, seat)`` 隔离，默认最近 10 个完成决策回合
   （``ai_history_rounds``：-1 不限、0 关闭）。历史是内存态，重启清空，
   不进入宿主聊天历史；只存游戏动作与模型/工具短说明。
@@ -41,6 +44,7 @@ import asyncio
 import hashlib
 import json
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,13 +105,17 @@ def _is_no_default_model(exc: BaseException) -> bool:
 
 
 def build_play_tool_def(module: Any = None) -> dict[str, object]:
-    """通用 play 工具定义：只有必填 ``move``，不暴露任何台词参数。
+    """Generic ``play`` tool definition: only the required ``move`` argument.
 
-    ``move`` 是字符串动作，格式由游戏模块 move_help 决定；不假设坐标/
-    棋盘/执色。定义描述只说明动作与可选同轮文本输出，不携带人设/对手/
-    行为引导（这些由调用方的 system/notice 承载）。表达不通过工具参数
-    传递：内部只在合法落子成功时把该轮正文作为传输层 ``say`` 写入对手
-    气泡。说话失败不得触发重试落子。
+    ``move`` is a string action whose format comes from the game module's
+    ``move_help``; no board/coordinate/colour assumptions. The description
+    only states the action and the optional same-reply text output - no
+    persona/opponent/behaviour guidance (the caller's system prompt carries
+    that). The move format is declared once, here in the tool schema; the
+    stable prompt only references it instead of copying it. Expression never
+    travels through tool arguments: on a legal move the same-round text is
+    forwarded as the internal ``say`` transport into ``Match.chat``. A speech
+    failure must never trigger a move retry.
     """
     move_help = str(getattr(module, "move_help", "") or "").strip()
     if move_help:
@@ -139,6 +147,62 @@ def build_play_tool_def(module: Any = None) -> dict[str, object]:
             },
         },
     }
+
+
+def _stable_rules_block(module: Any) -> str:
+    """Static rule text for the stable prefix, with the move format stripped.
+
+    Rules are static module constants (``mod.rules``): they never change
+    across hands, so they are stated once in the stable prefix and never
+    repeated in the dynamic snapshot. Some modules already embed their move
+    syntax in ``rules`` (a trailing ``Moves: ...`` clause or a dedicated
+    line); that clause is removed here so the move format is declared exactly
+    once by the ``play`` tool schema and only referenced by the prompt.
+    """
+    rules = str(getattr(module, "rules", "") or "").strip()
+    if not rules:
+        return ""
+    lines: list[str] = []
+    for line in rules.splitlines():
+        # ``Moves:`` / ``Move syntax:`` clauses are format-only: drop them
+        # whether they start a line or trail an otherwise useful rule line.
+        cleaned = re.sub(
+            r"\s*(?:move\s+syntax|moves)\s*:.*$",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        ).rstrip()
+        if cleaned.strip():
+            lines.append(cleaned)
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _move_format_block(module: Any) -> str:
+    """Move format reference for the stable prefix (empty when absent)."""
+    return str(getattr(module, "move_help", "") or "").strip()
+
+
+def _seat_side_line(match: Any, seat: int) -> str:
+    """Fixed seat fact for the stable prefix; never the dynamic side.
+
+    ``seat`` and the seat name are stable for the whole match, while the side
+    (landlord/farmer, black/white, ...) can change with bidding or game
+    state and must come from the latest snapshot's seats/describe block.
+    Writing the side here would contradict the dynamic snapshot.
+    """
+    name = _seat_name(match, seat)
+    if name:
+        return f"你在本局固定坐在第{seat}席（座位名：{name}）。"
+    return f"你在本局固定坐在第{seat}席。"
+
+
+# Safety boundary for hidden-information games: stated once in the stable
+# prefix (system, or init when a custom system prompt is used).
+SECRET_SPEECH_RULE = "有隐藏信息的对局只依据公开信息发言，绝不透露或复述私有手牌/策略。"
 
 
 # 兼容导出：无模块上下文时的通用定义；实际调用按当前游戏模块动态生成。
@@ -847,9 +911,13 @@ class GameAgent:
             plan_text, review = "", False
         else:
             _plan, plan_text, _seq, review = _active_plan(match, seat)
-        # 单一集成点：agent_view_text 已把 rules / 当前 board+chat /
-        # plan / threat_summary 按固定顺序排在当前 user 消息里；跨手历史
-        # 不经过该 builder，因此不会回放旧局面/旧 plan/旧威胁分析。
+        # Single integration point: rules, move format and seat identity are
+        # already stated once in the stable prefix (system/init + play tool
+        # schema). The latest user snapshot keeps only dynamic content - the
+        # current position (own private hand, turn ownership, dynamic side),
+        # public recent chat, plan and threat analysis. Cross-hand history
+        # never goes through this builder, so old positions/plans/threats are
+        # never replayed.
         view = agent_view_text(
             match,
             seat,
@@ -857,6 +925,9 @@ class GameAgent:
             plan_review=review,
             chat_limit=3,
             threat_analysis=True,
+            include_rules=False,
+            include_move_syntax=False,
+            include_instructions=False,
         )
         return view, match, True
 
@@ -882,15 +953,28 @@ class GameAgent:
     #  prompt
     # ------------------------------------------------------------------
     def _system_prompt(self, match: Any, seat: int) -> str:
-        """稳定 system：身份来自配置（bot/agent），不写死棋种/人名/符号。"""
+        """Stable system prompt: identity from plugin config, no hardcoded
+        game symbols or names.
+
+        The stable prefix carries every long instruction that never changes
+        across hands: the fixed seat identity, the same-reply speech rule, the
+        text-only boundary and the hidden-information safety rule.
+        The rule text and move-format reference live in ``_init_prompt``
+        (user side) because rules are static module constants that must stay
+        in the user input even when ``ai_agent_prompt`` replaces the whole
+        system prompt. Dynamic state (board/hand/turn ownership/public chat/
+        plan/threat/side) appears exactly once in the latest user snapshot,
+        so this prompt never carries phase/landlord/outcome values.
+        """
         custom = str(getattr(self._plugin.settings, "ai_agent_prompt", "") or "").strip()
         if custom:
             return custom
-        game_name = games.get(match.kind).name["zh"]
+        module = games.get(match.kind)
+        game_name = module.name["zh"]
         name, persona = _seat_identity(self._plugin, match, seat)
         lines = [
-            f"你是{name}，正在参与一局{game_name}，坐在第{seat}席；"
-            "具体身份、局面表示与动作格式以本局规则和最新局面为准。",
+            f"你是{name}，正在参与一局{game_name}；{_seat_side_line(match, seat)}"
+            "具体局面、身份阵营与行动权以最新局面为准。",
         ]
         if persona:
             lines.append(
@@ -900,13 +984,14 @@ class GameAgent:
         lines.extend(
             [
                 "轮到你时调用 play 工具执行本局动作，提交本手动作时需根据局势"
-                "在同一次回复的普通正文里写一两句保持你原本人设的玩家短话；"
-                "不要解说，也不要只发一条没有工具调用的纯文字消息。"
-                "动作成功后结束，不续模型轮。",
+                "和群聊信息在同一次回复的普通正文里说一两句符合你人设的玩家"
+                "短话；不要复述你的落子计划，不要解说，也不要只发一条没有"
+                "工具调用的纯文字消息。动作成功后结束，不续模型轮。",
                 "短话写在同一回复的普通正文里，和工具调用一起提交，不通过"
                 "工具参数传递，也不要只写在 reasoning/思考里；只有本手合法"
                 "动作成功时才会作为你的发言被对手看到，失败时不会发出，也"
-                "不需要为说话重试或改写动作。",
+                "不需要为说话重试或改写动作。本局发言只支持文本。",
+                SECRET_SPEECH_RULE,
                 "主 agent 的总体指令优先；本局策略与 plan 是战术提示，"
                 "即使偏离默认目标也优先遵从，但必须符合规则。",
             ]
@@ -914,33 +999,46 @@ class GameAgent:
         return "\n".join(lines)
 
     def _init_prompt(self, match: Any, seat: int) -> str:
-        """稳定 user 初始化：只含身份/说明，规则与当前局面由最新消息承载。"""
+        """Stable user init: the single carrier of rule text and move format.
+
+        Rules are static module constants and must stay in the user input: a
+        custom ``ai_agent_prompt`` replaces the system prompt but must never
+        drop the rules. The default system already states the identity, so it
+        is not repeated here; only a custom system gets one fixed seat line to
+        keep the identity constraint. The move format is declared once by the
+        ``play`` tool schema and only referenced here.
+        """
         module = games.get(match.kind)
-        name, _persona = _seat_identity(self._plugin, match, seat)
-        lines = [
-            f"本局是{module.name['zh']}（{module.name['en']}）。",
-            f"你是{name}，坐在第{seat}席。",
-            (
+        custom = str(getattr(self._plugin.settings, "ai_agent_prompt", "") or "").strip()
+        lines = [f"本局是{module.name['zh']}（{module.name['en']}）。"]
+        if custom:
+            name, _persona = _seat_identity(self._plugin, match, seat)
+            lines.append(f"你是{name}；{_seat_side_line(match, seat)}")
+        rules = _stable_rules_block(module)
+        if rules:
+            lines.append(f"本局规则（整局有效）：\n{rules}")
+        if _move_format_block(module):
+            lines.append(
+                "动作格式以 play 工具定义中的 move 说明为准"
+                "（即本局 move_help），正文不要重复抄写。"
+            )
+        if custom:
+            # A custom system prompt replaces the default speech/secret
+            # guidance, so the safety boundary is carried here exactly once.
+            lines.append(
+                "轮到你时调用 play 工具执行本局动作，在同一次回复的普通"
+                "正文里说一两句符合你人设的玩家短话；不要复述你的落子"
+                "计划，不要只发纯文字。只有本手合法动作成功时短话才会"
+                "被对手看到。本局发言只支持文本。" + SECRET_SPEECH_RULE
+            )
+        lines.extend(
+            [
                 "这是本局连续的决策记录；旧回合只用于理解前因，"
-                "该执行哪一步永远以下一条最新的当前局面为准。"
-            ),
-            (
-                "轮到你时调用 play 工具执行本局动作，提交本手动作时需根据局势"
-                "在同一次回复的普通正文里写一两句保持你原本人设的玩家短话；"
-                "不要解说，也不要只发一条没有工具调用的纯文字消息。"
-                "动作成功后结束，不续模型轮。"
-            ),
-            (
-                "短话写在同一回复的普通正文里，和工具调用一起提交，不通过"
-                "工具参数传递，也不要只写在 reasoning/思考里；只有本手合法"
-                "动作成功时才会作为你的发言被对手看到，失败时不会发出，也"
-                "不需要为说话重试或改写动作。"
-            ),
-            (
-                "主 agent 的总体指令优先；本局策略与 plan 是战术提示，"
-                "即使偏离默认目标也优先遵从，但必须符合规则。"
-            ),
-        ]
+                "该执行哪一步永远以下一条最新的当前局面为准。",
+                "最新当前局面（含你的行动权、公开聊天、plan 与威胁分析）"
+                "位于跨手历史之后、本手工具交互之前；旧局面不会回放。",
+            ]
+        )
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

@@ -574,10 +574,7 @@ async def game_state(
     if bound is not None:
         return await _bound_state_text(plugin, bound)
     if _is_notice_turn(event):
-        return (
-            "当前是行动通知回合：本回合的对局上下文已随通知给出，"
-            "game_state 暂不可用（通知回合不做 actor 反查）。"
-        )
+        return _NOTICE_TURN_GAME_STATE_REPLY
     actor, session_id = _resolve(event)
     rooms = plugin.rooms
 
@@ -595,6 +592,12 @@ async def game_state(
         return "你现在没有进行中的对局。可以用 game_new 开一局。"
     seat = _session_seat(room.match, actor, session_id)
     return _state_text(plugin, room.match, seat)
+
+
+_NOTICE_TURN_GAME_STATE_REPLY = (
+    "当前是行动通知回合：本回合的对局上下文已通过 gamehub_context 注入块给出，"
+    "game_state 暂不可用（通知回合不做 actor 反查）。"
+)
 
 
 async def game_resign(

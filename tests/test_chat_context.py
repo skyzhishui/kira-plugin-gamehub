@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import importlib
 import re
+import time
 from types import SimpleNamespace
+from typing import Any
 
 _gomoku_module = importlib.import_module("engine.games.gomoku")
 import context as game_context
@@ -399,3 +401,248 @@ def test_doudizhu_teammate_block_shows_the_human_private_view() -> None:
 
     assert "Your PRIVATE hand" in block
     assert "规则（完整）" in block
+
+
+# ----------------------------------------------------------------------
+#  Turn grant: acting identity, requirements section, degradation
+# ----------------------------------------------------------------------
+class _TurnGrant:
+    """Duck-typed live grant (id/seat/kind + optional rejection trail)."""
+
+    def __init__(self, match_id: str, seat: int, kind: str = "nori_turn"):
+        self.match_id = match_id
+        self.seat = seat
+        self.kind = kind
+        self.last_rejection = None
+        self.tag_misplaced = ""
+        self.tag_misplaced_at = 0.0
+
+
+class _GrantDirector:
+    def __init__(self, grant: _TurnGrant | None) -> None:
+        self._grant = grant
+
+    def active_grant_for(self, sid: str):
+        return self._grant
+
+
+class _GrantMatchPlugin(_Plugin):
+    def __init__(self, rooms, grant: _TurnGrant | None, target: str | None = "s1") -> None:
+        super().__init__(rooms, target)
+        self._director = _GrantDirector(grant)
+        self.host_agent_name = "汐祈"
+
+
+def _delegated_match(match_id: str = "m-del") -> Any:
+    module = games.get("gomoku")
+    state = module.create(SimpleNamespace(seed=1, options={}))
+    match = Match(
+        id=match_id, kind="gomoku", created_at=0, updated_at=0, version=1,
+        state=state,
+        seats=[
+            SeatInfo(kind="human", name="Alice", token=""),
+            SeatInfo(kind="bot", name="陪练A", token=""),
+        ],
+    )
+    match.mode_options = {"mode": "bot", "difficulty": "easy", "delegation": True}
+    return match
+
+
+def test_delegated_grant_replaces_the_sideline_stance() -> None:
+    """With a live delegated grant the stance must agree with the notice:
+    never again a sideline teammate that does not move."""
+    match = _delegated_match()
+    plugin = _GrantMatchPlugin([_room(match)], _TurnGrant(match.id, 0, "delegated_human"))
+
+    block = game_context.build_game_state_context(plugin, "s1")
+
+    assert "委托代打" in block
+    assert "只帮腔不落子" not in block
+    assert "你（代Alice）" in block
+    assert "（你代打）" in block
+
+
+def test_nori_grant_keeps_the_player_stance() -> None:
+    match = _delegated_match("m-nori")
+    match.mode_options = {"mode": "nori", "driver": "turn"}
+    match.seats[1].kind = "ai"
+    result = apply_match_action(match, 0, {"type": "move", "move": "H8"}, 1001)
+    assert result.ok
+    match = result.match
+    grant = _TurnGrant(match.id, 1, "nori_turn")
+    plugin = _GrantMatchPlugin([_room(match)], grant)
+
+    block = game_context.build_game_state_context(plugin, "s1")
+
+    # An own-seat grant never reads as a sideline teammate either.
+    assert "只帮腔不落子" not in block
+    assert "（你）" in block
+
+
+def test_requirements_section_carries_the_full_contract() -> None:
+    """Authorization identity / seat / tag syntax / example / feedback /
+    speech wording all live in the ephemeral block; notices never repeat them.
+
+    The speech line must carry the mandatory sentence verbatim, followed by
+    the media sentence.
+    """
+    match = _delegated_match("m-req")
+    grant = _TurnGrant(match.id, 0, "delegated_human")
+    grant.last_rejection = ("ZZ99", "这里已经有子")
+    plugin = _GrantMatchPlugin([_room(match)], grant)
+
+    block = game_context.build_game_state_context(plugin, "s1")
+
+    assert "本回合行动授权" in block
+    assert "代 Alice 操作座位0" in block
+    assert "不代替其他席位行动" in block
+    assert "<play_mreq>动作</play_mreq>" in block
+    assert "与<msg>同级" in block and "不要放进<msg>内" in block
+    assert "不要写成标签属性" in block
+    # Format + a legal example (labelled as format-only).
+    assert "动作格式" in block or "格式：" in block
+    assert "示例：<play_mreq>" in block
+    assert "示例只展示格式" in block
+    # Feedback semantics + the last rejection trail.
+    assert "不会生效" in block and "重新提交" in block
+    assert "上次提交未生效：ZZ99（这里已经有子）" in block
+    # Unified speech line: the mandatory sentence verbatim, then the media
+    # sentence may follow (same combined line as the approved wording).
+    assert game_context.SPEECH_LINE in block
+    assert f"发言：{game_context.SPEECH_LINE}{game_context.SPEECH_MEDIA_LINE}" in block
+    # Everything stays sanitised.
+    assert "[System:" not in block
+
+
+def test_requirements_example_follows_the_phase() -> None:
+    """Doudizhu bidding-phase example must be a bid/pass form, never a card
+    string."""
+    module = games.get("doudizhu")
+    state = module.create(SimpleNamespace(seed=1, options={"hands": "1"}))
+    match = Match(
+        id="m-ddz-bid", kind="doudizhu", created_at=0, updated_at=0, version=1,
+        seats=[
+            SeatInfo(kind="human", name="Alice", token=""),
+            SeatInfo(kind="ai", name="汐祈", token=""),
+            SeatInfo(kind="ai", name="nori", token=""),
+        ],
+        state=state,
+    )
+    match.mode_options = {"lineup": "nori_agent"}
+    plugin = _GrantMatchPlugin([_room(match)], _TurnGrant(match.id, 1, "nori_turn"))
+
+    block = game_context.build_game_state_context(plugin, "s1")
+
+    assert "示例：<play_mddzbid>bid 1</play_mddzbid>" in block \
+        or "示例：<play_mddzbid>pass</play_mddzbid>" in block
+    assert "示例：<play_mddzbid>3 3" not in block
+
+
+def test_requirements_survive_block_degradation(monkeypatch) -> None:
+    """Budget degradation may drop the board payload but never loses the
+    acting identity, the format or the feedback."""
+    match = _delegated_match("m-deg")
+    grant = _TurnGrant(match.id, 0, "delegated_human")
+    grant.last_rejection = ("ZZ99", "这里已经有子")
+    plugin = _GrantMatchPlugin([_room(match)], grant)
+
+    gomoku_module = importlib.import_module("engine.games.gomoku")
+    monkeypatch.setattr(
+        gomoku_module.Gomoku,
+        "chat_context",
+        lambda self, state, viewer: "SNAPSHOT" * 600,
+    )
+
+    block = game_context.build_game_state_context(plugin, "s1")
+
+    assert "SNAPSHOT" not in block  # the oversized payload degraded away
+    assert "本回合行动授权" in block
+    assert "<play_mdeg>" in block
+    assert "上次提交未生效" in block
+    assert game_context.SPEECH_LINE in block
+
+
+def test_doudizhu_requirements_keep_the_private_card_boundary() -> None:
+    module = games.get("doudizhu")
+    state = module.create(SimpleNamespace(seed=1, options={"hands": "1"}))
+    match = Match(
+        id="m-ddz-priv", kind="doudizhu", created_at=0, updated_at=0, version=1,
+        seats=[
+            SeatInfo(kind="human", name="Alice", token=""),
+            SeatInfo(kind="ai", name="汐祈", token=""),
+            SeatInfo(kind="ai", name="nori", token=""),
+        ],
+        state=state,
+    )
+    match.mode_options = {"lineup": "nori_agent"}
+    plugin = _GrantMatchPlugin([_room(match)], _TurnGrant(match.id, 1, "nori_turn"))
+
+    block = game_context.build_game_state_context(plugin, "s1")
+
+    assert "不要在公开发言里透露自己的未出手牌或私有策略" in block
+    assert game_context.SPEECH_LINE in block
+
+
+def test_no_grant_means_no_requirements_section() -> None:
+    match = _delegated_match("m-nogrant")
+    plugin = _GrantMatchPlugin([_room(match)], None)
+
+    block = game_context.build_game_state_context(plugin, "s1")
+
+    assert "本回合行动授权" not in block
+    assert "完整局面" in block  # the payload itself still shows
+
+
+# ----------------------------------------------------------------------
+#  Short-lived stage events: end-of-match context without active_rooms
+# ----------------------------------------------------------------------
+def test_stage_events_inject_without_active_rooms() -> None:
+    plugin = _Plugin([], "s1")
+    game_context.note_stage_event(
+        plugin, "s1", "m-over", 12,
+        "对局结束 · 五子棋：黑方胜；你（汐祈）执黑，Alice 执白。",
+    )
+    block = game_context.build_game_state_context(plugin, "s1")
+    assert "近期对局事件" in block
+    assert "对局结束 · 五子棋" in block
+    assert "Alice 执白" in block
+    # No authorization language ever rides the event section.
+    assert "play_" not in block
+
+
+def test_stage_events_are_isolated_per_match_and_version() -> None:
+    """One slot per (sid, match, version): re-notifying the same state
+    overwrites, sibling matches (or versions) sharing a session never mix."""
+    plugin = _Plugin([], "s1")
+    game_context.note_stage_event(plugin, "s1", "m-a", 3, "A 结束：黑胜。")
+    game_context.note_stage_event(plugin, "s1", "m-a", 3, "A 结束：黑胜。")  # same slot
+    game_context.note_stage_event(plugin, "s1", "m-a", 5, "A 重开：开局。")
+    game_context.note_stage_event(plugin, "s2", "m-a", 3, "别的会话的同局。")
+    game_context.note_stage_event(plugin, "s1", "m-b", 1, "B 结束：白胜。")
+
+    store = plugin._gamehub_stage_events
+    assert len(store) == 4  # per (sid, match, version) slots, no accumulation
+    block = game_context.build_game_state_context(plugin, "s1")
+    assert "A 结束：黑胜" in block and "A 重开：开局" in block
+    assert "B 结束：白胜" in block
+    assert "别的会话的同局" not in block  # other sessions stay isolated
+
+    # A newer version of the same match replaces the old slot's reading,
+    # while the older slot remains until TTL/cap eviction (bounded history).
+    assert ("s1", "m-a", 3) in store and ("s1", "m-a", 5) in store
+
+
+def test_stage_events_expire_and_stay_bounded() -> None:
+    plugin = _Plugin([], "s1")
+    for index in range(game_context._STAGE_MAX_ENTRIES + 8):
+        game_context.note_stage_event(plugin, "s1", f"m-{index}", 1, f"事件{index}")
+    store = plugin._gamehub_stage_events
+    assert len(store) <= game_context._STAGE_MAX_ENTRIES  # bounded cleanup
+
+    # TTL: stale records vanish on the next read.
+    game_context.note_stage_event(plugin, "s1", "m-fresh", 1, "新事件")
+    for key in list(store)[:3]:
+        store[key] = (time.monotonic() - 10_000.0, "很旧的记录")
+    block = game_context.build_game_state_context(plugin, "s1")
+    assert "很旧的记录" not in block
+    assert "新事件" in block
