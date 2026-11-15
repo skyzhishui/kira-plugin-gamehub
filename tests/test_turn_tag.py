@@ -122,11 +122,15 @@ def test_play_tag_without_match_kind_degrades_to_generic_format():
     assert "D6" not in tag.description
 
 
-def test_play_tag_handle_is_a_noop():
-    """Submission happens in AFTER_XML_PARSE; the element never becomes text."""
+async def test_play_tag_handle_is_an_async_noop():
+    """Submission happens in AFTER_XML_PARSE; the element never becomes text.
+
+    ``handle`` must be awaitable: the core walks the parsed actions with
+    ``await action.tag.handle(...)``.
+    """
     tag = PlayTurnTag(_plugin(_Director()), _Grant())
-    assert tag.handle("H8") is None
-    assert tag.handle("H8", say="extra") is None
+    assert await tag.handle("H8") is None
+    assert await tag.handle("H8", say="extra") is None
 
 
 def test_turn_tools_are_state_only_now():

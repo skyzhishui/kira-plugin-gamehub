@@ -151,8 +151,14 @@ class PlayTurnTag(TagBase):
         self.name = play_tool_name(grant.match_id)
         self.description = _play_tag_description(move_help)
 
-    def handle(self, value: str = "", **kwargs: Any) -> None:
-        """No-op by contract — see ``submit_play_from_actions``."""
+    async def handle(self, value: str = "", **kwargs: Any) -> None:
+        """No-op by contract — see ``submit_play_from_actions``.
+
+        Must be a coroutine: the core awaits ``handle`` when it walks the
+        parsed actions (``execute.py``), so a plain ``def`` would explode
+        into an "object NoneType can't be used in 'await'" error log on
+        every reply that carries the tag.
+        """
         return None
 
 
