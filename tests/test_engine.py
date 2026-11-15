@@ -168,6 +168,34 @@ def test_create_match_autoplays_bots_without_version_bump():
     assert human.match.state["toPlay"] == 1
 
 
+def test_apply_match_action_can_defer_bot_autoplay():
+    """``autoplay_bots=False``：引擎不再内联补手，交给房间层按节奏调度。"""
+    match = _new_match(("human", "bot"))
+    human = apply_match_action(
+        match, 0, {"type": "move", "move": "H8"}, 2_000, autoplay_bots=False
+    )
+    assert human.ok
+    assert human.match.version == 2
+    assert len(human.match.log) == 1  # 只有人类这一手
+    assert human.match.log[0].seat == 0
+    assert human.match.state["toPlay"] == 2  # 仍轮到 bot，等房间层补
+
+
+def test_create_match_can_skip_initial_bot_autoplay():
+    """开局也可关闭内联 autoplay（房间层自己排程首手）。"""
+    seats = [
+        NewSeat(kind="human", token="t0", joined=True),
+        NewSeat(kind="bot", token="", joined=True),
+    ]
+    match = create_match(
+        NewMatchOptions(
+            id="m2", kind="gomoku", seats=seats, seed=7, now=1_000, autoplay_bots=False
+        )
+    )
+    assert match.version == 1
+    assert match.log == []
+
+
 def test_apply_match_action_rejects_and_strips_private_fields():
     match = _new_match()
     bad = apply_match_action(match, 5, {"type": "move", "move": "H8"}, 2_000)

@@ -111,6 +111,22 @@ KiraAI has no `ctx.session_tools`; grants are request-scoped:
   first; return a string. To end the turn after a successful move, call
   `event.stop()` (FinalizeStage still saves memory).
 
+## Rule-bot pacing
+
+Rule-bot seats (`kind=bot`, the practice partner) never answer inside the same
+request as the opponent's move. The engine's inline `autoplay` is disabled by the
+room layer (`apply_match_action(..., autoplay_bots=False)`,
+`create_match(autoplay_bots=False)`), and `room.GameRoom` schedules each bot move
+as a delayed task (`_check_bot_locked` → `_spawn_bot_steps` → `_run_bot_step`),
+so the move lands as a separate version bump + WS broadcast.
+
+- Delay window: `bot_move_delay_min_ms` / `bot_move_delay_max_ms`
+  (default 1000 / 2000 ms, random per move; `0 / 0` falls back to 1-2 s).
+- `game_agent`'s rule-bot fill (`ai_mode=bot`, LLM failure fallback) uses the same
+  window through `_wait_bot_pace`, so a bot-only match is paced too.
+- Both take the move from `engine.match.bot_move`, which keeps the level-based
+  difficulty perturbation that `autoplay` used to apply.
+
 ## Prompt injection
 
 `host/prompt.py` builds the per-session board block (nori `context.py` logic) and

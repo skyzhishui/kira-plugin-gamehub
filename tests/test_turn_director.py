@@ -406,6 +406,8 @@ async def test_watchdog_fills_delegated_human_seat_once():
 
     await _wait(lambda: grant.state == "filled")
     assert room.match.log[0].seat == 0  # delegated fill on the human seat
+    # 规则陪练的应手按房间节奏延迟，稍后才落地（不再是同一次动作内嵌）。
+    await _wait(lambda: len(room.match.log) >= 2)
     assert room.match.log[1].seat == 1  # easy practice bot answers
 
     # Delegation keeps renewing while it is on.

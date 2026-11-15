@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import random
 import secrets
 import time
 from dataclasses import dataclass, field, replace
@@ -39,6 +40,7 @@ try:  # production: plugin package (``plugins.<plugin>.room``)
         NewMatchOptions,
         NewSeat,
         apply_match_action,
+        bot_move,
         create_match,
         seat_by_token,
         status_of,
@@ -55,6 +57,7 @@ except ImportError:  # standalone tests import this module as top-level
         NewMatchOptions,
         NewSeat,
         apply_match_action,
+        bot_move,
         create_match,
         seat_by_token,
         status_of,
@@ -86,6 +89,10 @@ DEFAULT_OPPONENT_NAME = "陪练"
 
 # 规则陪练座位默认显示名（插件配置 ``practice_name`` 可覆盖）。
 DEFAULT_PRACTICE_NAME = "小白"
+
+# 规则陪练（kind=bot）出手前的拟人化延迟区间（秒）：引擎内联的 autoplay
+# 会让陪练在同一个请求里瞬间应手，房间层改为按此区间延迟调度。
+DEFAULT_BOT_DELAY_S = (1.0, 2.0)
 
 
 def _default_now() -> int:
@@ -142,6 +149,7 @@ class GameRoom:
         repository: Any,
         now_fn: Callable[[], int] | None = None,
         drive_ai_hook: Callable[["GameRoom", int], Any] | None = None,
+        bot_delay_fn: Callable[[], float] | None = None,
     ) -> None:
         self.match = match
         self.repository = repository
@@ -150,10 +158,14 @@ class GameRoom:
         self.drive_ai_hook = drive_ai_hook
         # M1.5 注入：``event_hook(room, event)``（table_talk 消费）；None=不发通知。
         self.event_hook: Callable[["GameRoom", dict[str, Any]], Any] | None = None
+        # 规则陪练（kind=bot）每手前的拟人化延迟来源；None=默认 1-2 秒。
+        self.bot_delay_fn = bot_delay_fn
 
         self.sockets: dict[Any, int | None] = {}
         self.lock = asyncio.Lock()
         self.ai_pending: set[int] = set()
+        # 已排定节奏化步进的 bot 座位（锁内 check-and-add，防重复排程）。
+        self.bot_pending: set[int] = set()
         self.dirty = True
         self.status = "over" if status_of(match).outcome is not None else "active"
         # 设计 §5.3 的软在途锁字段（M3 table_talk 使用；此处仅保留状态位）。
@@ -164,9 +176,13 @@ class GameRoom:
         self._tasks: set[asyncio.Task[Any]] = set()
         # AI 决策驱动任务（认输时取消/安全丢弃；不含 WS/事件任务）。
         self._drive_tasks: set[asyncio.Task[Any]] = set()
+        # 规则陪练步进任务（与 AI 驱动同口径：终局/认输后可安全丢弃）。
+        self._bot_tasks: set[asyncio.Task[Any]] = set()
         # 每座位驱动代次：自动 pass 连走会立即再排一次驱动，旧任务收尾时
         # 不得把新任务登记的 ai_pending 清掉（否则可能并发重复决策）。
         self._drive_gen: dict[int, int] = {}
+        # bot 座位同理：连走（斗地主双陪练/黑白棋自动 pass）排新代次。
+        self._bot_gen: dict[int, int] = {}
 
     # ------------------------------------------------------------------
     #  视图
@@ -355,13 +371,18 @@ class GameRoom:
     ) -> Match:
         """锁内校验版本 → 应用动作 → 落库 → 成功才广播。"""
         drive_seats: list[int] = []
+        bot_seats: list[int] = []
         event: dict[str, Any] | None = None
         async with self.lock:
             if client_version is not None and client_version != self.match.version:
                 raise RoomError("stale_version", "页面已过期，请刷新后重试")
             when = self.now_fn() if now is None else int(now)
             before_state = self.match.state
-            result = apply_match_action(self.match, seat, action, when)
+            # 规则陪练的应手不在这里内联补上（否则瞬间回手），改为下面按
+            # 1-2 秒节奏排程。
+            result = apply_match_action(
+                self.match, seat, action, when, autoplay_bots=False
+            )
             if not result.ok:
                 raise RoomError(result.error, result.message)
             self.match = result.match
@@ -370,6 +391,7 @@ class GameRoom:
             if saved:
                 self._broadcast_locked()
             drive_seats = self._check_ai_locked()
+            bot_seats = self._check_bot_locked()
             action_type = str(action.get("type") or "")
             if action_type in ("move", "resign"):
                 last = self.match.log[-1].move if self.match.log else ""
@@ -387,6 +409,7 @@ class GameRoom:
             match = self.match
 
         self._spawn_drive(drive_seats)
+        self._spawn_bot_steps(bot_seats)
         if event is not None:
             self.notify_event(event)
         return match
@@ -539,6 +562,7 @@ class GameRoom:
         """
         event: dict[str, Any] | None = None
         follow: list[int] = []
+        bot_follow: list[int] = []
         async with self.lock:
             status = status_of(self.match)
             if self.status == "over" or status.outcome is not None:
@@ -563,7 +587,9 @@ class GameRoom:
             action: dict[str, Any] = {"type": "move", "move": move}
             if say and persist_say:
                 action["say"] = say
-            result = apply_match_action(self.match, seat, action, self.now_fn())
+            result = apply_match_action(
+                self.match, seat, action, self.now_fn(), autoplay_bots=False
+            )
             if not result.ok:
                 # 非法落子：保留 ai_pending，允许同一决策任务纠正后重试。
                 return None, result.message
@@ -576,6 +602,7 @@ class GameRoom:
             # 自动 pass（黑白棋）可能让同一 AI 座位继续行棋：由房间层重新
             # 登记驱动，避免「AI 落子后仍轮到 AI」却没有下一次决策任务。
             follow = self._check_ai_locked()
+            bot_follow = self._check_bot_locked()
             applied_say = ""
             if persist_say and len(self.match.chat) > before_chat:
                 applied_say = str(self.match.chat[-1].text or "")
@@ -592,6 +619,7 @@ class GameRoom:
             }
             match = self.match
         self._spawn_drive(follow)
+        self._spawn_bot_steps(bot_follow)
         if event is not None:
             self.notify_event(event)
         return match, ""
@@ -630,6 +658,7 @@ class GameRoom:
           据此把这条 say 挂到宿主的教练位气泡。
         """
         event: dict[str, Any] | None = None
+        bot_follow: list[int] = []
         async with self.lock:
             status = status_of(self.match)
             if self.status == "over" or status.outcome is not None:
@@ -652,7 +681,12 @@ class GameRoom:
             # 代下 say 标记真实说话人（宿主主 agent），前端据此把这条发言
             # 归到宿主的教练位气泡，而不是静默过滤（人类座位不弹泡）。
             result = apply_match_action(
-                self.match, seat, action, self.now_fn(), say_by="host"
+                self.match,
+                seat,
+                action,
+                self.now_fn(),
+                say_by="host",
+                autoplay_bots=False,
             )
             if not result.ok:
                 return None, result.message
@@ -664,6 +698,7 @@ class GameRoom:
             # 代打落子与手动/AI 落子同等对待：重新登记 AI 驱动，否则对手席
             # （agent/bot 驱动）永远等不到下一次决策任务，对局就此卡死。
             follow = self._check_ai_locked()
+            bot_follow = self._check_bot_locked()
             applied_say = ""
             if persist_say and len(self.match.chat) > before_chat:
                 applied_say = str(self.match.chat[-1].text or "")
@@ -681,6 +716,7 @@ class GameRoom:
             }
             match = self.match
         self._spawn_drive(follow)
+        self._spawn_bot_steps(bot_follow)
         if event is not None:
             self.notify_event(event)
         return match, ""
@@ -778,6 +814,7 @@ class GameRoom:
         bot 时直接清理 ``ai_pending``，不产生副作用。
         """
         event: dict[str, Any] | None = None
+        bot_follow: list[int] = []
         async with self.lock:
             if self.status == "over":
                 self.ai_pending.discard(seat)
@@ -791,13 +828,19 @@ class GameRoom:
             ):
                 self.ai_pending.discard(seat)
                 return None
-            move = module.bot(self.match.state, seat)
+            move = bot_move(self.match, seat)
             if not move:
                 self.ai_pending.discard(seat)
                 return None
             before_state = self.match.state
+            # 兜底手已经迟了（watchdog 触发），本身不再加延迟；但后续轮到
+            # 规则陪练座位时仍按节奏排程，不在这里内联连走。
             result = apply_match_action(
-                self.match, seat, {"type": "move", "move": move}, self.now_fn()
+                self.match,
+                seat,
+                {"type": "move", "move": move},
+                self.now_fn(),
+                autoplay_bots=False,
             )
             if not result.ok:
                 self.ai_pending.discard(seat)
@@ -819,19 +862,23 @@ class GameRoom:
                 "before_state": before_state,
             }
             follow = self._check_ai_locked()
+            bot_follow = self._check_bot_locked()
             match = self.match
 
         # AI 连走（多 AI 座位）时继续驱动；1v1 通常为空
         self._spawn_drive(follow)
+        self._spawn_bot_steps(bot_follow)
         if event is not None:
             self.notify_event(event)
         return match
 
     async def kick_ai(self) -> None:
-        """恢复/开局后补驱动：若当前轮到 AI，立即登记并起驱动任务。"""
+        """恢复/开局后补驱动：若当前轮到 AI 或规则陪练，登记并起任务。"""
         async with self.lock:
             seats = self._check_ai_locked()
+            bots = self._check_bot_locked()
         self._spawn_drive(seats)
+        self._spawn_bot_steps(bots)
 
     async def rebind_actor(
         self,
@@ -933,18 +980,152 @@ class GameRoom:
             task.add_done_callback(self._tasks.discard)
             task.add_done_callback(self._drive_tasks.discard)
 
-    def cancel_drive_tasks(self) -> None:
-        """取消在途 AI 决策任务（不等待、不持锁）。
+    # ------------------------------------------------------------------
+    #  规则陪练（kind=bot）的节奏化步进
+    # ------------------------------------------------------------------
+    def _bot_delay(self) -> float:
+        """本次 bot 出手前的拟人化延迟（秒）。
 
-        认输后调用：即使某个任务已错过取消窗口，``try_apply_ai`` 仍会在
-        锁内重读状态并安全丢弃，不会落子到已结束的对局。调用方若是某个
-        drive 任务自身，则跳过自己，避免自等待死锁。
+        来源是插件配置 ``bot_move_delay_min_ms`` / ``bot_move_delay_max_ms``；
+        未注入或配置异常时退回 ``DEFAULT_BOT_DELAY_S``（1-2 秒）。
+        """
+        fallback = random.uniform(*DEFAULT_BOT_DELAY_S)
+        fn = self.bot_delay_fn
+        if fn is None:
+            return fallback
+        try:
+            delay = float(fn())
+        except Exception:  # noqa: BLE001 - 配置异常不能卡住对局
+            logger.debug("gamehub: bot 延迟配置异常，使用默认节奏", exc_info=True)
+            return fallback
+        return max(0.0, delay)
+
+    def _check_bot_locked(self) -> list[int]:
+        """锁内 check-and-add：返回本次需要按节奏步进的 bot 座位。
+
+        与 ``_check_ai_locked`` 并列：AI 座位由 ``drive_ai_hook`` 驱动，
+        规则陪练座位由房间层延迟 1-2 秒后自己走一手（引擎 autoplay 已关闭）。
+        """
+        if self.status == "over":
+            return []
+        status = status_of(self.match)
+        triggered: list[int] = []
+        for seat in status.waiting_on:
+            if self.match.seats[seat].kind != "bot":
+                continue
+            if seat in self.bot_pending:
+                continue
+            self.bot_pending.add(seat)
+            triggered.append(seat)
+        return triggered
+
+    def _spawn_bot_steps(self, seats: list[int]) -> None:
+        for seat in seats:
+            generation = self._bot_gen.get(seat, 0) + 1
+            self._bot_gen[seat] = generation
+            task = asyncio.create_task(
+                self._run_bot_step(seat, generation),
+                name=f"gamehub-bot-{self.match.id}-{seat}",
+            )
+            self._tasks.add(task)
+            self._bot_tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            task.add_done_callback(self._bot_tasks.discard)
+
+    async def _run_bot_step(self, seat: int, generation: int = 0) -> None:
+        """延迟 1-2 秒后替一个 bot 座位落子，并接力下一个等待中的座位。
+
+        与 ``ai_step`` 的差别只在节奏：``ai_step`` 是「轮不到人动就补一手」
+        的即时兜底，这里是对局正常推进时的拟人化应手。锁内二次校验
+        status/座位/是否仍轮到它，迟到的任务自然作废。
+        """
+        try:
+            delay = self._bot_delay()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            event: dict[str, Any] | None = None
+            follow_bots: list[int] = []
+            follow_ai: list[int] = []
+            async with self.lock:
+                if self.status == "over":
+                    self.bot_pending.discard(seat)
+                    return
+                status = status_of(self.match)
+                module = games.get(self.match.kind)
+                if (
+                    status.outcome is not None
+                    or seat not in status.waiting_on
+                    or self.match.seats[seat].kind != "bot"
+                    or type(module).bot is GameModule.bot
+                ):
+                    self.bot_pending.discard(seat)
+                    return
+                move = bot_move(self.match, seat)
+                if not move:
+                    self.bot_pending.discard(seat)
+                    return
+                before_state = self.match.state
+                result = apply_match_action(
+                    self.match,
+                    seat,
+                    {"type": "move", "move": move},
+                    self.now_fn(),
+                    autoplay_bots=False,
+                )
+                if not result.ok:
+                    self.bot_pending.discard(seat)
+                    return
+                self.match = result.match
+                saved = await self._persist_locked(force=True)
+                self._refresh_status_locked()
+                if saved:
+                    self._broadcast_locked()
+                self.bot_pending.discard(seat)
+                applied = self.match.log[-1].move if self.match.log else move
+                event = {
+                    "type": "move",
+                    "seat": seat,
+                    "move": applied,
+                    "over": status_of(self.match).outcome is not None,
+                    "match_id": self.match.id,
+                    "version": self.match.version,
+                    "match": self.match,
+                    "before_state": before_state,
+                }
+                # 双陪练（斗地主 bot_bot）/黑白棋自动 pass 会让同一或另一个
+                # bot 座位继续行棋：按节奏接力；AI 座位仍交给驱动任务。
+                follow_bots = self._check_bot_locked()
+                follow_ai = self._check_ai_locked()
+            self._spawn_bot_steps(follow_bots)
+            self._spawn_drive(follow_ai)
+            self.notify_event(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 补手失败不影响对局，等下次触发
+            logger.warning(
+                "规则陪练步进失败（%s seat %s）", self.match.id, seat, exc_info=True
+            )
+        finally:
+            # 只有仍是本座位最新一次步进时才清理在途标记（连走会排新代次）。
+            if self._bot_gen.get(seat, 0) <= generation:
+                self.bot_pending.discard(seat)
+
+    def cancel_drive_tasks(self) -> None:
+        """取消在途 AI 决策 / 规则陪练步进任务（不等待、不持锁）。
+
+        认输后调用：即使某个任务已错过取消窗口，``try_apply_ai`` /
+        ``_run_bot_step`` 仍会在锁内重读状态并安全丢弃，不会落子到已结束的
+        对局。调用方若是某个 drive 任务自身，则跳过自己，避免自等待死锁。
         """
         current = asyncio.current_task()
         for task in list(self._drive_tasks):
             if task is not current and not task.done():
                 task.cancel()
+        for task in list(self._bot_tasks):
+            if task is not current and not task.done():
+                task.cancel()
         self.ai_pending.clear()
+        self.bot_pending.clear()
 
     async def _run_drive(self, seat: int, generation: int = 0) -> None:
         try:
@@ -976,6 +1157,7 @@ class RoomManager:
         opponent_name: str | None = None,
         bot_name: str | None = None,
         practice_name: str | None = None,
+        bot_delay_fn: Callable[[], float] | None = None,
     ) -> None:
         self.repository = repository
         self.config = config
@@ -986,6 +1168,8 @@ class RoomManager:
         self.bot_name = (bot_name or "").strip() or "对手"
         # 规则陪练座位显示名（插件配置，默认「小白」）；多个陪练自动加序号。
         self.practice_name = (practice_name or "").strip() or DEFAULT_PRACTICE_NAME
+        # 规则陪练出手延迟的显式注入（测试/上层定制）；None=按配置区间。
+        self._bot_delay_override = bot_delay_fn
         # M2 注入 ai_player 驱动；M1 保持 None。
         self.drive_ai_hook: Callable[[GameRoom, int], Any] | None = None
         # M1.5 注入 table_talk 事件消费；None=不发通知。
@@ -1302,6 +1486,9 @@ class RoomManager:
                         mode_options=normalized_mode or {},
                         bot_name=self.bot_name,
                         practice_name=self.practice_name,
+                        # 规则陪练的首手也走房间层的 1-2 秒节奏，不在开局
+                        # 请求里瞬间连走。
+                        autoplay_bots=False,
                     )
                 )
             except (ValueError, KeyError) as exc:
@@ -1312,7 +1499,9 @@ class RoomManager:
             async with room.lock:
                 await room._persist_locked(force=True)
                 drive = room._check_ai_locked()
+                bots = room._check_bot_locked()
             room._spawn_drive(drive)
+            room._spawn_bot_steps(bots)
             room.notify_event(
                 {
                     "type": "start",
@@ -1338,9 +1527,27 @@ class RoomManager:
             repository=self.repository,
             now_fn=self.now_fn,
             drive_ai_hook=self._dispatch_drive,
+            bot_delay_fn=self._bot_delay,
         )
         room.event_hook = self._dispatch_event
         return room
+
+    def _bot_delay(self) -> float:
+        """规则陪练每手前的拟人化延迟（秒），来自插件配置区间。
+
+        未配置（或区间非法）时退回 ``DEFAULT_BOT_DELAY_S``（1-2 秒）。
+        """
+        if self._bot_delay_override is not None:
+            try:
+                return max(0.0, float(self._bot_delay_override()))
+            except Exception:  # noqa: BLE001 - 注入异常不能卡住对局
+                logger.debug("gamehub: bot 延迟注入异常，使用默认节奏", exc_info=True)
+                return random.uniform(*DEFAULT_BOT_DELAY_S)
+        lo = max(0, int(getattr(self.config, "bot_move_delay_min_ms", 0) or 0))
+        hi = int(getattr(self.config, "bot_move_delay_max_ms", 0) or 0)
+        if lo <= 0 and hi <= 0:
+            return random.uniform(*DEFAULT_BOT_DELAY_S)
+        return random.uniform(lo, max(lo, hi)) / 1000.0
 
     async def _dispatch_drive(self, room: GameRoom, seat: int) -> None:
         hook = self.drive_ai_hook

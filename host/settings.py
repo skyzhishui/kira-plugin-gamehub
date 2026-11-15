@@ -42,6 +42,10 @@ DEFAULTS: dict[str, Any] = {
     "turn_threat_analysis_enabled": True,
     "ai_min_think_ms": 600,
     "ai_think_jitter_ms": 300,
+    # Rule-bot (practice seat) pacing: the room layer schedules bot moves after
+    # a 1-2s human-like pause instead of letting the engine autoplay inline.
+    "bot_move_delay_min_ms": 1000,
+    "bot_move_delay_max_ms": 2000,
     "ai_agent_prompt": "",
     "ai_decision_log": True,
     # notice-driven turn

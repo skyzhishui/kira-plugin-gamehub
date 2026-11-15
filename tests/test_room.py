@@ -420,6 +420,35 @@ async def test_ai_step_noop_after_game_over() -> None:
     assert room.match.version == 2
 
 
+async def test_rule_bot_reply_is_paced_not_instant() -> None:
+    """规则陪练不再在人类落子的同一次请求里瞬间应手。
+
+    房间层把 bot 座位排进延迟步进：``apply`` 返回时只有人类这一手，陪练
+    的应手要等注入的延迟过去后才落地（并推进版本/广播）。
+    """
+    manager = RoomManager(
+        repository=FakeRepo(),
+        config=Settings({"max_active_matches": 10}),
+        now_fn=lambda: 1000,
+        bot_name="诺里",
+        bot_delay_fn=lambda: 0.05,
+    )
+    room, _, _ = await create_gomoku(manager, opponent="bot")
+    assert room.match.seats[1].kind == "bot"
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    assert [e.seat for e in room.match.log] == [0]
+    assert room.bot_pending == {1}
+
+    await wait_until(lambda: len(room.match.log) == 2)
+    assert loop.time() - started >= 0.05  # 不是瞬间应手
+    assert room.match.log[1].seat == 1
+    assert room.bot_pending == set()
+    assert room.match.version == 3  # 人类一手 + 陪练一手各推进一次
+
+
 # ----------------------------------------------------------------------
 #  广播 / WS
 # ----------------------------------------------------------------------
@@ -656,14 +685,15 @@ async def test_delegated_atomic_say_and_stale_guard() -> None:
     room, _, _ = await create_gomoku(
         manager, "alice", mode_options={"mode": "bot", "difficulty": "easy"}
     )
-    # 人类先手：代走 + say 原子生效（easy 陪练应手内嵌）
+    # 人类先手：代走 + say 原子生效；陪练应手不再内嵌，按房间节奏延迟落地。
     moved, error = await room.apply_delegated_move(
         0, "H8", expected_move_count=0, say="我下这里"
     )
     assert moved is not None and error == ""
     assert moved.chat[-1].text == "我下这里"
     assert moved.chat[-1].by == "host"  # 座位是人类座位，说话的是宿主主 agent
-    assert [e.seat for e in moved.log] == [0, 1]
+    assert [e.seat for e in moved.log] == [0]  # 陪练这一手还没到
+    await wait_until(lambda: [e.seat for e in room.match.log] == [0, 1])
 
     # 旧手数 + say：作废且不写 chat。
     before = len(room.match.chat)

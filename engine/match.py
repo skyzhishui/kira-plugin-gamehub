@@ -234,6 +234,9 @@ class NewMatchOptions:
     bot_name: str = ""
     # 陪练座位显示名（插件配置，默认「小白」）；多个陪练座位自动加序号。
     practice_name: str = ""
+    # ``False`` 时开局不连锁替 bot 座位走子（房间层按节奏自行调度）；
+    # 默认 ``True`` 保持引擎既有语义（纯函数/测试直接调用时的行为）。
+    autoplay_bots: bool = True
 
 
 @dataclass
@@ -372,7 +375,7 @@ def create_match(opts: NewMatchOptions) -> Match:
         state=state,
         mode_options=dict(opts.mode_options or {}),
     )
-    return autoplay(match, opts.now)
+    return autoplay(match, opts.now) if opts.autoplay_bots else match
 
 
 def status_of(match: Match) -> MatchStatus:
@@ -443,6 +446,34 @@ def _log_cards(
     return list(cards) if isinstance(cards, list) else None
 
 
+def bot_move(match: Match, seat: Seat) -> str | None:
+    """规则 bot 的一手（含 level 难度下可复现的微变数）。
+
+    引擎 ``autoplay`` 与房间层的节奏化步进共用同一取招口径，避免「按节奏
+    补手」时丢掉难度扰动。
+    """
+    mod = games.get(match.kind)
+    if not _has_bot(mod):
+        return None
+    move = mod.bot(match.state, seat)
+    if not move:
+        return None
+    if match.kind in ("gomoku", "reversi") and "level" in match.mode_options:
+        assistance = _host_module("assistance")
+        ranked_moves = getattr(assistance, "ranked_moves", None)
+        import hashlib
+
+        ranked = ranked_moves(match.kind, match.state, seat) if callable(ranked_moves) else []
+        # 局面决定的可复现微变数：20%取次优，兜底仍保留原最优bot。
+        entropy = int.from_bytes(
+            hashlib.sha256(f"{match.id}:{len(match.log)}:{seat}".encode()).digest()[:4],
+            "big",
+        )
+        if len(ranked) > 1 and entropy % 5 == 0:
+            move = ranked[1 + entropy % min(2, len(ranked) - 1)]["move"]
+    return move
+
+
 def autoplay(match: Match, now: int) -> Match:
     """让 bot 座位连续走子，直到轮到人/AI 或终局；不 bump version。"""
     mod = games.get(match.kind)
@@ -458,16 +489,7 @@ def autoplay(match: Match, now: int) -> Match:
         )
         if seat is None:
             break
-        move = mod.bot(cur.state, seat)
-        if cur.kind in ("gomoku", "reversi") and "level" in cur.mode_options:
-            assistance = _host_module("assistance")
-            ranked_moves = getattr(assistance, "ranked_moves", None)
-            import hashlib
-            ranked = ranked_moves(cur.kind, cur.state, seat) if callable(ranked_moves) else []
-            # 局面决定的可复现微变数：20%取次优，兜底仍保留原最优bot。
-            entropy = int.from_bytes(hashlib.sha256(f"{cur.id}:{len(cur.log)}:{seat}".encode()).digest()[:4], "big")
-            if len(ranked) > 1 and entropy % 5 == 0:
-                move = ranked[1 + entropy % min(2, len(ranked) - 1)]["move"]
+        move = bot_move(cur, seat)
         if not move:
             break
         result = mod.apply(cur.state, seat, move)
@@ -504,6 +526,7 @@ def apply_match_action(
     now: int,
     *,
     say_by: str = "",
+    autoplay_bots: bool = True,
 ) -> MatchResult:
     """统一动作：move / resign / say / rename。
 
@@ -562,7 +585,9 @@ def apply_match_action(
         moved = bump({"state": result.state, "log": log})
         # 原子 say：只有合法落子才追加；与落子共用同一个 version/updated_at。
         moved = _append_chat(moved, seat, action.get("say"), now, len(log), by=say_by)
-        return MatchActionOk(autoplay(moved, now))
+        # ``autoplay_bots=False`` 让房间层按节奏（1-2 秒）自行调度 bot 应手，
+        # 而不是在同一个请求里把 bot 的下一手瞬间补上。
+        return MatchActionOk(autoplay(moved, now) if autoplay_bots else moved)
 
     if kind == "resign":
         if status.outcome is not None:

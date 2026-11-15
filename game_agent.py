@@ -81,6 +81,12 @@ DEFAULT_HISTORY_ROUNDS = 10
 DEFAULT_AGENT_NAME = "nori"
 DEFAULT_AGENT_PERSONA = "调皮爱吐槽的猫娘，玩游戏时会认真+毒舌"
 
+# Rule-bot pacing fallback (seconds): used when the plugin config carries no
+# explicit ``bot_move_delay_min_ms`` / ``bot_move_delay_max_ms`` range. The room
+# layer uses the same 1-2s window for practice seats, so the rule bot never
+# answers instantly no matter which seat it fills.
+BOT_DELAY_S = (1.0, 2.0)
+
 # ``host.llm.NoDefaultModel`` when the host adapter is importable; the message
 # match keeps the same behaviour for a fake/adapter-less host in tests.
 _NO_DEFAULT_MODEL_EXC = getattr(host_llm, "NoDefaultModel", None) if host_llm else None
@@ -990,7 +996,10 @@ class GameAgent:
                 started=started,
             )
             return
-        await self._wait_min_think(started)
+        # Rule-bot fill keeps the same human-like pacing as the room layer, so
+        # a bot-only match (``ai_mode=bot``) or a fast LLM failure never lands a
+        # move within milliseconds of the opponent's.
+        await self._wait_bot_pace(started)
         if getattr(self._plugin, "stopping", False):
             return
         match, _error = await room.apply_ai_move(
@@ -1067,6 +1076,25 @@ class GameAgent:
         jitter = max(0, int(getattr(cfg, "ai_think_jitter_ms", 0) or 0))
         target = (minimum + random.uniform(0, jitter)) / 1000.0
         remaining = target - (time.monotonic() - started)
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+    def _bot_delay_s(self) -> float:
+        """规则 bot 出手前的拟人化延迟（秒），与房间层同口径。
+
+        读插件配置 ``bot_move_delay_min_ms`` / ``bot_move_delay_max_ms``；
+        缺席或非法时退回 ``BOT_DELAY_S``（1-2 秒）。
+        """
+        cfg = self._plugin.settings
+        lo = max(0, int(getattr(cfg, "bot_move_delay_min_ms", 0) or 0))
+        hi = int(getattr(cfg, "bot_move_delay_max_ms", 0) or 0)
+        if lo <= 0 and hi <= 0:
+            return random.uniform(*BOT_DELAY_S)
+        return random.uniform(lo, max(lo, hi)) / 1000.0
+
+    async def _wait_bot_pace(self, started: float) -> None:
+        """规则 bot 兜底手：补足到拟人化延迟（已等够则不再额外等待）。"""
+        remaining = self._bot_delay_s() - (time.monotonic() - started)
         if remaining > 0:
             await asyncio.sleep(remaining)
 

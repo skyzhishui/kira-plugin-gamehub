@@ -161,6 +161,30 @@
           }
         }
       },
+      "bot_move_delay_min_ms": {
+        "type": "integer",
+        "name": "Rule Bot Delay Min (ms)",
+        "default": 1000,
+        "hint": "Minimum human-like pause before a rule-bot (practice seat) plays its move/card. The room schedules it after this delay instead of replying instantly.",
+        "locales": {
+          "zh": {
+            "name": "规则陪练延迟下限（毫秒）",
+            "hint": "规则陪练（陪练座位）落子/出牌前的最短拟人化停顿；房间层按此延迟排程，不再瞬间应手。"
+          }
+        }
+      },
+      "bot_move_delay_max_ms": {
+        "type": "integer",
+        "name": "Rule Bot Delay Max (ms)",
+        "default": 2000,
+        "hint": "Upper bound of the random pause before a rule-bot move; must be >= the minimum.",
+        "locales": {
+          "zh": {
+            "name": "规则陪练延迟上限（毫秒）",
+            "hint": "规则陪练出手前随机停顿的上限，必须不小于下限。"
+          }
+        }
+      },
       "ai_agent_prompt": {
         "type": "textarea",
         "name": "Agent System Prompt",

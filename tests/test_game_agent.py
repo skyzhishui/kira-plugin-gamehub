@@ -850,6 +850,29 @@ async def test_ai_mode_bot_skips_llm_and_uses_rule_bot(tmp_path) -> None:
     assert entry["fallback"] == "mode_bot"
 
 
+async def test_ai_mode_bot_paces_the_rule_bot_move(tmp_path) -> None:
+    """ai_mode=bot：规则 bot 也要先等拟人化延迟，再落子/出牌。"""
+    router = FakeRouter([])
+    cfg = _cfg(
+        ai_mode="bot",
+        ai_models=["provider:model"],
+        bot_move_delay_min_ms=120,
+        bot_move_delay_max_ms=120,
+    )
+    _, agent, _manager, room = await _setup(tmp_path, router, cfg)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await agent.run(room, 1)
+
+    assert loop.time() - started >= 0.12  # 不是瞬间应手
+    assert router.calls == []
+    assert room.match.state["moves"] == 2
+    entry = _log_entries(tmp_path)[-1]
+    assert entry["source"] == "bot"
+    assert entry["fallback"] == "mode_bot"
+
+
 # ----------------------------------------------------------------------
 #  5 轮末轮工具保留 / 每轮调用上限 / 坏参与未知工具
 # ----------------------------------------------------------------------
