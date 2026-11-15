@@ -11,6 +11,7 @@
  */
 
 import { api, ApiError, MatchConnection, readSessionToken, writeSessionToken, PAGE_BASE } from "./shared/api.js";
+import { spectatorMode, enterSpectator } from "./shared/spectator.js";
 import { errorText } from "./shared/i18n.js";
 import { toast } from "./shared/toast.js";
 import { confettiBurst } from "./shared/confetti.js";
@@ -79,7 +80,7 @@ const LOG_SHOW = 12;
 const params = new URLSearchParams(location.search);
 const matchId = (params.get("id") || params.get("game") || "").trim();
 const urlToken = params.get("t") || "";
-let seatToken = urlToken || (matchId ? readSessionToken(matchId) : "");
+let seatToken = spectatorMode() ? "" : urlToken || (matchId ? readSessionToken(matchId) : "");
 if (urlToken && matchId) writeSessionToken(matchId, urlToken);
 
 let conn = null;
@@ -749,7 +750,7 @@ function renderActions(match) {
   const mine = typeof match.me === "number" && match.me >= 0;
 
   // S4 重开按钮：操盘者「重开一局」（终局「再来一局」）；观战者「我也来一局」
-  row.appendChild(actionBtn({
+  if (mine) row.appendChild(actionBtn({
     label: restartLabel({ spectator: !mine, over }),
     cls: mine && !over ? "" : "primary",
     disabled: busy,
@@ -775,10 +776,10 @@ function renderActions(match) {
       disabled: busy,
       onClick: onResign,
     }));
-    row.appendChild(actionBtn({ label: "改名", disabled: busy, onClick: openRename }));
   }
 
-  row.appendChild(actionBtn({ label: "复制观战链接", onClick: copyLink }));
+  if (spectatorMode()) return;
+  if (!over) row.appendChild(actionBtn({ label: "复制观战链接", onClick: copyLink }));
 
   const back = el("a", "btn ghost", "返回大厅");
   back.href = "./index.html";
@@ -910,7 +911,14 @@ async function newMatch() {
 }
 
 async function copyLink() {
-  const url = `${location.origin}${PAGE_BASE}/match.html?id=${encodeURIComponent(matchId)}`;
+  let url;
+  try {
+    const invitation = await api(`/matches/${encodeURIComponent(matchId)}/invite`, { method: "POST", body: { origin: location.origin } });
+    url = invitation.url;
+  } catch (err) {
+    toast(errorText(err, "无法创建观战邀请 / Cannot create invitation"), "error");
+    return;
+  }
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(url);
@@ -942,20 +950,6 @@ function legacyCopy(text) {
   return ok;
 }
 
-function openRename() {
-  const dlg = $("rename-dlg");
-  const seat =
-    view && typeof view.me === "number" && Array.isArray(view.seats) ? view.seats[view.me] : null;
-  $("rename-input").value = (seat && seat.name) || "";
-  if (typeof dlg.showModal === "function") {
-    dlg.showModal();
-    $("rename-input").focus();
-  } else {
-    // 老内核兜底
-    const v = window.prompt("在棋桌上显示的名字", $("rename-input").value);
-    if (v && v.trim()) act({ type: "rename", name: v.trim().slice(0, 24) });
-  }
-}
 
 /* ---------------- 游戏模块 ---------------- */
 
@@ -1171,6 +1165,7 @@ async function initUiConfig() {
 
 function initChatPanel() {
   chatWin = createChatPanel({
+    matchId,
     panelHost: $("side-chat"),
     chipHost: $("chat-dock"),
     getAgentName: () => getHostAgentName(),
@@ -1210,10 +1205,20 @@ function disposeChat() {
 }
 window.addEventListener("pagehide", disposeChat);
 
-function bootstrap() {
+async function bootstrap() {
   if (!matchId) {
     renderMissing();
     return;
+  }
+  if (spectatorMode()) {
+    document.querySelector(".topbar .back")?.remove();
+    try {
+      await enterSpectator(matchId);
+    } catch (err) {
+      renderMissing(err.message);
+      document.querySelector(".board-missing a")?.remove();
+      return;
+    }
   }
   initChatPanel();
   conn = new MatchConnection({
@@ -1222,7 +1227,10 @@ function bootstrap() {
     onMatch: applyView,
     onStatus: renderConn,
     onError: (err) => toast(errorText(err, "连接出现问题"), "error"),
-    onNotice: (msg) => toast(msg, "info"),
+    onNotice: (msg) => {
+      toast(msg, "info");
+      if (spectatorMode() && chatWin) chatWin.applyUiConfig({ chat_enabled: false });
+    },
     // 对局聊天的 agent 回复帧：交给聊天窗口追加（座位气泡不受影响）
     onAgentMessage: (frame) => {
       if (chatWin) chatWin.onAgentMessage(frame);
@@ -1241,14 +1249,6 @@ function bootstrap() {
 window.addEventListener("unhandledrejection", (e) => {
   const reason = e && e.reason;
   toast(errorText(reason, "出现了一个小问题，请重试"), "error");
-});
-
-$("rename-cancel").addEventListener("click", () => $("rename-dlg").close());
-$("rename-form").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const name = $("rename-input").value.trim().slice(0, 24);
-  $("rename-dlg").close();
-  if (name) act({ type: "rename", name });
 });
 
 bootstrap();

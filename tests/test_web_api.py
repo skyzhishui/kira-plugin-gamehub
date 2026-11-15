@@ -145,6 +145,16 @@ async def data_of(coro):
     return result["data"]
 
 
+@pytest.fixture(autouse=True)
+def native_chat_transport(monkeypatch):
+    async def publish(plugin, uid, name, text, *, role, match_id=""):
+        if not hasattr(plugin.ctx, "chat_published"):
+            plugin.ctx.chat_published = []
+        plugin.ctx.chat_published.append((uid, name, text, role, match_id))
+
+    monkeypatch.setattr("host.group_chat.publish_chat", publish)
+
+
 async def error_of(coro, status: int) -> ApiError:
     with pytest.raises(ApiError) as excinfo:
         await coro
@@ -162,13 +172,13 @@ async def test_ping_and_page_session(tmp_path):
 
     ping = await data_of(api.ping())
     assert ping["pong"] is True
-    assert ping["page_session"] == "gamehub:dm:admin"
+    assert ping["page_session"] == "gamehub:gm:room"
     assert ping["actor"] == "admin"
     assert ping["ready"] is True and ping["adapter_ready"] is True
     assert {"gomoku", "reversi", "doudizhu"} <= set(ping["games"])
 
     session = await data_of(api.page_session())
-    assert session == {"session_id": "gamehub:dm:admin", "actor": "admin"}
+    assert session == {"session_id": "gamehub:gm:room", "actor": "admin"}
 
 
 def test_envelopes_are_symmetric():
@@ -204,7 +214,7 @@ async def test_identity_read_and_update(tmp_path):
     initial = await data_of(api.get_identity())
     assert initial["name"] == "Human"
     assert initial["actor"] == "admin"
-    assert initial["page_session"] == "gamehub:dm:admin"
+    assert initial["page_session"] == "gamehub:gm:room"
 
     updated = await data_of(api.set_identity({"name": "阿空"}))
     assert updated["name"] == "阿空"
@@ -234,14 +244,14 @@ async def test_ui_config_lobby_and_match(tmp_path):
     api = GamehubApi(plugin)
 
     lobby = await data_of(api.ui_config())
-    assert lobby["page_session"] == "gamehub:dm:admin"
+    assert lobby["page_session"] == "gamehub:gm:room"
     assert lobby["agent_name"] == "nori"
     assert lobby["agent_avatar"] == "./assets/agent-avatar.png"
     assert lobby["match_id"] == ""
     assert lobby["current"] is None
     assert lobby["mode_options"] is None
     assert any(entry["kind"] == "gomoku" for entry in lobby["games"])
-    assert lobby["notice_target_session_id"] == "gamehub:dm:admin"
+    assert lobby["notice_target_session_id"] == "gamehub:gm:room"
     assert lobby["notice_target_status"] == "default"
     assert lobby["context_injectable"] is True
 
@@ -259,7 +269,7 @@ async def test_ui_config_lobby_and_match(tmp_path):
     assert scoped["match_over"] is False
     assert scoped["talk_mode"] == "key"
     assert scoped["source"] == {"kind": "webui", "session_id": ""}
-    assert scoped["chat_session"] == "gamehub:dm:admin"
+    assert scoped["chat_session"] == "gamehub:gm:room"
     assert scoped["mode_options"]["mode"] == "nori"
 
     await error_of(api.ui_config("nope"), 404)
@@ -287,7 +297,7 @@ async def test_notice_target_awaits_the_async_resolver(tmp_path):
     api = GamehubApi(plugin)
 
     sid, status, error = await api._notice_target()
-    assert (sid, status, error) == ("gamehub:dm:admin", "default", "")
+    assert (sid, status, error) == ("gamehub:gm:room", "default", "")
 
     # A resolver returning None (no session) is reported as invalid, not usable.
     plugin.ctx.session_ok = False
@@ -340,7 +350,7 @@ async def test_notice_test_publishes_into_game_session(tmp_path):
 
     result = await data_of(api.notice_test())
     assert result["dispatched"] is True
-    assert result["session_id"] == "gamehub:dm:admin"
+    assert result["session_id"] == "gamehub:gm:room"
     assert len(plugin.ctx.published) == 1
     _session, chain, mentioned = plugin.ctx.published[0]
     assert mentioned is True
@@ -380,7 +390,7 @@ async def test_games_lists_catalog_and_active_matches(tmp_path):
     assert row["source"]["kind"] == "webui"
     assert row["can_control"] is True
     assert row["status"] == "active"
-    assert row["notice_target"]["session_id"] == "gamehub:dm:admin"
+    assert row["notice_target"]["session_id"] == "gamehub:gm:room"
     assert token not in json.dumps(row)
 
     # Control face returns the acting seat token only.
@@ -910,7 +920,7 @@ async def test_games_payload_carries_the_host_name(tmp_path):
 # ----------------------------------------------------------------------
 
 
-async def test_chat_send_publishes_and_records_the_player_line(tmp_path):
+async def test_chat_send_publishes_and_records_the_player_line(tmp_path, monkeypatch):
     plugin = make_plugin(tmp_path)
     api = GamehubApi(plugin)
 
@@ -922,12 +932,7 @@ async def test_chat_send_publishes_and_records_the_player_line(tmp_path):
     # The line rides the notice channel into the dedicated game session, in
     # the player's voice — not a [System:] notice the model would answer as
     # an operator.
-    assert plugin.ctx.published, "notice must be published"
-    session, chain, mentioned = plugin.ctx.published[-1]
-    assert getattr(session, "sid", session) == "gamehub:dm:admin"
-    assert mentioned is True
-    text = "".join(e.text for e in chain.message_list if hasattr(e, "text"))
-    assert "[玩家发言]" in text and "这把我该怎么走？" in text
+    assert plugin.ctx.chat_published[-1] == ("admin", "Human", "这把我该怎么走？", "player", "")
 
     history = await data_of(api.chat_history())
     assert history["enabled"] is True
@@ -962,12 +967,12 @@ async def test_chat_disabled_and_undeliverable(tmp_path, monkeypatch):
     assert history["enabled"] is False
 
     plugin.settings.page_chat_enabled = True
-    import host.web as web_module
+    import host.group_chat as chat_module
 
-    async def failing_send(plugin, sid, text):
-        return False
+    async def failing_send(*args, **kwargs):
+        raise RuntimeError("unavailable")
 
-    monkeypatch.setattr(web_module, "send_notice", failing_send)
+    monkeypatch.setattr(chat_module, "publish_chat", failing_send)
     unreachable = await error_of(api.chat_send({"text": "喂"}), 503)
     assert unreachable.code == "not_ready"
 

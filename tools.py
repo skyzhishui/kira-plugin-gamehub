@@ -278,7 +278,7 @@ def _resolve(event: Any) -> tuple[str, str]:
 
     KiraAI has no per-message user id in the tool signature: the session id is
     the actor key (one active match per session). Page/admin matches use the
-    dedicated ``gamehub:dm:admin`` session, which therefore acts as their
+    dedicated ``gamehub:gm:room`` session, which therefore acts as their
     actor too.
     """
     sid = _event_sid(event)

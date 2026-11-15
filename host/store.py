@@ -144,6 +144,8 @@ class GamehubChatLine(Base):
     __tablename__ = "gamehub_chat_lines"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    match_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    uid: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     role: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="player | agent"
     )
@@ -171,6 +173,10 @@ def _ensure_columns(sync_conn: Any) -> None:
     for column in _MIGRATION_COLUMNS:
         if column.name not in existing:
             sync_conn.execute(text(column.ddl))
+    chat_columns = {c["name"] for c in inspector.get_columns(GamehubChatLine.__tablename__)}
+    for name in ("match_id", "uid"):
+        if name not in chat_columns:
+            sync_conn.execute(text(f"ALTER TABLE gamehub_chat_lines ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"))
 
 
 class _ColumnMigration:
@@ -511,10 +517,12 @@ class MatchStore:
     # ------------------------------------------------------------------
 
     async def chat_append(
-        self, role: str, sender: str, text: str, *, ts_ms: int | None = None
+        self, role: str, sender: str, text: str, *, ts_ms: int | None = None,
+        match_id: str = "", uid: str = "",
     ) -> dict[str, Any]:
         """Append one chat line; returns the public line dict."""
         line = GamehubChatLine(
+            match_id=match_id, uid=uid,
             role=str(role or "player")[:16],
             sender=str(sender or "")[:64],
             text=str(text or ""),
@@ -546,11 +554,13 @@ class MatchStore:
             "id": str(row_id),
             "ts": datetime_to_epoch(created),
             "role": line.role,
+            "match_id": line.match_id,
+            "uid": line.uid,
             "sender": line.sender,
             "text": line.text,
         }
 
-    async def chat_recent(self, limit: int = 100) -> list[dict[str, Any]]:
+    async def chat_recent(self, limit: int = 100, *, match_id: str | None = None) -> list[dict[str, Any]]:
         """Most recent chat lines, oldest first (page render order)."""
         limit = max(1, min(int(limit), 200))
         stmt = (
@@ -558,6 +568,8 @@ class MatchStore:
             .order_by(GamehubChatLine.id.desc())
             .limit(limit)
         )
+        if match_id is not None:
+            stmt = stmt.where(GamehubChatLine.match_id == match_id)
         async with self.session() as session:
             rows = list((await session.execute(stmt)).scalars().all())
         rows.reverse()
@@ -566,6 +578,8 @@ class MatchStore:
                 "id": str(row.id),
                 "ts": datetime_to_epoch(row.created_at),
                 "role": row.role,
+                "uid": row.uid,
+                "match_id": row.match_id,
                 "sender": row.sender,
                 "text": row.text,
             }

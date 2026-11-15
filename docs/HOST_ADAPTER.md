@@ -48,13 +48,13 @@ Import conventions:
 A dedicated session keeps game notices out of the user's real WebChat session.
 
 - Adapter platform/name: `gamehub`; manifest `{"name": "gamehub", ...}`.
-- Session sid: `gamehub:dm:admin` (WebUI is single-admin).
+- Session sid: `gamehub:gm:room` (one shared group, not one session per match).
 - `main.py::GamehubPlugin._provision_adapter()`:
   1. drops a stale adapter class of the same platform (reload safety);
   2. `await ctx.register_adapter("./adapter")` (registers the platform type);
   3. `await ctx.adapter_mgr.register_adapter(adapter_info())`;
   4. `await ensure_game_session(ctx)` →
-     `ctx.db.save_chat_session("gamehub:dm:admin", kind="im", title="游戏中心", data={"gamehub": True})`.
+     `ctx.db.save_chat_session("gamehub:gm:room", kind="im", title="游戏中心", data={"gamehub": True})`.
 - Adapter registration resolves the calling module through the call stack, so it
   must stay in `main.py` (never in `host/`).
 - `terminate()` unregisters the adapter and stops it.
@@ -77,7 +77,51 @@ async def send_notice(plugin, sid: str, text: str) -> bool
 ```
 Resolves the session and calls
 `ctx.publish_notice(session, MessageChain([Text(text)]), is_mentioned=True)`.
-A notice triggers the normal chat plugin buffer → flush → full IM pipeline.
+A notice triggers the Game Hub group router → flush → full IM pipeline.
+
+## Invitation-only spectator listener
+
+Only the spectator surface runs on a separate aiohttp listener. The lobby and
+player controls remain on the authenticated host WebUI. The listener exposes no
+host administration, control-token, move, delegation, identity or new-game API.
+
+- `spectator_enabled`: defaults to true.
+- `spectator_host`: defaults to `0.0.0.0`; use `127.0.0.1` behind a local proxy.
+- `spectator_port`: `0` derives the host's `data/webui.json` port + 10000
+  (normally 15267). Invalid/occupied ports disable the spectator service with an
+  error log, without taking the game runtime down.
+- `spectator_public_url`: optional separate HTTPS origin. Without it, the player
+  browser's hostname plus the spectator port is used over HTTP (trusted LAN).
+  For public access, configure HTTPS/WSS and preserve the public Host/Origin at
+  the reverse proxy. Do not expose the host WebUI through this proxy.
+
+The player uses **Copy spectator link** to obtain a per-match random invitation.
+The invitation is carried in the fragment and removed from the address bar on
+entry. A guest chooses a temporary nickname and exchanges the invitation for a
+cookie-bound bearer credential. UID = match id + HMAC of a random visitor cookie;
+no host login cookie, browser fingerprint, JWT or player seat token is used.
+Do not log query strings at a WS reverse proxy: the WS handshake uses a short-lived
+spectator credential in `access`, not the invitation or host token.
+
+Invitations and guest credentials are memory-only: they expire on match end or
+plugin restart. Existing WS connections close on match end (at most one second
+for an idle connection). Refreshing after a restart requires a newly copied
+invitation. An individual guest credential also expires after 24 hours.
+
+`host/group_chat.py` publishes native sender/group events. The priority-99 group
+hook stops further inbound chat scoring: guests only enter a bounded buffer;
+players and trusted server notices flush it. Every authenticated player message
+is an unconditional strong signal, even without a mention or wake word: no
+reply probability, activity score or chat-gate threshold applies. Wake words and mentions from guests
+therefore cannot arm NoriEngineChat reply tasks. Host tools/capabilities remain
+under normal host session permissions. The new group has its own session key:
+review/copy the old `gamehub:dm:admin` tool permission settings as appropriate;
+the old private-session history is retained, not deleted or silently migrated.
+
+The AI context is intentionally shared across matches. Spectator REST history is
+filtered by match id and never exposes previous matches' chat. AI group replies
+are visible in currently active room windows. Guests are trusted invitees, and
+invitation links can be forwarded; this is not an account or anti-Sybil system.
 
 ## Persistence
 

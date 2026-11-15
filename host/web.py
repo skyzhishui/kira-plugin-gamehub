@@ -55,7 +55,7 @@ from .avatar import avatar_url, clear_avatar, host_avatar_url, save_avatar
 try:  # ``host/session.py`` imports host-only modules (core.adapter)
     from .session import GAME_SID, PAGE_USER_ID
 except ImportError:  # standalone tests: keep the same literal constants
-    GAME_SID = "gamehub:dm:admin"
+    GAME_SID = "gamehub:gm:room"
     PAGE_USER_ID = "admin"
 
 # Single-admin WebUI: the page actor is fixed.
@@ -548,13 +548,13 @@ class GamehubApi:
             await store.init()
         return store
 
-    async def chat_history(self, limit: int = 100) -> dict[str, Any]:
+    async def chat_history(self, limit: int = 100, match_id: str | None = None) -> dict[str, Any]:
         """Recent chat-window lines (oldest first) + the enabled flag."""
         store = await self._chat_store()
         return envelope(
             {
                 "enabled": self._chat_enabled(),
-                "messages": await store.chat_recent(limit),
+                "messages": await store.chat_recent(limit, match_id=match_id),
             }
         )
 
@@ -578,17 +578,21 @@ class GamehubApi:
             raise _fail("发得太快了，稍等一下再发", 429, code="rate_limited")
 
         sender = self._display_name()
-        delivered = await send_notice(
-            self._plugin,
-            GAME_SID,
-            f"[玩家发言] {sender}：{text}",
-        )
-        if not delivered:
-            raise _fail("消息未能送达对局会话", 503, code="not_ready")
+        from .group_chat import publish_chat
+
+        match_id = str((body or {}).get("match_id") or "")
+        if match_id:
+            await self._room(match_id)
+        try:
+            await publish_chat(self._plugin, PAGE_ACTOR, sender, text, role="player", match_id=match_id)
+        except Exception as exc:
+            raise _fail("消息未能送达对局会话", 503, code="not_ready") from exc
         self._chat_last_send = now
 
         store = await self._chat_store()
-        message = await store.chat_append("player", sender, text)
+        message = await store.chat_append("player", sender, text, match_id=match_id, uid=PAGE_ACTOR)
+        if match_id:
+            await ws_hub.broadcast(match_id, {"type": "chat_message", **message})
         return envelope({"message": message, "enabled": True})
 
     async def set_avatar(self, body: Any = None) -> dict[str, Any]:
@@ -911,6 +915,8 @@ class GamehubApi:
         if not isinstance(body, dict):
             raise _fail("请求体必须是 JSON 对象", 400, code="bad_action")
         action = dict(body)
+        if action.get("type") == "rename":
+            raise _fail("请在游戏大厅修改玩家昵称", 403, code="rename_lobby_only")
         client_version = _int_or_none(action.pop("client_version", None))
         if str(action.get("type") or "") == "delegate":
             return await self._delegate_action(room, token, client_version, action)

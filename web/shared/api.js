@@ -8,6 +8,8 @@
  *   握手只认 query（token=宿主口令，t=座位口令），浏览器 WebSocket 无法带请求头
  */
 
+import { spectatorMode, spectatorCredential } from "./spectator.js";
+
 export const PLUGIN_ID = "kira-plugin-gamehub";
 export const API_BASE = `/api/plugin/${PLUGIN_ID}`;
 export const PAGE_BASE = `/page/plugin/${PLUGIN_ID}/hub`;
@@ -27,6 +29,7 @@ export class ApiError extends Error {
 }
 
 export function localToken() {
+  if (spectatorMode()) return spectatorCredential();
   try {
     return localStorage.getItem(HOST_TOKEN_KEY) || "";
   } catch {
@@ -89,9 +92,9 @@ export async function api(path, { method = "GET", body, token, timeoutMs = 12000
 export function matchWsUrl(matchId, seatToken) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const params = new URLSearchParams();
-  if (seatToken) params.set("t", seatToken);
+  if (seatToken && !spectatorMode()) params.set("t", seatToken);
   const hostToken = localToken();
-  if (hostToken) params.set("token", hostToken);
+  if (hostToken) params.set(spectatorMode() ? "access" : "token", hostToken);
   const q = params.toString() ? `?${params}` : "";
   return `${proto}//${location.host}${WS_BASE}/matches/${encodeURIComponent(matchId)}/ws${q}`;
 }
@@ -181,9 +184,13 @@ export class MatchConnection {
     try {
       await this.pullSnapshot();
     } catch (err) {
-      if (err && (err.status === 404 || err.status === 410)) {
+      if (err && (err.status === 404 || err.status === 410 || (spectatorMode() && err.status === 403))) {
         this._setStatus("missing");
         this.onError(err);
+        if (spectatorMode()) {
+          this.stopped = true;
+          this.onNotice("观战邀请已失效 / Spectator invitation expired");
+        }
         return;
       }
       this._scheduleRetry();
@@ -233,7 +240,7 @@ export class MatchConnection {
       if (this._status !== "live") this._setStatus("live");
     } else if (frame.type === "error") {
       this.onError(new ApiError(frame.message || "服务器返回错误", 0, frame.code || ""));
-    } else if (frame.type === "agent_message") {
+    } else if (frame.type === "agent_message" || frame.type === "chat_message") {
       // 对局聊天窗口的 agent 回复：与座位气泡（match.chat）互不影响
       this.onAgentMessage(frame);
     }
@@ -249,7 +256,7 @@ export class MatchConnection {
       // KiraAI 宿主握手失败（缺 token / token 失效）时也走 4003：不再重试。
       this.stopped = true;
       this._setStatus("stopped");
-      this.onNotice("连接已关闭（鉴权失败或插件已停用），请重新登录宿主 WebUI 后再试。");
+      this.onNotice(spectatorMode() ? "观战邀请已失效 / Spectator invitation expired" : "连接已关闭（鉴权失败或插件已停用），请重新登录宿主 WebUI 后再试。");
       return;
     }
     if (code === 4001 && !this.tokenRejected) {

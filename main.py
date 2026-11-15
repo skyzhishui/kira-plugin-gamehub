@@ -9,7 +9,7 @@ KiraAI extension points:
 - ``@on.im_message``-free notice-driven turns through ``ctx.publish_notice``.
 
 The runtime (rooms, table talk, judge, turn director) is assembled in
-``host/runtime.py``; the dedicated ``gamehub:dm:admin`` session is provisioned
+``host/runtime.py``; the shared ``gamehub:gm:room`` session is provisioned
 here because adapter registration resolves the calling plugin module.
 """
 
@@ -122,6 +122,7 @@ class GamehubPlugin(BasePlugin):
         self._api = None
         self._adapter_ready = False
         self._ready = False
+        self.spectator_server = None
 
     @property
     def rooms(self):
@@ -155,6 +156,16 @@ class GamehubPlugin(BasePlugin):
 
         await self._provision_adapter()
         await self._start_runtime()
+        if self.settings.spectator_enabled and self.rooms is not None:
+            from .host.spectator import SpectatorServer
+
+            self.spectator_server = SpectatorServer(self)
+            try:
+                await self.spectator_server.start()
+                logger.info("gamehub spectator listener started on port %s", self.spectator_server.port)
+            except Exception:
+                logger.error("gamehub spectator listener failed", exc_info=True)
+                self.spectator_server = None
 
         self._ready = True
         logger.info(
@@ -218,6 +229,9 @@ class GamehubPlugin(BasePlugin):
     async def terminate(self) -> None:
         """Stop accepting new work and release resources."""
         self._ready = False
+        if self.spectator_server is not None:
+            await self.spectator_server.stop()
+            self.spectator_server = None
         if self.runtime is not None:
             try:
                 await self.runtime.stop()
@@ -290,6 +304,12 @@ class GamehubPlugin(BasePlugin):
     # ------------------------------------------------------------------
     #  Per-turn injection
     # ------------------------------------------------------------------
+
+    @on.im_message(priority=99)
+    async def route_game_group(self, event):
+        from .host.group_chat import route_group_message
+
+        await route_group_message(self, event)
 
     @on.llm_request(priority=Priority.MEDIUM)
     async def inject_game_context(self, event, request, tag_set=None):
@@ -497,6 +517,23 @@ class GamehubPlugin(BasePlugin):
     async def api_control(self, match_id: str, seat: int | None = None):
         return await self._call(self.api.control(match_id, seat))
 
+    @register.api(method="POST", path="/matches/{match_id}/invite")
+    async def api_invite(self, match_id: str, body: dict[str, Any] | None = None):
+        if self.spectator_server is None:
+            return await self._call(self._invite_unavailable())
+        return await self._call(self._invite_response(match_id, body))
+
+    async def _invite_unavailable(self):
+        from .host.web import ApiError
+
+        raise ApiError(503, "观战服务未启动", "not_ready")
+
+    async def _invite_response(self, match_id, body):
+        from .host.web import envelope
+
+        origin = str((body or {}).get("origin") or "http://localhost")
+        return envelope({"url": await self.spectator_server.invite_url(match_id, origin)})
+
     @register.api(method="POST", path="/matches/{match_id}/actions")
     async def api_actions(
         self,
@@ -559,9 +596,9 @@ class GamehubPlugin(BasePlugin):
         return FileResponse(str(path))
 
     @register.api(method="GET", path="/chat")
-    async def api_chat_history(self, limit: int = 100):
+    async def api_chat_history(self, limit: int = 100, match_id: str | None = None):
         """Match-page chat window: recent lines + enabled flag."""
-        return await self._call(self.api.chat_history(limit))
+        return await self._call(self.api.chat_history(limit, match_id))
 
     @register.api(method="POST", path="/chat")
     async def api_chat_send(self, body: dict[str, Any] | None = None):

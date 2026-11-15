@@ -26,6 +26,8 @@ export const ERROR_TEXT = {
   match_full: { zh: "对局席位已满", en: "This match is full." },
   stale_version: { zh: "棋局版本已更新，请同步后再操作", en: "The board changed; refresh and try again." },
   internal: { zh: "插件内部错误", en: "Internal plugin error." },
+  invite_expired: { zh: "观战邀请已失效", en: "This spectator invitation has expired." },
+  rename_lobby_only: { zh: "请在游戏大厅修改玩家昵称", en: "Change your player nickname in the lobby." },
 };
 
 const GENERIC = { zh: "出现了一个小问题，请重试", en: "Something went wrong. Please retry." };

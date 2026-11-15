@@ -193,26 +193,29 @@ class GamehubRuntime:
         text = str(text or "").strip()
         if not text:
             return
+        if sid != GAME_SID:
+            return
         # Record the reply for the match-page chat window read model (the
         # player line is recorded by the POST /chat endpoint; this is the
         # agent side). Cosmetic on failure: the WS broadcast still goes out.
-        line: dict[str, Any] | None = None
-        if self.store is not None:
-            try:
-                line = await self.store.chat_append(
-                    "agent", self.plugin.host_agent_name or "AI", text
-                )
-            except Exception:  # noqa: BLE001 - history must not break delivery
-                logger.debug("gamehub: chat record failed", exc_info=True)
         # The frame carries the stored line's id/ts when available: the page
         # keys WS rows and reconnect backfills by the same id, so a refresh
         # after a reconnect can never duplicate a reply.
         for room in self.rooms.active_rooms() if self.rooms is not None else []:
+            scoped = None
+            if self.store is not None:
+                try:
+                    scoped = await self.store.chat_append(
+                        "agent", self.plugin.host_agent_name or "AI", text,
+                        match_id=room.match.id,
+                    )
+                except Exception:
+                    logger.debug("gamehub: chat record failed", exc_info=True)
             await ws_hub.broadcast(room.match.id, {
                 "type": "agent_message",
                 "sid": sid,
                 "text": text,
-                **({"id": line["id"], "ts": line["ts"]} if line else {}),
+                **({"id": scoped["id"], "ts": scoped["ts"]} if scoped else {}),
             })
 
     @staticmethod

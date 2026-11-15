@@ -1,4 +1,4 @@
-"""Internal adapter backing the dedicated ``gamehub:dm:admin`` session.
+"""Internal adapter backing the shared ``gamehub:gm:room`` group session.
 
 The adapter is not a chat platform. It exists so notices can drive the host
 agent inside a session that is isolated from the user's real WebChat session,
@@ -25,7 +25,7 @@ NAME = "gamehub"
 
 
 class GamehubIMCapability(IMCapability):
-    """Minimal IM surface: direct messages are forwarded to the plugin runtime."""
+    """Forward native room group replies to the plugin runtime."""
 
     _SUPPORTED_ELEMENTS = ["text", "img", "record", "video", "file", "sticker", "reply"]
 
@@ -41,7 +41,8 @@ class GamehubIMCapability(IMCapability):
     async def send_group_message(
         self, group_id: AdapterTargetId, message: MessageChain,
     ) -> KiraIMSentResult:
-        return KiraIMSentResult(ok=False, err="Game Hub supports direct messages only")
+        await emit_outbound(f"{NAME}:gm:{group_id}", message)
+        return KiraIMSentResult(ok=True)
 
 
 class GamehubAdapter(BaseAdapter):

@@ -42,6 +42,34 @@
       }
     }
   },
+  "section_spectator": {
+    "type": "section",
+    "name": "Spectator Server",
+    "collapsed": false,
+    "locales": {"zh": {"name": "独立观战服务"}},
+    "fields": {
+      "spectator_enabled": {
+        "type": "boolean", "name": "Enable Spectator Listener", "default": true,
+        "hint": "Invitation-only spectator access on a separate listener. Restart the plugin after changing these settings.",
+        "locales": {"zh": {"name": "开启独立观战服务", "hint": "独立端口提供邀请制观战；修改本组设置后需重载插件。"}}
+      },
+      "spectator_host": {
+        "type": "string", "name": "Listen Address", "default": "0.0.0.0",
+        "hint": "Use 127.0.0.1 behind a local HTTPS reverse proxy; 0.0.0.0 permits LAN access.",
+        "locales": {"zh": {"name": "监听地址", "hint": "局域网直连使用 0.0.0.0；本机 HTTPS 反代可使用 127.0.0.1。"}}
+      },
+      "spectator_port": {
+        "type": "integer", "name": "Listen Port", "default": 0,
+        "hint": "0 = host WebUI port + 10000 (normally 15267). Must differ from the host port and not exceed 65535.",
+        "locales": {"zh": {"name": "监听端口", "hint": "0 自动使用宿主 WebUI 端口 +10000（通常为 15267）；须与宿主端口不同且不超过 65535。"}}
+      },
+      "spectator_public_url": {
+        "type": "string", "name": "Public Spectator URL", "default": "",
+        "hint": "Optional HTTPS origin, e.g. https://watch.example.com. Empty uses the browser hostname and spectator port over HTTP.",
+        "locales": {"zh": {"name": "观战公开地址", "hint": "可填写独立 HTTPS 域名，例如 https://watch.example.com；留空使用浏览器主机名与观战端口（HTTP）。"}}
+      }
+    }
+  },
   "section_ai": {
     "type": "section",
     "name": "Model & Decision",

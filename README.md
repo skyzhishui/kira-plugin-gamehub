@@ -32,7 +32,7 @@ The plugin then appears in the WebUI sidebar as **游戏中心 / Game Hub**.
 | `talk.py` / `notice_judge.py` | Table talk and the local key-event judge (no external judge) |
 | `tools.py` / `tools_turn.py` | Chat tools and request-scoped turn tools |
 | `host/` | Everything that touches the KiraAI host (store, notices, prompt, web, avatar) |
-| `adapter/` | The internal `gamehub` IM adapter backing `gamehub:dm:admin` |
+| `adapter/` | The internal `gamehub` IM adapter backing the shared `gamehub:gm:room` group |
 | `web/` | The lobby and match pages (native ESM, no build step) |
 
 ## Driving the match

@@ -76,13 +76,14 @@ export function normalizeMessage(raw) {
   if (!raw || typeof raw !== "object") return null;
   const text = String(raw.text == null ? "" : raw.text).trim();
   if (!text) return null;
-  const role = raw.role === "agent" ? "agent" : "player";
+  const role = raw.role === "agent" ? "agent" : raw.role === "spectator" ? "spectator" : "player";
   const ts = toMs(raw.ts);
   const id = raw.id != null && String(raw.id) !== "" ? String(raw.id) : `x:${role}|${ts}|${text}`;
   return {
     id,
     ts,
     role,
+    ...(raw.uid ? { uid: String(raw.uid) } : {}),
     sender: String(raw.sender == null ? "" : raw.sender).trim(),
     text,
   };
@@ -244,6 +245,7 @@ export function createChatPanel({
   onError = null,
   storage = defaultStorage(),
   now = () => Date.now(),
+  matchId = "",
 } = {}) {
   /* ---- 内部状态 ---- */
   let list = [];
@@ -462,7 +464,7 @@ export function createChatPanel({
 
   async function load() {
     try {
-      const data = await api(`/chat?limit=${CHAT_PAGE_LIMIT}`);
+      const data = await api(`/chat?limit=${CHAT_PAGE_LIMIT}${matchId ? `&match_id=${encodeURIComponent(matchId)}` : ""}`);
       if (data && typeof data === "object") {
         apiEnabled = data.enabled === false ? false : data.enabled === true ? true : apiEnabled;
         renderInput();
@@ -497,7 +499,7 @@ export function createChatPanel({
     hintError = "";
     renderInput();
     try {
-      const data = await api("/chat", { method: "POST", body: { text } });
+      const data = await api(`/chat${matchId ? `?match_id=${encodeURIComponent(matchId)}` : ""}`, { method: "POST", body: { text, ...(matchId ? { match_id: matchId } : {}) } });
       const msg = data && data.message ? data.message : null;
       // 只清掉已提交的文本（提交期间用户可能又打了字）
       if (clampChatText(input.value).trim() === text) input.value = "";
@@ -601,6 +603,7 @@ export function createChatPanel({
    * 归并——重连补拉同一条回复不会重复；无 id 的旧帧保持合成键 + 同文本 2s 去重。 */
   function onAgentMessage(frame) {
     if (!frame || typeof frame !== "object") return false;
+    if (frame.type === "chat_message") return ingest([frame]) > 0;
     const text = String(frame.text == null ? "" : frame.text).trim();
     if (!text) return false;
     const sender = String(getAgentName() || CHAT_TEXT.agent);
@@ -624,7 +627,7 @@ export function createChatPanel({
    * 与 load() 的区别：失败静默（下一次建连再试），不渲染加载失败提示。 */
   async function refresh() {
     try {
-      const data = await api(`/chat?limit=${CHAT_PAGE_LIMIT}`);
+      const data = await api(`/chat?limit=${CHAT_PAGE_LIMIT}${matchId ? `&match_id=${encodeURIComponent(matchId)}` : ""}`);
       if (!data || typeof data !== "object") return;
       apiEnabled = data.enabled === false ? false : data.enabled === true ? true : apiEnabled;
       renderInput();

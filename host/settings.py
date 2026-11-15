@@ -61,6 +61,10 @@ DEFAULTS: dict[str, Any] = {
     "practice_name": "小白",
     "max_active_matches": 50,
     "site_base_url": "",
+    "spectator_enabled": True,
+    "spectator_host": "0.0.0.0",
+    "spectator_port": 0,
+    "spectator_public_url": "",
     # page session
     "page_chat_enabled": True,
     "page_chat_talk_default": "judge",
