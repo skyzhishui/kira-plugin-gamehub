@@ -55,6 +55,7 @@ try:  # production: plugin package (``plugins.<plugin>.context``)
     from .engine import games
     from .engine.match import status_of
     from .modes import ROLE_TEAMMATE
+    from .naming import play_tool_name
     from .plan import normalize_plan_text, plan_remaining
     from .talk import _safe
 except ImportError:  # standalone tests import modules as top-level
@@ -63,6 +64,7 @@ except ImportError:  # standalone tests import modules as top-level
     from engine import games
     from engine.match import status_of
     from modes import ROLE_TEAMMATE
+    from naming import play_tool_name
     from plan import normalize_plan_text, plan_remaining
     from talk import _safe
 
@@ -77,7 +79,8 @@ except ImportError:  # standalone tests outside the host: a plain stdlib logger
 # Defensive only — both entry paths (chat ``game_new`` and the WebUI lobby)
 # enforce one active match per actor.
 MAX_MATCHES = 4
-# Whole-block character cap (global constraints and the omission tail reserved).
+# Match-block character cap (the short-lived stage-event section is appended
+# after the budget and therefore not covered by this cap).
 MAX_BLOCK_CHARS = 4000
 # Recent moves shown per match in the summary "局势" line (coordinates only
 # for answering questions); the full payload shows RECENT_TURNS instead.
@@ -402,8 +405,9 @@ def _turn_requirements(plugin: Any, match: Any, grant: Any) -> str:
     request; budget degradation keeps it while shrinking the board payload.
     """
     match_id = str(getattr(match, "id", "") or "")
-    safe = "".join(ch for ch in match_id if ch.isalnum())[:24] or "turn"
-    play = f"play_{safe}"
+    # Same sanitiser the tag/tool surface registers (shared leaf module): a
+    # drifting copy here would teach the model a name nobody matches.
+    play = play_tool_name(match_id)
     seat = getattr(grant, "seat", None)
     kind = str(getattr(grant, "kind", "") or "")
     seats = list(getattr(match, "seats", None) or [])
@@ -412,7 +416,9 @@ def _turn_requirements(plugin: Any, match: Any, grant: Any) -> str:
     label = _label(labels, seat_index)
     seat_name = ""
     if seat_index is not None and 0 <= seat_index < len(seats):
-        seat_name = str(getattr(seats[seat_index], "name", "") or "")
+        # Seat names are user-controlled (``game_new(name=)``): they must not
+        # be able to forge a system block inside the authorization section.
+        seat_name = _safe(str(getattr(seats[seat_index], "name", "") or ""))
     who = _bot_name(plugin)
     if kind == _GRANT_DELEGATED:
         identity = (
@@ -692,14 +698,7 @@ def _bot_name(plugin: Any) -> str:
     host = str(getattr(plugin, "host_agent_name", "") or "").strip()
     if host:
         return _safe(host)
-    getter = getattr(plugin, "bot_nickname", None)
-    if isinstance(getter, str) and getter.strip():
-        return _safe(getter)
-    ctx = getattr(plugin, "ctx", None)
-    bot_config = getattr(ctx, "bot_config", None)
-    bot = getattr(bot_config, "bot", None)
-    name = str(getattr(bot, "nickname", "") or "").strip()
-    return _safe(name) if name else "你"
+    return "你"
 
 
 def _header_lines(plugin: Any, match: Any, *, grant: Any = None) -> list[str]:
@@ -826,7 +825,7 @@ def _describe_room(
 
     lines = _header_lines(plugin, match, grant=grant)
 
-    recent = _recent_moves(seats, match, teammate=teammate)
+    recent = _recent_moves(seats, match)
     if recent:
         lines.append(
             "- 局势（以下坐标仅供你回答用户主动询问时参考，不要主动播报）："
@@ -868,7 +867,9 @@ def _chat_snapshot(match: Any, viewer_seat: int | None) -> str:
     if not callable(hook):
         return ""
     names = [
-        str(getattr(s, "name", "") or "")
+        # Seat names are user-controlled; the module renders them verbatim
+        # into the board header, so they must be neutralised here too.
+        _safe(str(getattr(s, "name", "") or ""))
         for s in (getattr(match, "seats", None) or [])
     ]
     try:
@@ -884,18 +885,16 @@ def _chat_snapshot(match: Any, viewer_seat: int | None) -> str:
     return value.strip()
 
 
-def _player_name(seat: Any, fallback: str = "棋手", *, teammate: bool = False) -> str:
-    """Seat display name: prefer the stored seat name.
+def _player_name(seat: Any, fallback: str = "棋手") -> str:
+    """Seat display name: prefer the stored seat name, then a fallback.
 
     Seat names are resolved by the room layer (the host AI seat carries the
     active persona name, the agent seat carries the configured game_agent
-    name), so this never invents one. A non-human seat without a stored name
-    falls back to 「对手」.
+    name), so this never invents one. An unnamed AI seat falls back to
+    「对手」; any other unnamed seat uses the caller's ``fallback``.
     """
     if getattr(seat, "kind", "") == "ai":
-        return _safe(
-            getattr(seat, "name", "") or "对手"
-        )
+        return _safe(getattr(seat, "name", "") or "对手")
     return _safe(getattr(seat, "name", "") or fallback)
 
 
@@ -910,7 +909,7 @@ def _turn_text(
     names = []
     for seat in waiting:
         if isinstance(seat, int) and 0 <= seat < len(seats):
-            name = _player_name(seats[seat], f"座位{seat}", teammate=teammate)
+            name = _player_name(seats[seat], f"座位{seat}")
             if isinstance(grant_seat, int) and seat == grant_seat:
                 # The granted seat is the reader: say so in the acting voice.
                 name = (
@@ -924,13 +923,13 @@ def _turn_text(
     return "轮到 " + "、".join(names) if names else "等待中"
 
 
-def _recent_moves(seats: list[Any], match: Any, *, teammate: bool = False) -> list[str]:
+def _recent_moves(seats: list[Any], match: Any) -> list[str]:
     shown = []
     for entry in list(getattr(match, "log", None) or [])[-MAX_RECENT_MOVES:]:
         seat = getattr(entry, "seat", -1)
         valid = isinstance(seat, int) and 0 <= seat < len(seats)
         who = (
-            _player_name(seats[seat], f"座位{seat}", teammate=teammate)
+            _player_name(seats[seat], f"座位{seat}")
             if valid
             else "棋手"
         )

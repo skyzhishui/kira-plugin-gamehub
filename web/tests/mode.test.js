@@ -13,13 +13,10 @@
  * 5) 文案约束：用户可见文案不出现技术词；宿主身份一律来自 getHostAgentName()，
  *    模板里的 HOST_PLACEHOLDER（"AI"）渲染时才落成宿主名，不写死任何身份词。
  *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   supportsModes,
@@ -34,7 +31,6 @@ import {
   getHostAgentName,
   setHostAgentName,
   modeOf,
-  driverOf,
   isPractice,
   delegatedOf,
   matchOver,
@@ -608,24 +604,4 @@ test("陪练显示名：practiceNameText 服务端优先，缺席兜底「陪练
   assert.equal(practiceNameText("  小蓝  "), "小蓝");
   assert.equal(practiceNameText(""), "陪练");
   assert.equal(practiceNameText(null), "陪练");
-});
-
-/* ---------------- match.js 接线：三人桌当轮座位（终局 null 防御） ---------------- */
-
-const matchModeSrc = fs.readFileSync(
-  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "match.js"),
-  "utf8"
-);
-
-test("waitingOnSeat：终局 view.turn=null 不得映射成座位 0（+null===0 防御）", () => {
-  const fn = matchModeSrc.match(/function waitingOnSeat\(match\) \{[\s\S]*?\n\}/);
-  assert.ok(fn, "缺少 waitingOnSeat");
-  assert.match(fn[0], /v\.turn != null/, "turn=null（三人桌终局/发牌间隙）必须直接跳过");
-  assert.match(
-    fn[0],
-    /\(\+v\.turn >= 2 \|\| isThreeSeatMatch\(match\)\)/,
-    "三人桌回合来源保留 view.turn"
-  );
-  // 回归背景：斗地主终局 view.turn 为 null，+null===0 且 Number.isInteger(0) 为真，
-  // 原实现会把「无人在等」误判为「等座位 0」；onToggleDelegate 无 !over 守卫可触达。
 });

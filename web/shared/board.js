@@ -10,9 +10,14 @@
  * - 视图兼容：last/winLine 接受 索引 | [x,y] | {x,y} | "H8" 字符串
  */
 
-/* GTP 列字母：跳过 I（与后端 engine/coords.py 的 COLUMNS 完全一致）。
- * 编码/解码/坐标标签三处必须用同一套映射，否则 J 列之后会整体错位一格，
- * 且 I 列会变成后端无法解析的非法坐标。 */
+/* GTP column letters: start at A, skip I.
+ * Note this is a **superset** of the backend: engine/coords.py COLUMNS is A..T
+ * (19 columns), while the front end keeps the historical fixed alphabet up to Z
+ * (25 columns). The first 19 positions match character for character, so coordinate
+ * encoding within 19 lines is exactly equivalent, including the no-I rule.
+ * Encoding, decoding and coordinate labels must all use this one mapping; otherwise
+ * every column past J shifts by one and I becomes an illegal coordinate the backend
+ * cannot parse. */
 export const GTP_COLUMNS = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
 
 export function gtpXOf(ch) {

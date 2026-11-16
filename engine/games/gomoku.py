@@ -19,16 +19,9 @@ from ..types import (
     PlayerSpec,
     Seat,
 )
+from .common import color_of, seat_of
 
 _DIRS = ((1, 0), (0, 1), (1, 1), (1, -1))
-
-
-def color_of(seat: Seat) -> int:
-    return 1 if seat == 0 else 2
-
-
-def seat_of(color: int) -> Seat:
-    return color - 1
 
 
 def _five_through(cells: list[int], size: int, p: int, color: int) -> list[int] | None:
@@ -417,9 +410,11 @@ def threat_summary(state: dict[str, Any], seat: Seat) -> str:
     - 跳三（``XX_X`` / ``X_XX`` 型，补点坐标）；
     - 眠三（连续三但只有单端可延伸，属可防的三，单列一行）。
 
-    每类存在即各输出一条，不合并计数。「双活三信号」只表示多个独立方向
-    各有连续活三，**未验证这些活三是否由同一落点形成严格双三**；该检测
-    不覆盖跳四/其它复合棋形。仅反映当前盘面，不覆盖 seat.plan。
+    检测是**棋形模式**判定，不是穷举：两端都被堵死的三（如 ``X.BBB.X``）
+    不计入眠三，复合棋形也只按上述模式识别。每类存在即各输出一条，不合并
+    计数。「双活三信号」只表示多个独立方向各有连续活三，**未验证这些活三
+    是否由同一落点形成严格双三**；该检测不覆盖跳四/其它复合棋形。仅反映
+    当前盘面，不覆盖 seat.plan。
     """
     size = int(state.get("size") or 15)
     cells = list(state.get("cells") or [])
@@ -518,7 +513,16 @@ def analyze(state: dict[str, Any]) -> dict[str, Any]:
     size = int(state.get("size") or 15)
     cells = list(state.get("cells") or [])
     if len(cells) != size * size:
-        return {"moves": 0, "to_play": 0, "win": False, "threats": {}}
+        # Malformed board: keep the same shape as the normal return so callers
+        # never have to special-case missing ``last``/``full`` keys.
+        return {
+            "moves": 0,
+            "to_play": 0,
+            "last": "",
+            "win": False,
+            "full": False,
+            "threats": {},
+        }
     last = state.get("last")
     return {
         "moves": int(state.get("moves") or 0),
@@ -598,10 +602,10 @@ def key_events(
             flags["open_four"] = True  # 双头四 / 双四：挡不住
         elif len(after_wins) >= 1:
             flags["four"] = True  # 单四：对手必须应
-    elif len(after_wins) >= 2 and len(before_wins) < 2:
-        # 本手把已有单四升级/转移成双威胁；即时成五点集合与 before 相同
-        # 也算新增（例如唯一成五点被转移，但数量变多）。
-        flags["open_four"] = True
+    # NOTE: there is no "upgrade/transfer" branch here. When
+    # ``after_wins - before_wins`` is empty the after set is a subset of the
+    # before set, so ``len(after_wins) >= 2 and len(before_wins) < 2`` cannot
+    # hold — such a branch is unreachable by construction.
 
     if before_cells is not None:
         before_block = set(winning_points(_state_of(before_cells, size), opponent))
@@ -724,6 +728,30 @@ class Gomoku(GameModule):
             "moves": 0,
         }
 
+    def validate_state(self, state: dict[str, Any]) -> str:
+        """Shape probe for persisted snapshots (not a rules check)."""
+        if not isinstance(state, dict):
+            return "state 不是对象"
+        size = state.get("size")
+        if type(size) is not int or size < 1:
+            return "state.size 非法"
+        cells = state.get("cells")
+        if not isinstance(cells, list) or len(cells) != size * size:
+            return "state.cells 长度不符"
+        if not all(type(value) is int and value in (0, 1, 2) for value in cells):
+            return "state.cells 取值非法"
+        if state.get("toPlay") not in (1, 2):
+            return "state.toPlay 非法"
+        if type(state.get("moves")) is not int:
+            return "state.moves 非法"
+        win_line = state.get("winLine")
+        if win_line is not None and (
+            not isinstance(win_line, list) or not win_line
+            or not all(type(p) is int and 0 <= p < len(cells) for p in win_line)
+        ):
+            return "state.winLine 非法"
+        return ""
+
     def apply(self, state: dict[str, Any], seat: Seat, move: str) -> MoveResult:
         if state.get("winLine") or state.get("full"):
             return MoveResultErr("对局已经结束")
@@ -759,7 +787,21 @@ class Gomoku(GameModule):
     def outcome(self, state: dict[str, Any]) -> Outcome | None:
         win_line = state.get("winLine")
         if win_line:
-            winner = state["cells"][win_line[0]]
+            cells = state.get("cells")
+            point = (
+                win_line[0]
+                if isinstance(win_line, (list, tuple)) and win_line
+                else None
+            )
+            if (
+                not isinstance(cells, list)
+                or type(point) is not int
+                or not 0 <= point < len(cells)
+                or cells[point] not in (1, 2)
+            ):
+                # Corrupt persisted win line: stay terminal rather than revive.
+                return Outcome(winners=[], text="对局数据异常")
+            winner = cells[point]
             return Outcome(
                 winners=[seat_of(winner)],
                 text=f"{'黑' if winner == 1 else '白'}连五",

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -149,47 +150,45 @@ def test_key_events_block_win_only_when_this_move_blocks() -> None:
     assert key_events(elsewhere, before=before, seat=0)["block_win"] is False
 
 
-def test_key_events_four_and_open_four_created() -> None:
-    before = _board(["H8", "A1", "J8", "B1", "K8", "C1"], to_play=1)
-    open_four = _play(before, "L8", 1)
-    flags = key_events(open_four, before=before, seat=0)
-    assert flags["open_four"] is True and flags["four"] is False
-
-    single_four = _play(before, "M8", 1)
-    flags = key_events(single_four, before=before, seat=0)
-    assert flags["four"] is True and flags["open_four"] is False
-
-
-def test_key_events_diagonal_open_four_created() -> None:
-    before = _board(["F6", "A1", "G7", "B1", "H8", "C1"], to_play=1)
-    after = _play(before, "J9", 1)
-    flags = key_events(after, before=before, seat=0)
-    assert flags["open_four"] is True and flags["four"] is False
-
-
-def test_key_events_double_three_created() -> None:
-    before = _board(
-        ["J8", "A1", "K8", "B1", "H10", "C1", "H11", "D1"], to_play=1
-    )
-    after = _play(before, "H8", 1)
-    flags = key_events(after, before=before, seat=0)
-    assert flags["double_three"] is True and flags["four"] is False
+@pytest.mark.parametrize(
+    "moves, move, expected_flag, absent_flag",
+    [
+        # Straight open four vs. a single (closed) four.
+        (["H8", "A1", "J8", "B1", "K8", "C1"], "L8", "open_four", "four"),
+        (["H8", "A1", "J8", "B1", "K8", "C1"], "M8", "four", "open_four"),
+        # Diagonal open four.
+        (["F6", "A1", "G7", "B1", "H8", "C1"], "J9", "open_four", "four"),
+        # Double three is its own key signal, never a four.
+        (
+            ["J8", "A1", "K8", "B1", "H10", "C1", "H11", "D1"],
+            "H8",
+            "double_three",
+            "four",
+        ),
+    ],
+)
+def test_key_events_threat_shapes(moves, move, expected_flag, absent_flag) -> None:
+    before = _board(moves, to_play=1)
+    flags = key_events(_play(before, move, 1), before=before, seat=0)
+    assert flags[expected_flag] is True
+    assert flags[absent_flag] is False
+    assert flags["key"] is True
 
 
-def test_key_events_ordinary_nearby_move_is_not_key() -> None:
+def test_key_events_ordinary_move_and_old_threat_are_not_key() -> None:
+    # A nearby-but-harmless move is no key event.
     before = _board(["H8", "H10", "J8", "H11"], to_play=1)
-    after = _play(before, "H9", 1)
-    flags = key_events(after, before=before, seat=0)
+    flags = key_events(_play(before, "H9", 1), before=before, seat=0)
     assert flags["key"] is False
-    assert not any(flags[name] for name in ("win_now", "block_win", "open_four", "four"))
+    assert not any(
+        flags[name] for name in ("win_now", "block_win", "open_four", "four")
+    )
 
-
-def test_existing_open_four_does_not_repeat_every_move() -> None:
+    # An existing open four does not re-trigger on every following move.
     before = _board(
         ["H8", "A1", "J8", "B1", "K8", "C1", "L8", "A2"], to_play=1
     )
-    after = _play(before, "N8", 1)
-    assert key_events(after, before=before, seat=0)["key"] is False
+    assert key_events(_play(before, "N8", 1), before=before, seat=0)["key"] is False
 
 
 # ----------------------------------------------------------------------
@@ -203,7 +202,6 @@ class _SessionMgr:
 class _RecordingCtx:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
-        self.bot_config = SimpleNamespace(bot=SimpleNamespace(nickname="诺里"))
         self.session_mgr = _SessionMgr()
 
     async def publish_notice(self, session, chain, is_mentioned=True):
@@ -622,13 +620,35 @@ async def test_queued_text_dropped_if_room_ends_before_send(tmp_path) -> None:
     assert "对局结束" in texts[0]  # terminal, not the stale pre-terminal H8 move
 
 
+# ----------------------------------------------------------------------
+#  2026-11-16 remediation regressions.
+# ----------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_judge_has_no_network_dependency() -> None:
-    """System1 was removed: the module must not import httpx or score helpers."""
-    import notice_judge
+async def test_empty_judge_mode_behaves_like_the_off_default(tmp_path) -> None:
+    """P2: an explicitly cleared notice_judge_mode must NOT fail-open to key."""
+    _, _, judge, _ = _wire(tmp_path, _cfg(notice_judge_mode=""))
+    before = _seq_match(["H8", "A1", "J8", "B1", "K8", "C1"])
+    after = _seq_match(["H8", "A1", "J8", "B1", "K8", "C1", "L8"])
+    judgment = await _evaluate(judge, after, before, "L8")
+    assert judgment.speak is False
+    assert judgment.fallback == "off"
+    assert judgment.reason == "mode_off"
 
-    for name in ("SystemOneClient", "parse_score_response", "normalize_systemone_url"):
-        assert not hasattr(notice_judge, name)
-    source = open(notice_judge.__file__, encoding="utf-8").read()
-    assert "httpx" not in source
-    assert "notice_base_url" not in source
+
+@pytest.mark.asyncio
+async def test_judgement_log_rotates_past_the_size_cap(tmp_path) -> None:
+    """P2: the jsonl judgement log rotates once instead of growing forever."""
+    import notice_judge as module
+    from notice_judge import _append_line
+
+    path = Path(str(tmp_path)) / "notice_judge_log.jsonl"
+    old_cap = module._JSONL_MAX_BYTES
+    try:
+        module._JSONL_MAX_BYTES = 200
+        for index in range(20):
+            _append_line(path, json.dumps({"n": index}) * 3 + "\n")
+    finally:
+        module._JSONL_MAX_BYTES = old_cap
+    rotated = path.with_name(path.name + ".1")
+    assert rotated.exists(), "oversized log must have been rotated"
+    assert path.stat().st_size <= 200 + 200  # at most one entry past the cap

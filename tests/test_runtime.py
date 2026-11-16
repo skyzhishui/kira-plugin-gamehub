@@ -21,6 +21,9 @@ from typing import Any
 
 import pytest
 
+from host.settings import Settings
+from room import CLOSE_STOPPING
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "gamehub_under_test"
 
@@ -83,10 +86,11 @@ class _Service:
     def stop(self) -> None: ...
     def attach_judge(self, judge) -> None: ...
 
+    def on_event(self, room, event) -> None:
+        """Room-event consumer stand-in (the real TableTalk is async)."""
+
 
 def _settings(**overrides: Any):
-    from host.settings import Settings
-
     base = {
         "agent_name": "nori",
         "practice_name": "小白",
@@ -158,3 +162,90 @@ async def test_refresh_host_name_propagates_to_the_rooms(runtime_factory):
     assert await runtime.refresh_host_name() == "阿狸"
     assert plugin.host_agent_name == "阿狸"
     assert plugin._rooms.bot_name == "阿狸"
+
+
+# ----------------------------------------------------------------------
+#  P1-9 regression: stop() must end with stopping → producers (incl. room
+#  drive tasks) → flush_all → close_all → store.close; close truly
+#  unblocks receive.
+# ----------------------------------------------------------------------
+class _FakeWS:
+    def __init__(self) -> None:
+        self.closed: tuple[int, bytes] | None = None
+
+    async def send_json(self, payload) -> None: ...
+
+    async def close(self, code: int = 1000, message: bytes = b"") -> None:
+        self.closed = (code, message)
+
+
+async def test_stop_flushes_closes_ws_then_store(runtime_factory, monkeypatch):
+    plugin, runtime = await runtime_factory("汐祈（Seki）")
+    rooms = runtime.rooms
+    store = runtime.store
+
+    room, _seat, _token = await rooms.create(
+        kind="gomoku", actor="alice", session_id="s-alice", name="alice"
+    )
+    ws = _FakeWS()
+    await room.attach(ws, 0)
+
+    # Track a dirty room so flush_all matters, and record call order.
+    order: list[str] = []
+    original_flush = rooms.flush_all
+
+    async def traced_flush():
+        order.append("flush_all")
+        return await original_flush()
+
+    monkeypatch.setattr(rooms, "flush_all", traced_flush)
+    original_close = store.close
+
+    async def traced_close():
+        order.append("store_close")
+        await original_close()
+
+    monkeypatch.setattr(store, "close", traced_close)
+
+    await runtime.stop()
+
+    assert plugin.stopping is True
+    # Every cached room (incl. over rooms) got CLOSE_STOPPING on its sockets.
+    assert ws.closed is not None and ws.closed[0] == CLOSE_STOPPING
+    # flush_all and close_all both ran, and the store closed strictly last.
+    assert "flush_all" in order and "store_close" in order
+    assert order[-1] == "store_close"
+
+
+async def test_stop_cancels_in_flight_drive_tasks(runtime_factory):
+    plugin, runtime = await runtime_factory(None)
+    rooms = runtime.rooms
+    # A practice match whose bot seat owes a paced move = a live drive task.
+    room, _seat, _token = await rooms.create(
+        kind="gomoku",
+        actor="alice",
+        session_id="s-alice",
+        name="alice",
+        mode_options={"mode": "bot", "difficulty": "easy", "delegation": False},
+    )
+    await room.kick_ai()
+    await runtime.stop()
+    assert not room._drive_tasks or all(t.done() or t.cancelled() for t in room._drive_tasks)
+    assert not room._bot_tasks or all(t.done() or t.cancelled() for t in room._bot_tasks)
+
+
+async def test_stop_on_partially_started_runtime_is_safe(tmp_path):
+    """start() may fail midway: stop() only touches what exists."""
+    runtime_module = _load_runtime()
+    plugin = _Plugin("汐祈（Seki）", tmp_path)
+    runtime = runtime_module.GamehubRuntime(plugin)
+    # Nothing was started at all.
+    await runtime.stop()
+    assert plugin.stopping is True
+    # Partial start: only the store exists; rooms/director/talk stay None.
+    from host.store import MatchStore
+
+    runtime.store = MatchStore(tmp_path)
+    await runtime.store.init()
+    await runtime.stop()
+    assert runtime._started is False

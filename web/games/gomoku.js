@@ -9,8 +9,9 @@
 import { GomokuBoard, GTP_COLUMNS, gtpXOf } from "../shared/board.js";
 
 export function coordName(x, y, size) {
-  // 列名必须跳过 I（与后端 COLUMNS 一致）；否则 x>=8 会被后端解析到左边一格，
-  // x===8 直接变成非法坐标（后端提示「看不懂这步：I8」）。
+  // Column letters must skip I (same alphabet as the backend); otherwise x>=8 lands
+  // one column to the left on the backend and x===8 becomes an illegal coordinate
+  // (the backend reports it cannot parse the move: I8).
   return `${GTP_COLUMNS[x] || "?"}${size - y}`;
 }
 
@@ -24,7 +25,7 @@ export function parseCoord(text, size) {
 }
 
 /** 观棋者执子：view.you（1|2）优先，回退座位号 me+1；观战返回 0 */
-export function stoneOf(match, view) {
+function stoneOf(match, view) {
   const you = view ? +view.you : 0;
   if (you === 1 || you === 2) return you;
   const me = match && typeof match.me === "number" ? match.me : -1;

@@ -63,7 +63,6 @@ The most relevant ones:
   host default LLM.
 - `ai_mode` — `agent` (LLM) or `bot` (rules only).
 - `notice_target_session_id` — where table talk and turn notices are delivered.
-- `agent_avatar` — optional local avatar file; the WebUI can also upload one.
 
 ## i18n
 
@@ -75,8 +74,11 @@ host language (`localStorage["language"]`).
 
 ```bash
 python -m pytest tests -q     # engine + host integration tests
-cd web && node --test tests/   # front-end unit tests
+cd web && node --test         # front-end unit tests (POSIX & Windows)
 ```
+
+`tests/conftest.py` creates the plugin's untracked `data/` scratch directory
+before any host import, so a fresh clone runs out of the box.
 
 ## Docs
 

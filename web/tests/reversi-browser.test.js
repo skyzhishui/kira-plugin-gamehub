@@ -8,7 +8,7 @@
  * 4) 动效去重：同一局面重放不重播；新一手触发翻子动画；reduced-motion 不崩；
  * 5) 销毁：canvas 移除、计数条复位（destroy 幂等）。
  *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";

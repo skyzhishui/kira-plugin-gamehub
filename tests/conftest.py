@@ -13,6 +13,9 @@ import pytest
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
+# Host loggers open data/log.log during import, including on a fresh clone.
+(_PLUGIN_ROOT / "data").mkdir(parents=True, exist_ok=True)
+
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
@@ -31,12 +34,7 @@ def _instant_bot_pacing(monkeypatch):
         monkeypatch.setattr(room, "DEFAULT_BOT_DELAY_S", (0.0, 0.0))
     except ImportError:  # pragma: no cover - room always importable in this suite
         pass
-    try:
-        import game_agent
-
-        monkeypatch.setattr(game_agent, "BOT_DELAY_S", (0.0, 0.0))
-    except ImportError:  # pragma: no cover - game_agent always importable here
-        pass
+    # Both room and agent pacing now use the shared room delay parser.
     try:
         from host import settings as host_settings
 

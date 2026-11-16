@@ -24,6 +24,7 @@ import {
   kindLabel,
   matchHref,
   enterControl,
+  GAME_NAMES,
 } from "./shared/matches.js";
 import {
   supportsModes,
@@ -35,7 +36,6 @@ import {
   personaNameText,
   practiceNameText,
   setAgentAvatar,
-  getAgentAvatar,
   levelHint,
   LEVEL_VALUES,
   LEVEL_LABELS,
@@ -47,15 +47,15 @@ import {
   lineupHint,
   normalizeLineup,
   noriSeatOf,
+  turnSeatOf,
   seatDisplay,
   AGENT_AVATAR_URL,
 } from "./shared/mode.js";
 import { cardCoverCandidates } from "./games/registry.js";
+import { onRadioKey, applyRadioState } from "./shared/radiogroup.js";
 import "./shared/atmo.js";
 
 const $ = (id) => document.getElementById(id);
-
-const GAME_NAMES = { gomoku: "五子棋", reversi: "黑白棋", doudizhu: "斗地主", chess: "国际象棋" };
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -435,20 +435,13 @@ function turnText(match) {
     const rt = match.status && match.status.resultText;
     return rt || "已结束";
   }
-  const st = match.status || {};
-  const seats = Array.isArray(match.seats) ? match.seats : [];
   const practice = isPractice(match);
-  let wo = typeof st.waitingOn === "number" ? st.waitingOn : null;
-  if (wo == null && Array.isArray(st.waitingOn) && st.waitingOn.length === 1 && Number.isInteger(st.waitingOn[0])) {
-    wo = st.waitingOn[0];
-  }
+  // Current-turn seat shares turnSeatOf from shared/mode.js with the match page,
+  // so the three-seat rule exists exactly once.
+  const w = turnSeatOf(match);
   const v = match.view;
-  if (wo == null && v && (+v.toPlay === 1 || +v.toPlay === 2)) wo = +v.toPlay - 1;
-  // 三人桌（斗地主）：当轮座位以 view.turn 为准
-  if (wo == null && v && Number.isInteger(+v.turn) && +v.turn >= 0 && (seats.length >= 3 || +v.turn >= 2)) {
-    wo = +v.turn;
-  }
-  const seat = wo != null ? seats[wo] : null;
+  const wo = w ? w.index : null;
+  const seat = w ? w.seat : null;
   if (match.me === wo) return isCardGame(match) ? (String(v && v.phase) === "bid" ? "轮到你叫分" : "轮到你出牌") : "轮到你";
   if (seat) {
     const verb = isCardGame(match) ? (String(v && v.phase) === "bid" ? "叫分中…" : "出牌中…") : "思考中…";
@@ -474,13 +467,16 @@ function gameCard(g, i, active) {
   // 游戏封面插画（目录式棋种先取本游戏目录素材，再回落 assets/card-<kind>.png；
   // 缺失自动隐藏，不阻塞功能）。素材尚未生成时留一块柔和的牌面占位，
   // 不塌卡、不手画 SVG 冒充正式素材。
+  // The empty state is only added once every candidate asset has failed (coverImg's
+  // onFail): directory-based kinds often lack the first candidate, and flagging on
+  // the first error event would paint the placeholder over a cover that then loads.
   const cover = el("div", "card-cover-wrap");
-  const coverEl = coverImg(g.kind, `${gameName(g)}封面插画`, "card-cover");
+  const markEmpty = () => cover.classList.add("card-cover-empty");
+  const coverEl = coverImg(g.kind, `${gameName(g)}封面插画`, "card-cover", markEmpty);
   if (coverEl) {
-    coverEl.addEventListener("error", () => cover.classList.add("card-cover-empty"));
     cover.appendChild(coverEl);
   } else {
-    cover.classList.add("card-cover-empty");
+    markEmpty();
   }
   card.appendChild(cover);
 
@@ -679,8 +675,6 @@ function modeBlock(g) {
   return block;
 }
 
-/* ---------------- 三人桌开局方式（斗地主：阵容 + 局数） ---------------- */
-
 /** 目录项是否声明了阵容（三人桌）：lineups 非空数组才算；两座位棋类不会写该字段。 */
 function hasLineups(g) {
   return Array.isArray(g && g.lineups) && g.lineups.length > 0;
@@ -736,7 +730,10 @@ function lineupBlock(g) {
 
   const block = el("div", "mode-block lineup-block");
 
-  // 阵容：四人一组竖排（文案较长，横排会挤爆窄屏卡片）
+  // Lineups: stacked one per row (the labels are long enough to overflow narrow cards).
+  // Single-select semantics plus arrow/Home/End navigation and a roving tabindex
+  // (native radio behaviour); otherwise the radiogroup/radio roles would promise an
+  // interaction that does not exist.
   const list = el("div", "lineup-list");
   list.setAttribute("role", "radiogroup");
   list.setAttribute("aria-label", "对局阵容");
@@ -746,6 +743,7 @@ function lineupBlock(g) {
     b.type = "button";
     b.dataset.lineup = opt.value;
     b.setAttribute("role", "radio");
+    b.tabIndex = -1;
     b.appendChild(el("span", "lineup-label", opt.label));
     b.appendChild(el("span", "lineup-dot"));
     b.addEventListener("click", () => {
@@ -753,6 +751,15 @@ function lineupBlock(g) {
       writeLineupChoice(kind, choice);
       sync();
     });
+    b.addEventListener("keydown", (ev) => onRadioKey(ev, options, b.dataset.lineup, (next) => {
+      choice.lineup = next;
+      writeLineupChoice(kind, choice);
+      sync();
+      const target = btns[next];
+      if (target) {
+        target.focus({ preventScroll: true });
+      }
+    }));
     btns[opt.value] = b;
     list.appendChild(b);
   });
@@ -815,12 +822,7 @@ function lineupBlock(g) {
   }
 
   function sync() {
-    options.forEach((opt) => {
-      const on = choice.lineup === opt.value;
-      const b = btns[opt.value];
-      b.classList.toggle("on", on);
-      b.setAttribute("aria-checked", String(on));
-    });
+    applyRadioState(options.map((o) => o.value), choice.lineup, btns);
     hint.textContent = lineupHint(choice.lineup, agentName);
     if (typeof syncHands === "function") syncHands();
   }

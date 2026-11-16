@@ -25,9 +25,16 @@ NAME = "gamehub"
 
 
 class GamehubIMCapability(IMCapability):
-    """Forward native room group replies to the plugin runtime."""
+    """Forward native room group replies to the plugin runtime.
 
-    _SUPPORTED_ELEMENTS = ["text", "img", "record", "video", "file", "sticker", "reply"]
+    The outbound chain is rendered by ``host.runtime._chain_text``, which only
+    concatenates ``Text`` elements, so declaring media elements would let the
+    host register expensive output tags (img/record/video) that can never be
+    delivered here. Advertise text only; routing still goes through
+    ``emit_outbound`` and the sink semantics are unchanged.
+    """
+
+    _SUPPORTED_ELEMENTS = ["text"]
 
     async def get_message_metadata(self) -> MessageFormatMetadata:
         return MessageFormatMetadata(self._supported_elements)

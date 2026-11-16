@@ -10,7 +10,7 @@
  *    两座位旧行为逐字段不变；
  * 7) registry：目录式模块加载与封面素材候选。
  *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";

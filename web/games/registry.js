@@ -30,10 +30,6 @@ export function moduleUrls(kind) {
   return DIR_MODULES.has(k) ? [dir, flat] : [flat, dir];
 }
 
-export function moduleUrl(kind) {
-  return moduleUrls(kind)[0] || "";
-}
-
 /** 目录式模块的专属素材地址（页面相对路径；非目录模块返回空串）。 */
 export function gameAssetPath(kind, file) {
   const k = normalizeKind(kind);

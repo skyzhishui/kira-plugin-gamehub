@@ -2324,3 +2324,32 @@ async def test_host_llm_skips_unknown_models_and_ignores_media() -> None:
 
     assert events[0] == {"type": "text", "delta": "x"}
     assert len(good.requests) == 1
+
+
+# ----------------------------------------------------------------------
+#  2026-11-16 remediation regressions.
+# ----------------------------------------------------------------------
+async def test_broken_ai_timeout_falls_back_to_a_default_budget(tmp_path) -> None:
+    """P2: ai_timeout=null or a broken value must not crash the run() entry."""
+    router = FakeRouter([{"type": "tool", "move": "J9"}])
+    plugin, agent, _manager, room = await _setup(
+        tmp_path, router, _cfg(ai_timeout=None)
+    )
+    before = room.match.state["moves"]
+    await agent.run(room, 1)  # must not raise
+    assert room.match.state["moves"] == before + 1  # the move still applied
+
+
+def test_decision_log_rotates_and_stays_serialized(tmp_path) -> None:
+    """P2: decision_log.jsonl rotates once and writes are serialized."""
+    import game_agent as module
+
+    path = Path(str(tmp_path)) / "decision_log.jsonl"
+    old_cap = module._JSONL_MAX_BYTES
+    try:
+        module._JSONL_MAX_BYTES = 300
+        for index in range(10):
+            module._append_line(path, json.dumps({"n": index}) * 15 + "\n")
+    finally:
+        module._JSONL_MAX_BYTES = old_cap
+    assert (tmp_path / "decision_log.jsonl.1").exists()

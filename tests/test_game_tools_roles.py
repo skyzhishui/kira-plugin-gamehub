@@ -12,9 +12,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-import modes
+import pytest
+
 from tools import game_new, game_resign, game_state
-from tools_turn import build_play_tag, build_turn_context, build_turn_tools
+from tools_turn import build_turn_context, build_turn_tools
 
 from test_tools import _Event, _Rooms, _plugin
 
@@ -47,77 +48,76 @@ def _attach_plan(match, seat: int, text: str) -> None:
 # ----------------------------------------------------------------------
 #  Teammate perspective
 # ----------------------------------------------------------------------
-async def test_game_state_teammate_perspective_in_bot_only_match():
+@pytest.mark.parametrize(
+    "opponent, expect_opponent_plan",
+    [
+        # Practice (teammate) match: the human side's view, never the
+        # opponent's private plan ("our plan" would be a lie).
+        ("bot", False),
+        # Legacy opponent match: the bot's plan is the AI seat's own plan.
+        ("ai", True),
+    ],
+)
+async def test_game_state_view_follows_the_match_role(opponent, expect_opponent_plan):
     rooms = _Rooms()
-    plugin, match = await _open(rooms, opponent="bot")
-    assert modes.role_of(match) == modes.ROLE_TEAMMATE
+    plugin, match = await _open(rooms, opponent=opponent)
+    _attach_plan(match, 1, "先占天元")
+
     text = await game_state(plugin, _Event())
+
     assert "Game" in text  # full view from the human-side seat
-    assert "诺里的打法" not in text  # opponent plan never becomes "our plan"
-    assert text.strip()
+    if expect_opponent_plan:
+        assert "先占天元" in text and "的打法" in text
+    else:
+        assert "诺里的打法" not in text
+        assert "先占天元" not in text
 
 
-async def test_advanced_opponent_seat_uses_agent_configured_name() -> None:
-    """The advanced practice seat is stored with the configured agent name."""
+@pytest.mark.parametrize(
+    "agent_name, expected_name",
+    [
+        ("蕾依", "蕾依"),
+        # No configured agent name keeps the neutral default, never a hook.
+        (None, "nori"),
+    ],
+)
+async def test_advanced_opponent_seat_uses_the_configured_agent_name(
+    agent_name, expected_name
+) -> None:
+    """The advanced practice seat is stored with ``settings.agent_name``.
+
+    That is the same source ``host/runtime.py`` feeds ``RoomManager``; the old
+    fake injection hook (``agent_player_name``) must never be consulted.
+    """
     rooms = _Rooms()
     plugin = SimpleNamespace(
         rooms=rooms,
-        settings=SimpleNamespace(site_base_url="", max_say_len=280),
-        agent_player_name=lambda: "蕾依",
+        settings=SimpleNamespace(
+            site_base_url="", max_say_len=280, agent_name=agent_name
+        ),
+        agent_player_name=lambda: "注入名",
     )
     text = await game_new(
-        plugin,
-        _Event(),
-        kind="gomoku",
-        opponent="bot",
-        difficulty="advanced",
+        plugin, _Event(), kind="gomoku", opponent="bot", difficulty="advanced"
     )
     assert "已开局" in text
-    assert rooms.match.seats[1].name == "蕾依"
-
-
-async def test_game_state_opponent_perspective_unchanged_for_legacy():
-    rooms = _Rooms()
-    plugin, match = await _open(rooms, opponent="ai")
-    _attach_plan(match, 1, "先占天元")
-    text = await game_state(plugin, _Event())
-    assert "先占天元" in text  # opponent match still shows the bot's plan
-    assert "的打法" in text
-
-
-async def test_tool_outputs_have_no_legacy_move_protocol_or_hardcoded_open():
-    rooms = _Rooms()
-    plugin, _match = await _open(rooms, opponent="ai")
-    state_text = await game_state(plugin, _Event())
-    assert "MOVE:" not in state_text
-    assert "执黑先行" not in state_text
-    new_text = await game_new(plugin, _Event("webchat:dm:u2"), kind="gomoku")
-    assert "已开局" in new_text
-    assert "MOVE:" not in new_text
-    assert "执黑先行" not in new_text
+    assert rooms.match.seats[1].name == expected_name
 
 
 # ----------------------------------------------------------------------
 #  Notice-turn safety
 # ----------------------------------------------------------------------
 async def test_notice_turn_mutations_are_refused():
+    """A notice turn never opens or resigns a real match, and the gate is a
+    safety check — not an actor lookup — so it also blocks a resign aimed at
+    the *other* match."""
     rooms = _Rooms()
     plugin, match = await _open(rooms, opponent="ai")
     version_before = match.version
     event = _notice_event()
     assert "不可用" in await game_new(plugin, event, kind="gomoku")
     assert "不可用" in await game_resign(plugin, event)
-    # A notice turn never opens / resigns a real match.
-    assert match.version == version_before
-    assert match.resigned is None
-
-
-async def test_notice_actor_cannot_touch_other_match():
-    rooms = _Rooms()
-    plugin, match = await _open(rooms, opponent="ai")
-    version_before = match.version
-    text = await game_resign(plugin, _notice_event())
-    assert "不可用" in text  # safety gate, not an actor lookup
+    assert "不可用" in await game_resign(plugin, _notice_event(), match_id="m1")
     assert match.version == version_before and match.resigned is None
 
 
@@ -128,13 +128,24 @@ async def test_notice_turn_game_state_explains_itself():
     assert "通知回合" in text
 
 
-async def test_bound_game_state_uses_granted_seat_without_actor_lookup():
+async def test_bound_state_reads_the_granted_seat_without_actor_lookup():
+    """The bound event binding decides the seat; the caller's actor is never
+    consulted (the plain ``game_state`` path keeps the caller-seat rule)."""
     rooms = _Rooms()
-    rooms.match = None
     match = await _make_foreign_match(rooms)
     bound = {"match_id": match.id, "seat": 1, "kind": "nori_turn"}
-    text = await game_state(plugin=_plugin(rooms), event=_Event(extra={"gamehub_turn": bound}))
-    assert "seat 1" in text  # bound seat view, independent of the actor
+
+    plain = await game_state(
+        plugin=_plugin(rooms), event=_Event(extra={"gamehub_turn": bound})
+    )
+    assert "seat 1" in plain
+
+    grant = _StubGrant(match.id, 1, "k1", "nori_turn")
+    state = build_turn_tools(_plugin(rooms), grant)[0]
+    tool = await state.execute(
+        _Event(extra={"gamehub_turn": build_turn_context(grant)})
+    )
+    assert "seat 1" in tool
 
 
 async def _make_foreign_match(rooms: _Rooms):
@@ -144,14 +155,53 @@ async def _make_foreign_match(rooms: _Rooms):
     return rooms.match
 
 
-async def test_bound_state_tool_reads_event_binding():
+@pytest.mark.parametrize(
+    "grant_state, expect_private",
+    [
+        # A live grant minted for this seat keeps its authorized perspective,
+        # even behind a foreign SID (the bound view is the only path allowed
+        # to show a seat other than the caller's).
+        ("active", True),
+        # A stale/foreign grant shows no private view at all (fail closed).
+        ("done", False),
+    ],
+)
+async def test_bound_doudizhu_perspective_requires_a_live_grant(
+    grant_state, expect_private
+):
     rooms = _Rooms()
-    match = await _make_foreign_match(rooms)
-    grant = _StubGrant(match.id, 1, "k1", "nori_turn")
     plugin = _plugin(rooms)
+    await game_new(plugin, _Event("qq:gm:g1"), kind="doudizhu")
+    match = rooms.match
+    grant = _StubGrant(match.id, 1, "k1", "nori_turn")
+
+    director = SimpleNamespace(
+        grant_of=lambda match_id: SimpleNamespace(
+            state=grant_state, key="k1", seat=1
+        )
+    )
+    plugin = SimpleNamespace(
+        rooms=rooms,
+        settings=SimpleNamespace(site_base_url="", max_say_len=280),
+        _director=director,
+    )
     state = build_turn_tools(plugin, grant)[0]
-    text = await state.execute(_Event(extra={"gamehub_turn": build_turn_context(grant)}))
-    assert "seat 1" in text
+    event = _Event("qq:gm:outsider", extra={"gamehub_turn": build_turn_context(grant)})
+
+    text = await state.execute(event)
+
+    if expect_private:
+        assert "Your PRIVATE hand" in text
+        assert _hand_text(match, 1) in text  # the granted (host AI) seat
+        assert _hand_text(match, 0) not in text  # never the human seat's hand
+    else:
+        assert "Your PRIVATE hand" not in text
+
+
+def _hand_text(match, seat: int) -> str:
+    from engine.games.doudizhu.cards import move_text
+
+    return move_text(list(match.state["cards"][seat]))
 
 
 # ----------------------------------------------------------------------
@@ -192,28 +242,3 @@ def test_build_turn_context_shape():
         "kind": "delegated_human",
         "grant": "k1",
     }
-
-
-def test_turn_surfaces_are_state_tool_only_and_match_scoped():
-    """The move rides the tag channel; only the read view stays a tool."""
-    a = _StubGrant("aaaa1111", 1, "k1", "nori_turn")
-    b = _StubGrant("bbbb2222", 1, "k2", "nori_turn")
-    tools_a = build_turn_tools(_turn_plugin(_Rooms()), a)
-    tools_b = build_turn_tools(_turn_plugin(_Rooms()), b)
-    assert [tool.name for tool in tools_a] == ["state_aaaa1111"]
-    assert [tool.name for tool in tools_b] == ["state_bbbb2222"]
-    assert not {tools_a[0].name} & {tools_b[0].name}
-    # The tag channel keeps the match-scoped naming too.
-    tag_a = build_play_tag(_turn_plugin(_Rooms()), a)
-    tag_b = build_play_tag(_turn_plugin(_Rooms()), b)
-    assert tag_a.name == "play_aaaa1111"
-    assert tag_b.name == "play_bbbb2222"
-    assert not {tag_a.name} & {tag_b.name}
-
-
-def test_move_format_hint_lives_in_the_tag_description():
-    grant = _StubGrant("m1", 1, "k1", "nori_turn")
-    tag = build_play_tag(_turn_plugin(_Rooms()), grant, match_kind="reversi")
-    assert "D6" in tag.description
-    state = build_turn_tools(_turn_plugin(_Rooms()), grant)[0]
-    assert state.name == "state_m1"

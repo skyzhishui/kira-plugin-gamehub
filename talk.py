@@ -25,7 +25,10 @@ Design constraints (unchanged from nori):
 
 - Prompt guidance only, no code gate on what the reply says;
 - One serial worker: finish a reply round before dispatching the next notice;
-- Cooldown is tracked per match (``room.last_talk_ts``), not globally;
+- Cooldown: judged lines track per match (``room.last_talk_ts``); legacy
+  start/end/moves lines additionally keep a per-target gap
+  (``_last_target``) so independent matches sharing one session do not
+  machine-gun it;
 - ``judge`` tier delegates "speak or stay quiet" to ``notice_judge`` (LOCAL
   key-event rules only, no network); ``moves`` = every move with cooldown;
   ``key`` = every N moves + start/end; ``off`` = silent.
@@ -68,8 +71,8 @@ if TYPE_CHECKING:  # pragma: no cover - type hints only
 
 
 DEFAULT_LANE_HINT = "只用一两句玩家口吻的话回应，别做别的事。"
-# Reserved notice sender id: keeps table-talk notices distinguishable from real
-# users if a renderer surfaces the source id.
+# Worker queue bound: drop the oldest event when a slow reply round lets
+# notices pile up (the player only cares about the latest state).
 _QUEUE_MAX = 4
 _SEEN_TTL_S = 600.0
 _SEEN_MAX = 256
@@ -146,13 +149,15 @@ def _safe(value: Any) -> str:
 
 
 def _bot_nickname(plugin: Any) -> str:
-    """Display name of the host agent that speaks the table talk."""
-    ctx = getattr(plugin, "ctx", None)
-    bot_config = getattr(ctx, "bot_config", None)
-    bot = getattr(bot_config, "bot", None)
+    """Display name of the host agent that speaks the table talk.
+
+    The host name lives only on the plugin (``host_agent_name``, read from
+    the active persona by the runtime): the host tag has no ``ctx.bot_config``
+    surface, so that dead candidate is gone and the name is never silently
+    swapped for the plugin game_agent's configured name.
+    """
     for candidate in (
         getattr(plugin, "host_agent_name", ""),
-        getattr(bot, "nickname", ""),
         getattr(plugin, "bot_nickname", ""),
     ):
         name = str(candidate or "").strip()
@@ -657,13 +662,20 @@ class TableTalk:
         return ("move", getattr(match, "id", ""), getattr(match, "version", 0), seat)
 
     def _prune_seen(self, now: float) -> None:
-        if not self._seen:
-            return
-        stale = [key for key, ts in self._seen.items() if now - ts > _SEEN_TTL_S]
-        for key in stale:
-            self._seen.pop(key, None)
-        while len(self._seen) > _SEEN_MAX:
-            self._seen.pop(next(iter(self._seen)), None)
+        if self._seen:
+            stale = [key for key, ts in self._seen.items() if now - ts > _SEEN_TTL_S]
+            for key in stale:
+                self._seen.pop(key, None)
+            while len(self._seen) > _SEEN_MAX:
+                self._seen.pop(next(iter(self._seen)), None)
+        # Same bound for the per-target last-send map: an entry older than the
+        # TTL can no longer suppress anything (gaps are seconds), so it is
+        # pure ballast on long-running processes.
+        stale_targets = [
+            sid for sid, ts in self._last_target.items() if now - ts > _SEEN_TTL_S
+        ]
+        for sid in stale_targets:
+            self._last_target.pop(sid, None)
 
     def _fields(self, match: Any, event: dict[str, Any], status: Any) -> dict[str, str]:
         try:  # production: plugin package
@@ -672,16 +684,33 @@ class TableTalk:
             from engine import games
 
         mod = games.get(match.kind)
+        names = [s.name for s in match.seats]
+        mover = modes.last_mover(match, event)
+        mover_name = (
+            names[mover] if 0 <= mover < len(names) else names[0] if names else "玩家"
+        )
         if match.kind == "doudizhu":
             human = modes.human_seat_index(match)
             if human is None:
                 human = 0
-            names = [s.name for s in match.seats]
-            mover = modes.last_mover(match, event)
+            event_type = str(event.get("type") or "")
+            # Same stage grammar as the non-doudizhu branch: start / end
+            # (result) / resign / public move. The mover index is always a
+            # valid seat here, so the old `0 <= mover < 3` guard could never
+            # reach its "对局开始" fallback and every stage rendered as
+            # "完成公开动作" (P1-7).
+            if event_type == "start":
+                event_text = "对局开始"
+            elif status.outcome is not None:
+                event_text = f"对局结束：{status.result_text or status.outcome.text}。"
+            elif event_type == "resign":
+                event_text = f"{mover_name} 认输了。"
+            else:
+                event_text = f"{mover_name} 完成公开动作"
             return {
                 "opponent": "、".join(names[i] for i in range(3) if i != human),
                 "game": "斗地主", "seat": f"{names[human]} 的场边队友（不占席位）",
-                "event": f"{names[mover]} 完成公开动作" if 0 <= mover < 3 else "对局开始",
+                "event": event_text,
                 "board": mod.describe(match.state, None, names), "plan": "未设定",
             }
         labels = mod.seat_labels(match.state)
@@ -700,7 +729,6 @@ class TableTalk:
         rival = match.seats[opponent_seat]
         and_move = str(event.get("move") or "").strip()
         event_type = str(event.get("type") or "")
-        mover = modes.last_mover(match, event)
         if event_type == "start":
             if teammate:
                 # Teammate role is explained once in the seat field; the start
@@ -715,9 +743,13 @@ class TableTalk:
                     f"你执{self._label(labels, nori_seat)}。"
                 )
         elif status.outcome is not None:
+            # Resign events normally carry the terminal outcome, so the end
+            # form (with the result) renders first; the resign branch below
+            # is the defensive non-terminal path — attributed to whoever the
+            # event/log names, not hardcoded to the human (review C-29).
             event_text = f"对局结束：{status.result_text or status.outcome.text}。"
         elif event_type == "resign":
-            event_text = f"{human.name} 认输了。"
+            event_text = f"{mover_name} 认输了。"
         elif teammate:
             if mover == human_seat:
                 event_text = f"{human.name} 落子 {and_move or '一手'}。"
@@ -726,7 +758,10 @@ class TableTalk:
                     f"对手 {rival.name} 落子 {and_move or '一手'}，"
                     f"轮到 {human.name} 了。"
                 )
-        elif int(event.get("seat", -1)) == human_seat:
+        elif mover == human_seat:
+            # Single criterion for "who just moved" (``last_mover`` falls
+            # back to the log tail; the raw event seat was an unguarded
+            # int() of a possibly non-int value).
             event_text = f"{human.name} 刚落子 {and_move or '一手'}。"
         else:
             event_text = f"你刚落子 {and_move or '一手'}。"

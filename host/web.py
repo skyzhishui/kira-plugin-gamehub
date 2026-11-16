@@ -11,7 +11,7 @@ and raises :class:`ApiError` (with an HTTP-like ``status``) for failures.
 KiraAI differences from nori:
 
 - Single-admin WebUI: the page actor is ``"admin"`` and the page session is
-  ``GAME_SID`` (``gamehub:dm:admin``); there is no identity resolver, session
+  ``GAME_SID`` (``gamehub:gm:room``); there is no identity resolver, session
   catalog or multi-platform web-user validation.
 - Identity is a small ``identity.json`` in the plugin data dir holding only a
   display ``name``.
@@ -20,6 +20,7 @@ KiraAI differences from nori:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
@@ -173,7 +174,11 @@ class GamehubApi:
         # Fallback when the plugin has no data dir yet (tests / early boot).
         self._identity_cache: str | None = None
         # Chat-window state: lazy store (when no runtime yet) + send pacing.
+        # The lock closes the "two concurrent first requests" race where the
+        # second caller could grab ``_own_store`` before its DDL finished
+        # (review P2); ``init`` is idempotent, so lock + re-check is enough.
         self._own_store: Any = None
+        self._own_store_lock = asyncio.Lock()
         self._chat_last_send: float = -1e9
 
     # ------------------------------------------------------------------
@@ -534,23 +539,47 @@ class GamehubApi:
         settings = getattr(self._plugin, "settings", None)
         return bool(getattr(settings, "page_chat_enabled", True))
 
-    async def _chat_store(self) -> Any:
-        """The live runtime store, or a lazy private one (tests / early boot)."""
-        runtime = getattr(self._plugin, "_runtime", None)
-        store = getattr(runtime, "store", None)
-        if store is None:
-            if self._own_store is None:
-                from .store import MatchStore
+    async def chat_store(self) -> Any:
+        """The live runtime store, or a lazy private one (tests / early boot).
 
-                self._own_store = MatchStore(self._plugin.data_dir)
-            store = self._own_store
-        if getattr(store, "engine", None) is None:
-            await store.init()
-        return store
+        Public so the spectator listener can share it without reaching into
+        a private attribute (review D-11).
+
+        The whole body runs under one lock and returns only after the store
+        is **initialized**: guarding construction alone still let a second
+        caller grab the early-assigned ``engine`` attribute while the first
+        caller's DDL was still running and query before the schema existed
+        (parent follow-up on the P2 fix). The runtime store's fallback init
+        shares the same lock/recheck, so a concurrent :meth:`dispose` also
+        serializes against an in-flight init instead of racing it.
+        """
+        async with self._own_store_lock:
+            runtime = getattr(self._plugin, "_runtime", None)
+            store = getattr(runtime, "store", None)
+            if store is None:
+                if self._own_store is None:
+                    from .store import MatchStore
+
+                    self._own_store = MatchStore(self._plugin.data_dir)
+                store = self._own_store
+            if getattr(store, "engine", None) is None:
+                await store.init()
+            return store
+
+    async def dispose(self) -> None:
+        """Release the lazily opened private store (plugin terminate)."""
+        async with self._own_store_lock:
+            store, self._own_store = self._own_store, None
+        closer = getattr(store, "close", None)
+        if callable(closer):
+            try:
+                await closer()
+            except Exception:  # noqa: BLE001 - teardown must not raise
+                logger.debug("gamehub: lazy chat store dispose failed", exc_info=True)
 
     async def chat_history(self, limit: int = 100, match_id: str | None = None) -> dict[str, Any]:
         """Recent chat-window lines (oldest first) + the enabled flag."""
-        store = await self._chat_store()
+        store = await self.chat_store()
         return envelope(
             {
                 "enabled": self._chat_enabled(),
@@ -589,7 +618,7 @@ class GamehubApi:
             raise _fail("消息未能送达对局会话", 503, code="not_ready") from exc
         self._chat_last_send = now
 
-        store = await self._chat_store()
+        store = await self.chat_store()
         message = await store.chat_append("player", sender, text, match_id=match_id, uid=PAGE_ACTOR)
         if match_id:
             await ws_hub.broadcast(match_id, {"type": "chat_message", **message})
@@ -1117,6 +1146,10 @@ async def serve_ws(
     await room.attach(websocket, seat)
     try:
         while True:
+            # Live check: ``runtime.stop`` flips ``plugin.stopping`` first and
+            # then closes this socket via ``room.close_all`` (4003), which
+            # makes the blocking ``receive()`` below return/raise — so the
+            # flag is actually observed without waiting for a client frame.
             if getattr(plugin, "stopping", False):
                 await send({"type": "error", "code": "not_ready", "message": "插件正在停止"})
                 break

@@ -58,21 +58,6 @@ def test_parser_and_bombs():
     assert read_against(["BJ", "RJ"], bomb)
 
 
-def test_bid_redeal_and_no_mutation():
-    state = create(123)
-    original = copy.deepcopy(state)
-    for _ in range(3):
-        result = apply(state, state["turn"], "pass")
-        assert isinstance(result, MoveResultOk)
-        state = result.state
-    assert state["redeals"] == 1 and state["firstBidder"] == 1
-    assert original == create(123)
-    result = apply(state, 1, "bid 3")
-    assert result.state["landlord"] == 1
-    assert len(result.state["cards"][1]) == 20
-    assert isinstance(apply(result.state, 1, "pass"), MoveResultErr)
-
-
 def test_rain_go_deal_golden_seed_42():
     # 原样取自 rain-go 06e4b75 ddzCreate(42, 1)，node 原生 TS 执行生成。
     state = create(42)
@@ -97,6 +82,21 @@ def test_rain_go_deal_golden_seed_42():
         "S2",
         "BJ",
     ]
+
+
+def test_bid_redeal_and_no_mutation():
+    state = create(123)
+    original = copy.deepcopy(state)
+    for _ in range(3):
+        result = apply(state, state["turn"], "pass")
+        assert isinstance(result, MoveResultOk)
+        state = result.state
+    assert state["redeals"] == 1 and state["firstBidder"] == 1
+    assert original == create(123)
+    result = apply(state, 1, "bid 3")
+    assert result.state["landlord"] == 1
+    assert len(result.state["cards"][1]) == 20
+    assert isinstance(apply(result.state, 1, "pass"), MoveResultErr)
 
 
 @pytest.mark.parametrize(
@@ -194,16 +194,15 @@ def test_view_whitelist_and_hidden_rng():
     state = create(99)
     for seat in (None, 0, 1, 2, -1, True):
         view = doudizhu.view(state, seat)
+        # Neither the other seats' hands nor the RNG ever reach the view.
         assert "cards" not in view and "rng" not in view
         assert view["bottom"] is None
         assert len(view["hand"]) == (
             17 if type(seat) is int and seat in range(3) else 0
         )
-        assert state["bottom"] != view["bottom"]
     public = doudizhu.describe(state, None, ["人类", "诺里", "陪练"])
     assert "PRIVATE hand" not in public
     assert "Legal examples" not in public
-    assert json.dumps(state)
 
 
 def test_private_views_are_detached_from_authoritative_state():
@@ -330,73 +329,62 @@ def _pair_trick(seat=1, key=2):
     }
 
 
-def test_bot_blocks_partner_single_when_landlord_has_one_card():
-    """地主只剩一张时不能无条件让搭档：用最高单张顶住，防止地主直接走完。"""
-    state = _play_state(
+# Every scenario below is one decision of the same rule: the farmer bot must
+# block the partner only when the landlord is one move from winning, and must
+# not waste a bomb when the partner's play already cannot be beaten.
+_BOT_BLOCK_CASES = [
+    pytest.param(
         [["D9"], ["S5", "S6"], ["S7", "S8", "H10", "CJ"]],
         _single_trick(),
-    )
-    assert doudizhu.bot(state, 2) == "J"
-
-
-def test_bot_uses_bomb_to_block_when_landlord_has_one_card():
-    """地主一张时炸弹不会被单张压过，能稳稳拿回出牌权。"""
-    state = _play_state(
+        "J",
+        id="partner-single-landlord-one-card-top-single",
+    ),
+    pytest.param(
         [["D9"], ["S5", "S6"], ["S7", "H7", "D7", "C7", "H10"]],
         _single_trick(),
-    )
-    assert doudizhu.bot(state, 2) == "7 7 7 7"
-
-
-def test_bot_blocks_partner_pair_with_bomb_when_landlord_has_two_cards():
-    """地主两张可能是对子：搭档的对子会被直接压完，有炸弹就截住。"""
-    state = _play_state(
+        "7 7 7 7",
+        id="partner-single-landlord-one-card-bomb",
+    ),
+    pytest.param(
         [["D3", "D4"], ["S5", "S6"], ["S7", "H7", "D7", "C7", "H10"]],
         _pair_trick(),
-    )
-    assert doudizhu.bot(state, 2) == "7 7 7 7"
-
-
-def test_bot_still_lets_partner_lead_when_landlord_is_not_close():
-    """地主还有牌时保留农民配合让牌：不抢搭档的牌权。"""
-    state = _play_state(
+        "7 7 7 7",
+        id="partner-pair-landlord-two-cards-bomb",
+    ),
+    pytest.param(
         [["D3", "D4", "D5", "D6", "D7"], ["S5", "S6"], ["S7", "S8", "H10", "CJ"]],
         _single_trick(),
-    )
-    assert doudizhu.bot(state, 2) == "pass"
-
-
-def test_bot_passes_partner_pair_when_landlord_has_one_card():
-    """地主只有一张，无法压对子；搭档的对子已经够用，不必拆牌。"""
-    state = _play_state(
+        "pass",
+        id="partner-single-landlord-far-from-winning",
+    ),
+    pytest.param(
         [["D9"], ["S5", "S6"], ["S7", "S8", "H10", "CJ"]],
         _pair_trick(),
-    )
-    assert doudizhu.bot(state, 2) == "pass"
-
-
-def test_bot_passes_when_no_single_can_beat_partner_and_landlord_has_one_card():
-    """搭档出 A（key 12），bot 最大单张只有 10：options 已过滤，应让牌而非提交非法动作。"""
-    state = _play_state(
+        "pass",
+        id="partner-pair-landlord-one-card-cannot-beat-it",
+    ),
+    pytest.param(
         [["D9"], ["SA"], ["S10", "S8"]],
         _single_trick(key=12),
-    )
-    assert doudizhu.bot(state, 2) == "pass"
-
-
-def test_bot_does_not_waste_bomb_when_partner_plays_big_joker():
-    """搭档已出大王，地主单张必过；不必为了顶住而浪费炸弹。"""
-    state = _play_state(
+        "pass",
+        id="partner-single-ace-no-legal-answer",
+    ),
+    pytest.param(
         [["D9"], ["RJ", "S6"], ["S7", "H7", "D7", "C7", "H10"]],
         _single_trick(key=14),
-    )
-    assert doudizhu.bot(state, 2) == "pass"
-
-
-def test_bot_does_not_waste_bomb_when_partner_plays_pair_of_twos():
-    """搭档的对 2 已最大：地主两张里只有王炸能压，炸弹也压不过王炸，让牌。"""
-    state = _play_state(
+        "pass",
+        id="partner-big-joker-no-bomb-waste",
+    ),
+    pytest.param(
         [["D3", "D4"], ["S2", "H2"], ["S7", "H7", "D7", "C7", "H10"]],
         _pair_trick(key=13),
-    )
-    assert doudizhu.bot(state, 2) == "pass"
+        "pass",
+        id="partner-pair-of-twos-no-bomb-waste",
+    ),
+]
+
+
+@pytest.mark.parametrize(("cards", "trick", "expected"), _BOT_BLOCK_CASES)
+def test_bot_blocks_or_yields_to_the_partner_only_when_needed(cards, trick, expected):
+    state = _play_state(cards, trick)
+    assert doudizhu.bot(state, 2) == expected

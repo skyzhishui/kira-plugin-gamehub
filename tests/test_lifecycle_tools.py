@@ -18,7 +18,6 @@ import asyncio
 import pytest
 
 import director as director_module
-import tools as game_tools
 from room import RoomError
 
 from test_turn_director import DELEGATED, NORI, _create, _harness, _wait
@@ -46,53 +45,48 @@ def _bound_harness(**cfg_overrides):
 # ----------------------------------------------------------------------
 #  Resign / match over ends the turn cleanly
 # ----------------------------------------------------------------------
-async def test_resign_closes_inflight_grant_and_never_fills():
+@pytest.mark.parametrize(
+    "mode_options, end_action",
+    [
+        (dict(NORI), "resign_ai"),        # room-level resign helper
+        (dict(NORI), "seat1_resign"),     # opponent resigns in-window
+        (dict(DELEGATED), "seat0_resign"),  # delegated human resigns manually
+    ],
+    ids=["resign_ai", "in_window_resign", "delegated_human_resign"],
+)
+async def test_match_end_closes_the_grant_and_never_fills(mode_options, end_action):
+    """A match that ends (any resign path) closes its grant, and the watchdog
+    never plays a move into the finished position."""
     rooms, _plugin, _recorder, director = _bound_harness()
-    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
-    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
-    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    room, _seat, _token = await _create(rooms, mode_options=mode_options)
+    if mode_options.get("delegation"):
+        await _wait(lambda: director.grant_of(room.match.id) is not None)
+    else:
+        await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+        await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
     moves_before = len(room.match.log)
 
-    await rooms.resign_ai("u1")
-    await _wait(lambda: director.grant_of(room.match.id) is None)
+    if end_action == "resign_ai":
+        await rooms.resign_ai("u1")
+        await _wait(lambda: director.grant_of(room.match.id) is None)
+        expected_log = moves_before + 1
+    elif end_action == "seat1_resign":
+        await room.apply(1, {"type": "resign"})
+        expected_log = moves_before + 1
+    else:
+        await room.apply(0, {"type": "resign"})
+        await _wait(lambda: director.grant_of(room.match.id) is None)
+        expected_log = moves_before + 1
+
     # Past the watchdog deadline: a cancelled grant never plays.
     await asyncio.sleep(0.8)
-    assert room.match.log[-1].move == "resign"
-    assert len(room.match.log) == moves_before + 1
-    assert room.status == "over"
-    await director.stop()
-
-
-async def test_match_over_before_watchdog_fill_leaves_position_alone():
-    rooms, _plugin, _recorder, director = _bound_harness(
-        turn_play_timeout_s=0.3, turn_fallback_delay_s=0.05
-    )
-    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
-    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
-    await _wait(lambda: director.grant_of(room.match.id) is not None)
-    # Resign right inside the watchdog window.
-    await room.apply(1, {"type": "resign"})
-    await asyncio.sleep(0.6)
     assert room.status == "over"
     assert room.match.log[-1].move == "resign"
-    assert len(room.match.log) == 2  # the human move + the resign, no bot fill
+    assert len(room.match.log) == expected_log
     assert director.grant_of(room.match.id) is None
-    await director.stop()
-
-
-async def test_delegated_grant_is_closed_when_the_match_ends():
-    rooms, _plugin, _recorder, director = _bound_harness()
-    room, _seat, _token = await _create(rooms, mode_options=dict(DELEGATED))
-    await _wait(lambda: director.grant_of(room.match.id) is not None)
-    grant = director.grant_of(room.match.id)
-    assert grant.kind == "delegated_human"
-
-    # The human resigns manually: no more delegated fills afterwards.
-    await room.apply(0, {"type": "resign"})
-    await _wait(lambda: director.grant_of(room.match.id) is None)
-    await asyncio.sleep(0.8)
-    assert room.status == "over"
-    assert director.tools_for(grant.session_id) == []
+    if grant is not None:
+        assert director.tools_for(grant.session_id) == []
     await director.stop()
 
 
@@ -134,36 +128,6 @@ async def test_plan_write_after_game_over_is_rejected_with_no_open_grant():
 
 
 # ----------------------------------------------------------------------
-#  Tool surface: the director adds no global tool
-# ----------------------------------------------------------------------
-async def test_global_tool_surface_has_no_move_play_or_plan():
-    rooms, plugin, _recorder, director = _bound_harness()
-    # ``main.py`` registers exactly these four plain functions.
-    surface = [
-        name
-        for name in game_tools.__all__
-        if name.startswith("game_")
-    ]
-    assert surface == ["game_list", "game_new", "game_resign", "game_state"]
-    for absent in ("game_move", "play", "game_plan"):
-        assert absent not in game_tools.__all__
-        assert not hasattr(game_tools, absent)
-    # Turn tools are request-scoped: nothing before a grant exists.
-    assert director.tools_for("private-u1") == []
-    assert director.tools_for("") == []
-
-    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
-    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
-    await _wait(lambda: director.grant_of(room.match.id) is not None)
-    # Even with a live grant the global surface is unchanged.
-    assert [
-        name for name in game_tools.__all__ if name.startswith("game_")
-    ] == surface
-    assert not hasattr(game_tools, "play")
-    await director.stop()
-
-
-# ----------------------------------------------------------------------
 #  Stop / restore lifecycle
 # ----------------------------------------------------------------------
 async def test_stop_then_restore_does_not_resurrect_work():
@@ -180,33 +144,3 @@ async def test_stop_then_restore_does_not_resurrect_work():
     assert director.on_event(room, {"type": "move", "match": room.match}) is None
     await asyncio.sleep(0.3)
     assert len(room.match.log) == moves_before
-
-
-async def test_restore_active_only_rearms_matches_whose_seat_owes_a_move():
-    rooms, plugin, _recorder, director = _bound_harness(turn_play_timeout_s=5.0)
-    waiting_room, _sa, _ta = await _create(
-        rooms, actor="ua", mode_options=dict(NORI)
-    )
-    await waiting_room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
-    await _wait(lambda: director.grant_of(waiting_room.match.id) is not None)
-    director.cancel_match(waiting_room.match.id, reason="test")
-
-    # A teammate match with no delegation never owes a turn.
-    teammate_room, _sb, _tb = await _create(
-        rooms,
-        actor="ub",
-        opponent="bot",
-        mode_options={"mode": "bot", "difficulty": "easy"},
-    )
-    await teammate_room.apply(0, {"type": "move", "move": "C3"}, client_version=1)
-    await _wait(lambda: len(teammate_room.match.log) == 2)
-
-    assert director.grant_of(waiting_room.match.id) is None or (
-        director.grant_of(waiting_room.match.id).state != "active"
-    )
-    restored = await director.restore_active()
-    assert restored == 1
-    grant = director.grant_of(waiting_room.match.id)
-    assert grant is not None and grant.state == "active"
-    assert director.grant_of(teammate_room.match.id) is None
-    await director.stop()

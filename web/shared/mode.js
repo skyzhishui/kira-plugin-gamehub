@@ -57,7 +57,7 @@ export const MODE_LABELS = {
 
 /** game_agent 的缺省配置名（schema.json 的 agent_name 默认值）。
  * 它只是一个配置标识；渲染文案由服务端下发的名字决定，前端不写死任何人设名。 */
-export const AGENT_CONFIG_DEFAULT = "nori";
+const AGENT_CONFIG_DEFAULT = "nori";
 
 let personaName = AGENT_CONFIG_DEFAULT;
 
@@ -242,7 +242,7 @@ export function lineupsOf(game, agentName) {
   return LINEUP_VALUES.map((value) => ({ value, label: friendlyLineupLabel("", LINEUP_LABELS[value], agentName) }));
 }
 
-export function lineupPlanOf(lineup) {
+function lineupPlanOf(lineup) {
   const key = normalizeLineup(lineup);
   const plan = key ? LINEUP_PLANS[key] : null;
   return plan ? { lineup: key, ...plan } : null;
@@ -274,6 +274,33 @@ export function isThreeSeatMatch(match) {
   if (!match || typeof match !== "object") return false;
   if (lineupOf(match)) return true;
   return Array.isArray(match.seats) && match.seats.length > 2;
+}
+
+/** Current-turn seat (0-based; null = nobody waiting / match over).
+ *
+ * Shared by the lobby's "active matches" turn line and the match page status line:
+ * the three-seat condition must exist only once, otherwise the two-seat/three-seat
+ * boundary drifts between the two call sites again.
+ * Source priority: status.waitingOn (number or single-element array) -> view.toPlay
+ * (two-seat games) -> view.turn (three-seat games or a seat index >= 2).
+ * At match end view.turn is null and ``+null === 0`` with ``Number.isInteger(0)``
+ * true, so null has to be excluded explicitly; otherwise "nobody is waiting" is
+ * misread as "waiting on seat 0". */
+export function turnSeatOf(match) {
+  if (!match || typeof match !== "object") return null;
+  const st = match.status && typeof match.status === "object" ? match.status : {};
+  let wo = typeof st.waitingOn === "number" ? st.waitingOn : null;
+  if (wo == null && Array.isArray(st.waitingOn) && st.waitingOn.length === 1 && Number.isInteger(st.waitingOn[0])) {
+    wo = st.waitingOn[0];
+  }
+  const v = match.view;
+  if (wo == null && v && (+v.toPlay === 1 || +v.toPlay === 2)) wo = +v.toPlay - 1;
+  if (wo == null && v && v.turn != null && Number.isInteger(+v.turn) && +v.turn >= 0 && (+v.turn >= 2 || isThreeSeatMatch(match))) {
+    wo = +v.turn;
+  }
+  const seats = Array.isArray(match.seats) ? match.seats : [];
+  if (!Number.isInteger(wo) || !seats[wo]) return null;
+  return { index: wo, seat: seats[wo] };
 }
 
 /** 座位驱动方。三人桌 seat_drivers 与全部座位对齐（0=human）；
@@ -355,10 +382,6 @@ export function seatIdentityLabel(match, seat, index) {
 export function normalizeLevel(v) {
   const s = String(v == null ? "" : v).trim().toLowerCase();
   return LEVEL_VALUES.includes(s) ? s : "";
-}
-
-export function levelLabel(v) {
-  return LEVEL_LABELS[normalizeLevel(v) || "intermediate"];
 }
 
 /** 对手口径（nori/agent/bot）：由 mode + driver 判定，不看名字。
@@ -526,7 +549,7 @@ export function getAgentAvatar() {
  * 绝不借用 game_agent 的头像冒充主 agent。 */
 const HOST_AVATAR_ENDPOINT = /^\/api\/plugin\/kira-plugin-gamehub\/host-avatar(\?.*)?$/;
 
-export function resolveHostAvatar(value) {
+function resolveHostAvatar(value) {
   const s = String(value == null ? "" : value).trim();
   return HOST_AVATAR_ENDPOINT.test(s) ? s : "";
 }
@@ -541,15 +564,6 @@ export function setHostAvatar(value) {
 
 export function getHostAvatar() {
   return hostAvatar;
-}
-
-/** 进阶对手（agent 驱动）的对手座位才配进阶对手头像。
- * 简单规则 bot、人类座位、人设本人局一律 false——头像归属按模式，不按名字猜。 */
-export function isAgentOpponent(match, seat) {
-  if (!match || !seat || typeof seat !== "object") return false;
-  if (seat.kind === "human") return false;
-  if (modeOf(match).mode !== "practice") return false;
-  return driverOf(match) === "agent";
 }
 
 const TRUTHY = new Set([true, 1, "1", "true"]);

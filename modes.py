@@ -22,11 +22,21 @@
 - 本模块是纯函数（不依赖房间层/引擎状态），供 main/room/talk/judge/
   context/tools/web_api 共用；
 - 未知的选项键/取值一律归一到安全默认，绝不让坏数据炸掉读取路径。
+- Explicit write entry points (``strict=True``, new matches) still raise
+  ``ValueError`` for an invalid dou-dizhu lineup; read paths (``options_of``,
+  including already-persisted bad lineups) normalise with ``strict=False``: no
+  exception, but not silent either — one warning is logged and the
+  default/inferable lineup is used.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+# Standalone stdlib logger: this module is imported by host-independent tests
+# and by the engine-facing read paths, so it must not require the host package.
+logger = logging.getLogger(__name__)
 
 # 模式：对宿主主 agent 本人（S2 行动回合） / 对陪练（宿主主 agent 队友视角）
 MODE_NORI = "nori"
@@ -60,12 +70,52 @@ LINEUPS = {
     "bot_bot": ["human", "bot", "bot"],
 }
 
+# New matches and unknown data both fall back to this lineup (the single
+# "room host + action-notification turn" default).
+DEFAULT_LINEUP = "nori_agent"
 
-def _table_options(raw: Any) -> dict[str, Any]:
+# Persisted bad lineups are warned about only once, so reading options does not
+# spam the log every time.
+_warned_lineups: set[str] = set()
+
+
+def _lineup_from_seats(seat_list: list[Any]) -> str | None:
+    """Best-effort lineup recovery from the actual seat kinds.
+
+    Dou-dizhu seats are built from the lineup's drivers (``bot`` driver ->
+    ``bot`` seat kind, any other -> ``ai``), so the kind sequence identifies
+    most lineups. ``["human", "ai", "bot"]`` is ambiguous (``nori_bot`` and
+    ``agent_bot`` share it); it resolves to ``nori_bot`` — the host stays the
+    active player and the practice seat is the opponent, which keeps a running
+    game playable instead of silently handing the host seat to the assistant.
+    """
+    kinds = [str(getattr(seat, "kind", "")) for seat in seat_list]
+    if len(kinds) != 3 or kinds[0] != "human":
+        return None
+    if kinds[1:] == ["bot", "bot"]:
+        return "bot_bot"
+    if kinds[1:] == ["ai", "ai"]:
+        return "nori_agent"
+    if kinds[1:] == ["ai", "bot"]:
+        return "nori_bot"
+    return None
+
+
+def _table_options(raw: Any, *, seats: Any = None, strict: bool = True) -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
-    lineup = source.get("lineup", "nori_agent")
+    lineup = source.get("lineup", DEFAULT_LINEUP)
     if not isinstance(lineup, str) or lineup not in LINEUPS:
-        raise ValueError("不支持的斗地主阵容")
+        seat_list = _seats_of(seats)
+        fallback = _lineup_from_seats(seat_list) or DEFAULT_LINEUP
+        if strict:
+            raise ValueError("不支持的斗地主阵容")
+        # Persisted bad lineup: normalise to a playable default, never crash a
+        # read path and never accept it silently (one warning per bad value).
+        lineage = f"{lineup!r}->{fallback}"
+        if lineage not in _warned_lineups:
+            _warned_lineups.add(lineage)
+            logger.warning("斗地主阵容 %r 非法，按 %s 读取", lineup, fallback)
+        lineup = fallback
     drivers = list(LINEUPS[lineup])
     nori = next((i for i, driver in enumerate(drivers) if driver == "turn"), None)
     coach = nori is None
@@ -160,6 +210,7 @@ def normalize_mode_options(
     *,
     seats: Any = None,
     kind: str | None = None,
+    strict: bool = True,
 ) -> dict[str, Any]:
     """把任意输入归一为规范模式选项（dict，可 JSON 持久化）。
 
@@ -174,9 +225,15 @@ def normalize_mode_options(
       ``agent``，绝不把棋类的 S2 角色/触发器外溢到未来游戏。
 
     座位构成（``seats``）只在推断时使用。
+
+    ``strict`` only affects the dou-dizhu lineup: ``True`` (the write entry
+    point for new matches) raises ``ValueError`` for an invalid lineup;
+    ``False`` (the read path ``options_of``) normalises an already-persisted
+    bad lineup to a playable default and logs a warning, so a bad row can
+    never break view/state derivation.
     """
     if kind == "doudizhu":
-        return _table_options(raw)
+        return _table_options(raw, seats=seats, strict=strict)
     seat_list = _seats_of(seats)
     has_bot = _has_kind(seat_list, "bot")
     has_ai = _has_kind(seat_list, "ai")
@@ -253,10 +310,16 @@ def options_of(match: Any) -> dict[str, Any]:
     kind 从对局本身读取：legacy 且模块声明 ``supports_turn_driver``（如
     gomoku/reversi）的 ai 座位局迁移为 turn（S2 语义，重启恢复即得新行为）；
     其他 kind 保守保持 agent/bot 历史行为。
+
+    An already-persisted invalid dou-dizhu lineup is normalised here (warning
+    + playable default); a read path never raises.
     """
     raw = getattr(match, "mode_options", None)
     return normalize_mode_options(
-        raw, seats=match, kind=getattr(match, "kind", None)
+        raw,
+        seats=match,
+        kind=getattr(match, "kind", None),
+        strict=False,
     )
 
 
@@ -327,11 +390,15 @@ def opponent_seat_index(match: Any) -> int | None:
 
 
 def last_mover(match: Any, event: Any = None) -> int:
-    """实际最后一手落子的座位（easy 陪练应手内嵌在同一次 apply 里）。
+    """The seat that actually made the latest move.
 
-    事件里的 ``seat`` 是**发起动作**的座位；规则陪练的应手由引擎在同一
-    次 apply 内自动完成，最后一条 log 才是真正的最新落子。通知触发、
-    视角归属都以最新 log 为准；空 log 时回退事件座位。
+    The event's ``seat`` is the seat that **initiated the action**; the rule
+    practice seat's reply may already have been filled in by the engine within
+    the same apply (a pure engine call), or it may be played by the room layer
+    in a separate apply afterwards. In both shapes the latest log entry is the
+    truly latest move, so notification triggering and viewpoint attribution
+    always follow the latest log; with an empty log we fall back to the event
+    seat.
     """
     log = getattr(match, "log", None) or ()
     if log:
@@ -348,10 +415,13 @@ def last_mover(match: Any, event: Any = None) -> int:
 def trigger_seat(match: Any, event: Any = None) -> int:
     """评论触发判据用的座位（角色感知）。
 
-    - 队友局：真实最后一手（easy 陪练应手内嵌在同一次 apply，事件座位
-      恒为发起 apply 的人类座位，看不出陪练是否已应手）；
-    - 对手局（含 legacy）：沿事件座位（与历史判据一致；对手局的 ai 座位
-      落子事件自带真实座位，不存在内嵌应手）。
+    - Teammate matches: the true latest move (the practice seat's reply may be
+      inlined by the engine or land in a separate apply by the room layer; the
+      event seat is always the seat that initiated the apply, so it cannot show
+      whether the practice seat has replied yet);
+    - Opponent matches (incl. legacy): follow the event seat (consistent with
+      the historical criterion; in opponent matches the ai seat's move event
+      carries the real seat, and there is no inlined reply).
     """
     if role_of(match) == ROLE_TEAMMATE:
         return last_mover(match, event)

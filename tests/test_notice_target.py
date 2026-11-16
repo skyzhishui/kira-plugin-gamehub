@@ -70,6 +70,21 @@ def test_validate_web_session_matches_host_rules() -> None:
     assert "不能为空" in error
 
 
+def test_private_session_test_has_one_semantics() -> None:
+    """``is_private_session`` is strict; ``session_type_of`` is lenient.
+
+    The tools used to carry a second copy (``session_type_of(sid) ==
+    "private"``) which called ``"garbage"`` private; both now share this
+    single helper.
+    """
+    assert is_private_session("garbage") is False  # malformed: no colon
+    assert session_type_of("garbage") == "private"  # lenient fallback stays
+    assert is_private_session("webchat:dm:u1") is True
+    assert is_private_session("qq:dm:u1") is True
+    assert is_private_session("qq:gm:g1") is False
+    assert is_private_session("") is False
+
+
 def test_target_label_shows_name_platform_and_id() -> None:
     label = target_label(LIVE2D_SESSION, "桌面角色")
     assert "桌面角色" in label

@@ -11,7 +11,7 @@ kira-plugin-gamehub/
 ├── modes.py                # pure mode/role/driver helpers
 ├── assistance.py           # difficulty + ranked moves
 ├── plan.py                 # pure plan helpers
-├── identity.py             # page player identity
+├── identity.py             # shared nickname cap (MAX_NICKNAME_LEN)
 ├── agent_history.py        # per-(match, seat) transcript
 ├── targets.py              # sid parsing / session routing
 ├── talk.py                 # table talk notices
@@ -41,7 +41,8 @@ Import conventions:
 - `host/*` imports plugin-root modules as `from ..room ...`.
 - Engine's `_host_module("modes"|"assistance")` resolves plugin-root siblings in
   production and falls back to `None` for standalone engine tests.
-- Logging: `from core.plugin import logger` everywhere. No `logging.getLogger`.
+- Logging: `from core.plugin import logger` everywhere; root modules keep a
+  plain `logging.getLogger` fallback only for host-less standalone test runs.
 
 ## Session & adapter
 
@@ -158,10 +159,20 @@ host administration, control-token, move, delegation, identity or new-game API.
 - `spectator_port`: `0` derives the host's `data/webui.json` port + 10000
   (normally 15267). Invalid/occupied ports disable the spectator service with an
   error log, without taking the game runtime down.
-- `spectator_public_url`: optional separate HTTPS origin. Without it, the player
-  browser's hostname plus the spectator port is used over HTTP (trusted LAN).
-  For public access, configure HTTPS/WSS and preserve the public Host/Origin at
-  the reverse proxy. Do not expose the host WebUI through this proxy.
+- `spectator_public_url`: optional public origin. Used for invite links, and
+  as the **Origin whitelist** when a TLS-terminating reverse proxy rewrites
+  the Host header (see below). Empty uses the browser hostname and spectator
+  port over HTTP (trusted LAN).
+- Origin check (CSRF boundary): requests carrying an `Origin` header must
+  match this listener's `Host` **authority** (host:port) — `X-Forwarded-*`
+  headers are never trusted. Behind a TLS-terminating proxy the browser sends
+  an `https://` Origin while the listener is plain HTTP, so scheme equality is
+  impossible; authority equality is the boundary, and a proxy that rewrites
+  Host must additionally configure `spectator_public_url` to whitelist the
+   public origin. When the Origin authority matches the configured public
+   authority, its configured scheme is authoritative even if Host also matches:
+   an `http://` Origin cannot bypass an explicitly pinned `https://` origin.
+   Malformed/foreign origins get 403.
 
 The player uses **Copy spectator link** to obtain a per-match random invitation.
 The invitation is carried in the fragment and removed from the address bar on
@@ -237,7 +248,8 @@ as a delayed task (`_check_bot_locked` → `_spawn_bot_steps` → `_run_bot_step
 so the move lands as a separate version bump + WS broadcast.
 
 - Delay window: `bot_move_delay_min_ms` / `bot_move_delay_max_ms`
-  (default 1000 / 2000 ms, random per move; `0 / 0` falls back to 1-2 s).
+  (default 1000 / 2000 ms, random per move; an explicit `0 / 0` disables the
+  pause, and `max < min` clamps to a fixed `min`).
 - `game_agent`'s rule-bot fill (`ai_mode=bot`, LLM failure fallback) uses the same
   window through `_wait_bot_pace`, so a bot-only match is paced too.
 - Both take the move from `engine.match.bot_move`, which keeps the level-based
@@ -311,8 +323,10 @@ Consequences: turn notices and talk prompts self-reference the host agent;
   Routes: `/ping`, `/page-session`, `/identity` (GET/POST), `/ui-config`,
   `/notice-test`, `/games`, `/matches` (POST), `/matches/{id}` (GET),
   `/matches/{id}/control`, `/matches/{id}/actions` (POST),
-  `/matches/{id}/mode` (GET/POST), `/matches/{id}/delegation` (POST),
-  `/agent-avatar` (GET/POST).
+  `/matches/{id}/invite` (POST, needs the spectator listener),
+  `/chat` (GET/POST), `/matches/{id}/mode` (GET/POST),
+  `/matches/{id}/delegation` (POST), `/agent-avatar` (GET/POST),
+  `/host-avatar` (GET).
 - WS: `@register.ws("/matches/{match_id}/ws")` → `host/web.py::serve_ws`.
   The host calls the handler with the socket only, so the match id is read from
   `ws.path_params` and the seat token from `?t=`; the host JWT is read by the

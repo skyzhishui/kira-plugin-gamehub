@@ -99,7 +99,10 @@ class GamehubMatch(Base):
         Text, nullable=False, default="{}", comment="Engine state JSON (incl. RNG)"
     )
     log_json: Mapped[str] = mapped_column(
-        Text, nullable=False, default="[]", comment="Move log JSON (<=500)"
+        Text,
+        nullable=False,
+        default="[]",
+        comment="Move log JSON (clipped to the last 500 entries on resign)",
     )
     chat_json: Mapped[str] = mapped_column(
         Text,
@@ -147,7 +150,7 @@ class GamehubChatLine(Base):
     match_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     uid: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     role: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="player | agent"
+        String(16), nullable=False, comment="player | agent | spectator"
     )
     sender: Mapped[str] = mapped_column(
         String(64), nullable=False, default="", comment="Display name"

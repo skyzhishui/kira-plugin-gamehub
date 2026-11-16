@@ -145,7 +145,29 @@ class GamehubRuntime:
         return name
 
     async def stop(self) -> None:
+        """Stop producers, persist terminal state, close WS, then the store.
+
+        Order matters (review P1-9):
+
+        1. ``plugin.stopping = True`` — every producer checks it before doing
+           more work (room drive tasks, judge/talk workers, WS loops);
+        2. stop producers: director/talk/judge workers **and every room's
+           in-flight AI/bot drive tasks** (they may still write through the
+           store);
+        3. ``rooms.flush_all()`` — dirty rooms must land their final state
+           before the store closes;
+        4. per-room ``close_all()`` — room WS clients get
+           ``CLOSE_STOPPING=4003``; the server-side close also unblocks the
+           page WS handlers parked in ``receive()`` so the
+           ``plugin.stopping`` check in ``host/web.serve_ws`` takes effect
+           without waiting for another client frame;
+        5. ``store.close()`` last: nothing writes after this point.
+
+        Every step is exception-isolated, and a partially started runtime
+        (start() failed midway) stops only what exists.
+        """
         plugin = self.plugin
+        # 1) Stop signal first: producers observe it before their next step.
         plugin.stopping = True
         if self.director is not None:
             try:
@@ -153,11 +175,50 @@ class GamehubRuntime:
             except Exception as e:  # noqa: BLE001 - teardown must not raise
                 logger.warning(f"gamehub: director stop failed: {e}")
         if self.talk is not None:
-            await self.talk.stop()
+            try:
+                await self.talk.stop()
+            except Exception as e:  # noqa: BLE001 - teardown must not raise
+                logger.warning(f"gamehub: talk stop failed: {e}")
         if self.judge is not None:
-            await self.judge.stop()
+            try:
+                await self.judge.stop()
+            except Exception as e:  # noqa: BLE001 - teardown must not raise
+                logger.warning(f"gamehub: judge stop failed: {e}")
+        # 2) Room producers: in-flight AI/bot drive tasks may still apply a
+        #    move and write through the store — cancel them before flushing.
+        #    cancel() is fire-and-forget by design: every drive task body
+        #    re-raises CancelledError, so no task can start a new lock
+        #    section, and the awaits in flush_all/close_all below give the
+        #    cancelled tasks scheduling points while the store is still open
+        #    (a save already handed to aiosqlite serializes before the
+        #    engine closes — nothing writes to a closed store).
+        rooms = self.rooms
+        if rooms is not None:
+            try:
+                for room in rooms.all_rooms():
+                    room.cancel_drive_tasks()
+            except Exception as e:  # noqa: BLE001 - teardown must not raise
+                logger.warning(f"gamehub: drive task cancel failed: {e}")
+        # 3) Persist every cached room's final state while the store is open.
+        if rooms is not None:
+            try:
+                await rooms.flush_all()
+            except Exception as e:  # noqa: BLE001 - flush is best-effort
+                logger.warning(f"gamehub: flush_all failed: {e}")
+        # 4) Close room WS clients (4003); this unblocks the page WS
+        #    handlers' receive() loops (see host/web.serve_ws).
+        if rooms is not None:
+            for room in rooms.all_rooms():
+                try:
+                    await room.close_all()
+                except Exception as e:  # noqa: BLE001 - one room must not block
+                    logger.warning(f"gamehub: close_all failed ({room.match.id}): {e}")
+        # 5) The store closes last: no producer writes past this point.
         if self.store is not None:
-            await self.store.close()
+            try:
+                await self.store.close()
+            except Exception as e:  # noqa: BLE001 - teardown must not raise
+                logger.warning(f"gamehub: store close failed: {e}")
         set_outbound_sink(None)
         self._started = False
         logger.info("gamehub runtime stopped")

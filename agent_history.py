@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 # 历史里的模型说明只保留“判断要点/动作意图”，避免整盘回显。
@@ -63,12 +63,31 @@ def _shorten_history_text(text: str, max_chars: int, max_lines: int) -> str:
     return shortened
 
 
-def _clean_tool_calls(raw: Any) -> list[dict[str, Any]]:
-    """规范化 assistant.tool_calls（保留完整 id / name / arguments）。"""
+def normalize_tool_calls(
+    raw: Any,
+    *,
+    id_factory: Callable[[int], str] | None = None,
+    drop_unidentified: bool = False,
+) -> list[dict[str, Any]]:
+    """Normalize ``assistant.tool_calls`` to OpenAI declarations (one impl).
+
+    Single implementation for both consumers (review D-17):
+
+    - :mod:`game_agent` (stream tail) passes ``id_factory`` so a call missing
+      its id gets a synthetic ``call_<round>_<index>`` — every declared call
+      must stay executable in the live transcript;
+    - :func:`sanitize_entry` (history) passes ``drop_unidentified=True``:
+      entries with neither id nor name carry no information and are dropped
+      instead of getting placeholder ids that would dangle.
+
+    ``arguments`` is JSON-dumped when the provider sent a structured object;
+    ``name`` falls back to the ``unknown_tool`` placeholder so an empty-name
+    assistant message is never replayed verbatim.
+    """
     if not isinstance(raw, list):
         return []
     out: list[dict[str, Any]] = []
-    for item in raw:
+    for index, item in enumerate(raw):
         if not isinstance(item, dict):
             continue
         function = item.get("function")
@@ -84,7 +103,9 @@ def _clean_tool_calls(raw: Any) -> list[dict[str, Any]]:
                 arguments = json.dumps(arguments, ensure_ascii=False)
             except (TypeError, ValueError):
                 arguments = str(arguments)
-        if not call_id and not name:
+        if not call_id and id_factory is not None:
+            call_id = id_factory(index)
+        if not call_id and drop_unidentified:
             continue
         out.append(
             {
@@ -94,6 +115,11 @@ def _clean_tool_calls(raw: Any) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _clean_tool_calls(raw: Any) -> list[dict[str, Any]]:
+    """History-side normalization (keeps only identified calls)."""
+    return normalize_tool_calls(raw, drop_unidentified=True)
 
 
 def sanitize_entry(messages: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

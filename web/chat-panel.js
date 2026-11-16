@@ -25,7 +25,7 @@ import { errorText } from "./shared/i18n.js";
 export const CHAT_MAX_CHARS = 500;
 /** 超过该字数才出现实时计数（>400 起出现，500 封顶）。 */
 export const CHAT_COUNTER_FROM = 400;
-export const CHAT_PAGE_LIMIT = 100;
+const CHAT_PAGE_LIMIT = 100;
 export const CHAT_COLLAPSED_KEY = "gamehub_chat_collapsed";
 /** 相同文本在该毫秒窗口内重复到达视为同一条（WS 帧与 POST 回包可能撞车）。 */
 export const CHAT_DEDUPE_MS = 2000;
@@ -380,8 +380,18 @@ export function createChatPanel({
       renderEmpty();
       return;
     }
-    scroller.textContent = "";
-    list.forEach((m) => scroller.appendChild(messageRow(m)));
+    // Suspend announcements during a full-table rebuild (backfill / first fill /
+    // trim / out-of-order): aria-live would read every new node, turning a history
+    // backfill into one long repeated monologue. polite is restored after the
+    // rebuild, so items appended incrementally are still announced one by one.
+    // try/finally: a throwing row builder must not leave the region muted forever.
+    scroller.setAttribute("aria-live", "off");
+    try {
+      scroller.textContent = "";
+      list.forEach((m) => scroller.appendChild(messageRow(m)));
+    } finally {
+      scroller.setAttribute("aria-live", "polite");
+    }
   }
 
   function renderJump() {
@@ -624,20 +634,17 @@ export function createChatPanel({
   }
 
   /** WS 重连后补拉（onLive 钩子）：只在新行真正到达时重绘，不打断滚动/未读。
-   * 与 load() 的区别：失败静默（下一次建连再试），不渲染加载失败提示。 */
+   * 与 load() 的区别：失败静默（下一次建连再试），不渲染加载失败提示。
+   * Refill goes through ingest(backfill) rather than bare renderList: a reconnect can
+   * deliver several rows at once, and repainting the table directly would skip the
+   * unread counter and the "jump to latest" button updates. */
   async function refresh() {
     try {
       const data = await api(`/chat?limit=${CHAT_PAGE_LIMIT}${matchId ? `&match_id=${encodeURIComponent(matchId)}` : ""}`);
       if (!data || typeof data !== "object") return;
       apiEnabled = data.enabled === false ? false : data.enabled === true ? true : apiEnabled;
       renderInput();
-      const merged = mergeMessages(list, Array.isArray(data.messages) ? data.messages : []);
-      list = merged.list;
-      if (merged.added.length) {
-        renderList();
-        renderJump();
-        if (!collapsed) scrollToLatest();
-      }
+      ingest(Array.isArray(data.messages) ? data.messages : [], { backfill: true });
     } catch {
       /* 补拉失败不打扰用户：漏掉的帧在下一次建连/刷新时回填 */
     }

@@ -5,7 +5,7 @@
  * 2) 宿主口令只读 localStorage["jwt_token"]；
  * 3) 对局 WS 地址走 /ws/plugin/<id>/matches/<id>/ws，座位口令 ?t=、
  *    宿主口令 ?token=（不是 API 基址下的 /matches/<id>/ws）。
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";

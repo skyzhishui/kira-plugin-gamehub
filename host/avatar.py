@@ -146,7 +146,14 @@ def avatar_url(plugin: Any) -> str:
 
 
 def decode_data_url(payload: str) -> tuple[bytes, str]:
-    """Decode ``data:image/png;base64,...`` into ``(bytes, mime)``."""
+    """Decode ``data:image/png;base64,...`` into ``(bytes, mime)``.
+
+    The size cap is enforced on the base64 text **before** decoding too: a
+    huge payload used to be fully decoded into memory only to be rejected
+    afterwards (review P2). ``4 * ceil(N/3)`` is the encoded length of N
+    bytes, so anything longer than ``4 * (MAX // 3 + 1)`` cannot decode into
+    an accepted image.
+    """
     raw = str(payload or "").strip()
     match = _DATA_URL_RE.match(raw)
     if not match:
@@ -155,6 +162,8 @@ def decode_data_url(payload: str) -> tuple[bytes, str]:
     data = match.group("data") or ""
     if not match.group("b64"):
         raise ValueError("头像数据格式不正确（需要 base64 编码）")
+    if len(data) > 4 * (MAX_AVATAR_BYTES // 3 + 1):
+        raise ValueError(f"头像文件过大（上限 {MAX_AVATAR_BYTES // 1024 // 1024}MB）")
     try:
         blob = base64.b64decode(data, validate=False)
     except (binascii.Error, ValueError) as exc:

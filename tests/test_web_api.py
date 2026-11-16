@@ -8,6 +8,7 @@ The WS test drives :func:`host.web.serve_ws` with a queue-backed fake socket.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,7 +71,6 @@ class FakeCtx:
         self.published: list[tuple[Any, Any, bool]] = []
         self.session_ok = True
         self.session_mgr = SimpleNamespace(resolve_session=self._resolve)
-        self.bot_config = SimpleNamespace(bot=SimpleNamespace(nickname="汐祈（Seki）"))
 
     def _resolve(self, sid: str) -> Any:
         return SimpleNamespace(sid=sid) if self.session_ok else None
@@ -291,28 +291,24 @@ async def test_ui_config_notice_target_override(tmp_path):
     assert config["notice_target_error"]
 
 
-async def test_notice_target_awaits_the_async_resolver(tmp_path):
-    """``SessionManager.resolve_session`` is async: a bare call must not pass."""
+async def test_notice_target_awaits_both_sync_and_async_resolvers(tmp_path):
+    """``SessionManager.resolve_session`` may be sync or async: awaiting must
+    work for both, and a resolver returning None is reported as invalid."""
     plugin = make_plugin(tmp_path)
     api = GamehubApi(plugin)
+    assert (await api._notice_target())[:2] == ("gamehub:gm:room", "default")
 
-    sid, status, error = await api._notice_target()
-    assert (sid, status, error) == ("gamehub:gm:room", "default", "")
-
-    # A resolver returning None (no session) is reported as invalid, not usable.
-    plugin.ctx.session_ok = False
-    sid, status, error = await api._notice_target()
-    assert status == "invalid" and error
-
-
-async def test_notice_target_tolerates_a_sync_resolver(tmp_path):
-    """Older/simple hosts may expose a sync resolver; awaiting must still work."""
-    plugin = make_plugin(tmp_path)
+    # Older/simple hosts may expose a sync resolver.
     plugin.ctx.session_mgr = SimpleNamespace(
         resolve_session=lambda sid: SimpleNamespace(sid=sid)
     )
-    api = GamehubApi(plugin)
     assert (await api._notice_target())[1] == "default"
+
+    # A resolver returning None (no session) is invalid, not usable.
+    plugin = make_plugin(tmp_path)
+    plugin.ctx.session_ok = False
+    sid, status, error = await GamehubApi(plugin)._notice_target()
+    assert status == "invalid" and error
 
 
 async def test_ui_config_avatar_is_plugin_owned(tmp_path):
@@ -751,84 +747,79 @@ async def test_ws_first_frame_ping_and_broadcast(tmp_path):
     assert ws_hub.subscriber_count(match_id) == 0
 
 
-async def test_ws_spectator_invalid_token_and_missing_match(tmp_path):
+async def test_ws_spectator_invalid_token_missing_match_and_no_rooms(tmp_path):
     plugin = make_plugin(tmp_path)
     api = GamehubApi(plugin)
     created = await data_of(api.create_match({"kind": "gomoku"}))
     match_id = created["match"]["id"]
 
+    # No token: spectator view.
     spectator = FakeWS()
     await spectator.queue.put(None)
     await asyncio.wait_for(serve_ws(plugin, spectator, match_id, ""), timeout=2.0)
     assert spectator.sent[0]["type"] == "match"
     assert spectator.sent[0]["match"]["me"] is None
 
+    # Bad token: an explicit error, then the spectator view (never a seat).
     invalid = FakeWS()
     await invalid.queue.put(None)
     await asyncio.wait_for(serve_ws(plugin, invalid, match_id, "nope"), timeout=2.0)
-    assert invalid.sent[0] == {"type": "error", "code": "bad_token", "message": "座位口令无效，已转为观战"}
+    assert invalid.sent[0] == {
+        "type": "error", "code": "bad_token", "message": "座位口令无效，已转为观战"
+    }
     assert invalid.sent[1]["type"] == "match"
     assert invalid.sent[1]["match"]["me"] is None
 
+    # Unknown match.
     missing = FakeWS()
     await asyncio.wait_for(serve_ws(plugin, missing, "missing", ""), timeout=2.0)
-    assert missing.sent == [{"type": "error", "code": "not_found", "message": "对局不存在"}]
+    assert missing.sent == [
+        {"type": "error", "code": "not_found", "message": "对局不存在"}
+    ]
 
-
-async def test_ws_without_rooms_reports_error(tmp_path):
-    plugin = make_plugin(tmp_path)
+    # Runtime not wired yet.
     plugin.rooms = None
-    ws = FakeWS()
-    await asyncio.wait_for(serve_ws(plugin, ws, "any", ""), timeout=2.0)
-    assert ws.sent == [{"type": "error", "code": "not_ready", "message": "对局服务不可用"}]
+    unwired = FakeWS()
+    await asyncio.wait_for(serve_ws(plugin, unwired, "any", ""), timeout=2.0)
+    assert unwired.sent == [
+        {"type": "error", "code": "not_ready", "message": "对局服务不可用"}
+    ]
 
 
 # ----------------------------------------------------------------------
 #  Host agent identity: name + selfie reference image
 # ----------------------------------------------------------------------
-async def test_ui_config_host_avatar_uses_the_persona_reference_image(tmp_path):
-    """The host seat uses the active persona's selfie reference image.
-
-    Resolved through the host's public ``PersonaManager.get_reference_image``
-    accessor — never by guessing a path — so the plugin cannot show one
-    identity in place of another.
-    """
-    plugin = make_plugin(tmp_path)
+async def test_ui_config_host_avatar_resolves_from_the_persona_accessor(tmp_path):
+    """The host seat avatar is the active persona's reference image, resolved
+    through ``PersonaManager.get_reference_image`` (never a guessed path) —
+    and an absent persona/image/manager degrades to "" so the seat renders a
+    name initial instead."""
     ref = tmp_path / "seki.png"
     ref.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    async def get_reference_image(persona_id=None):
+    async def from_image(persona_id=None):
         return ref
 
-    plugin.ctx.persona_mgr = SimpleNamespace(get_reference_image=get_reference_image)
-    api = GamehubApi(plugin)
-
-    config = await data_of(api.ui_config())
-    assert config["host_avatar"].startswith(
-        "/api/plugin/kira-plugin-gamehub/host-avatar?v="
-    )
-    # The game_agent avatar stays a separate, plugin-owned asset.
-    assert config["agent_avatar"] == "./assets/agent-avatar.png"
-
-
-async def test_ui_config_host_avatar_is_empty_without_a_reference_image(tmp_path):
-    """No reference image → empty string, so the seat renders a name initial."""
-    plugin = make_plugin(tmp_path)
-
-    async def get_reference_image(persona_id=None):
+    async def none(persona_id=None):
         return None
 
-    plugin.ctx.persona_mgr = SimpleNamespace(get_reference_image=get_reference_image)
-    api = GamehubApi(plugin)
-    config = await data_of(api.ui_config())
-    assert config["host_avatar"] == ""
-
-
-async def test_ui_config_host_avatar_tolerates_a_missing_persona_manager(tmp_path):
-    plugin = make_plugin(tmp_path)
-    plugin.ctx.persona_mgr = None
-    api = GamehubApi(plugin)
-    assert (await data_of(api.ui_config()))["host_avatar"] == ""
+    cases = [
+        (SimpleNamespace(get_reference_image=from_image), True),
+        (SimpleNamespace(get_reference_image=none), False),
+        (None, False),  # no persona manager at all
+    ]
+    for persona_mgr, expect_avatar in cases:
+        plugin = make_plugin(tmp_path)
+        plugin.ctx.persona_mgr = persona_mgr
+        config = await data_of(GamehubApi(plugin).ui_config())
+        if expect_avatar:
+            assert config["host_avatar"].startswith(
+                "/api/plugin/kira-plugin-gamehub/host-avatar?v="
+            )
+        else:
+            assert config["host_avatar"] == ""
+        # The game_agent avatar stays a separate, plugin-owned asset.
+        assert config["agent_avatar"] == "./assets/agent-avatar.png"
 
 
 async def test_ui_config_names_host_and_agent_separately(tmp_path):
@@ -940,17 +931,19 @@ async def test_chat_send_publishes_and_records_the_player_line(tmp_path, monkeyp
     assert history["messages"][0]["role"] == "player"
 
 
-async def test_chat_send_validates_and_paces(tmp_path):
+async def test_chat_send_validates_paces_and_caps_length(tmp_path):
     plugin = make_plugin(tmp_path)
     api = GamehubApi(plugin)
 
     empty = await error_of(api.chat_send({"text": "   "}), 400)
     assert empty.code == "text_empty"
-    long = await error_of(api.chat_send({"text": "字" * 501}), 400)
-    assert long.code == "text_too_long"
+    (await error_of(api.chat_send({"text": "字" * 501}), 400)).code == "text_too_long"
 
-    ok = await data_of(api.chat_send({"text": "你好"}))
-    assert ok["message"]["text"] == "你好"
+    # The 500-char boundary is accepted at full length (no silent trim).
+    boundary = await data_of(api.chat_send({"text": "字" * 500}))
+    assert len(boundary["message"]["text"]) == 500
+
+    # Pacing: the next line inside the window is rate-limited.
     paced = await error_of(api.chat_send({"text": "又来了"}), 429)
     assert paced.code == "rate_limited"
     assert not plugin.ctx.published or len(plugin.ctx.published) == 1
@@ -977,8 +970,204 @@ async def test_chat_disabled_and_undeliverable(tmp_path, monkeypatch):
     assert unreachable.code == "not_ready"
 
 
-async def test_chat_send_is_length_capped_and_trimmed(tmp_path):
+# ----------------------------------------------------------------------
+#  P1-9 regression (serve_ws level): stopping via room close must release
+#  the handler parked in receive.
+# ----------------------------------------------------------------------
+class _ClosingFakeWS(FakeWS):
+    """Fake that models the real framework: a server-side close ends a
+    pending ``receive`` (it raises, ``serve_ws`` treats it as disconnect)."""
+
+    async def receive_json(self) -> Any:
+        item = await self.queue.get()
+        if item is None or self.closed is not None:
+            raise RuntimeError("connection closed by server")
+        return item
+
+    async def close(self, code: int = 1000, message: bytes = b"") -> None:
+        self.closed = (code, message)
+        # Wake a receive parked in queue.get(), like the real server does.
+        with contextlib.suppress(asyncio.QueueFull):
+            self.queue.put_nowait(None)
+
+
+async def test_stop_closing_the_room_releases_the_serve_ws_loop(tmp_path):
     plugin = make_plugin(tmp_path)
     api = GamehubApi(plugin)
-    boundary = await data_of(api.chat_send({"text": "字" * 500}))
-    assert len(boundary["message"]["text"]) == 500
+    created = await data_of(api.create_match({"kind": "gomoku"}))
+    match_id = created["match"]["id"]
+
+    ws = _ClosingFakeWS()
+    task = asyncio.create_task(serve_ws(plugin, ws, match_id, created["token"]))
+    try:
+        await wait_for(lambda: len(ws.sent) >= 1)
+        room = plugin.rooms.get_room(match_id)
+        assert room is not None
+
+        # The runtime stop path: flag first, then close_all (4003).
+        plugin.stopping = True
+        await room.close_all()
+        # The parked handler must finish WITHOUT any further client frame.
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        if not task.done():
+            await ws.queue.put(None)
+            await asyncio.wait_for(task, timeout=2.0)
+
+    assert ws.closed is not None and ws.closed[0] == 4003
+    assert ws_hub.subscriber_count(match_id) == 0
+    assert room.sockets.get(ws) is None
+
+
+# ----------------------------------------------------------------------
+#  T-9 (partial): direct unit tests for host/bridge (previously only
+#  covered indirectly through host.web re-exports).
+# ----------------------------------------------------------------------
+async def test_outbound_bridge_forwards_to_the_installed_sink_and_drops_when_unwired():
+    from host.bridge import emit_outbound, set_outbound_sink
+
+    set_outbound_sink(None)
+    # Unwired: silently dropped.
+    await emit_outbound("gamehub:gm:room", object())
+
+    received: list[tuple[str, Any]] = []
+
+    async def sink(sid: str, chain: Any) -> None:
+        received.append((sid, chain))
+
+    set_outbound_sink(sink)
+    try:
+        chain = object()
+        await emit_outbound("gamehub:gm:room", chain)
+        assert received == [("gamehub:gm:room", chain)]
+    finally:
+        set_outbound_sink(None)
+
+
+def test_ws_hub_subscribe_broadcast_and_unsubscribe():
+    """Broken sockets are dropped from fan-out without breaking others."""
+    import host.bridge as bridge_module
+
+    hub = bridge_module.MatchWSHub()
+
+    class _Sock:
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_json(self, payload: dict[str, Any]) -> None:
+            if self.fail:
+                raise RuntimeError("socket gone")
+            self.sent.append(payload)
+
+    good, bad = _Sock(), _Sock(fail=True)
+    hub.subscribe("bridge-match", good)
+    hub.subscribe("bridge-match", bad)
+    assert hub.subscriber_count("bridge-match") == 2
+
+    async def scenario():
+        await hub.broadcast("bridge-match", {"type": "match", "match": {}})
+        assert good.sent == [{"type": "match", "match": {}}]
+        # The broken socket was removed; the healthy one keeps receiving.
+        await hub.broadcast("bridge-match", {"type": "match", "match": {}})
+        assert len(good.sent) == 2
+        assert hub.subscriber_count("bridge-match") == 1
+        hub.unsubscribe("bridge-match", good)
+        assert hub.subscriber_count("bridge-match") == 0
+
+    asyncio.run(scenario())
+
+
+# ----------------------------------------------------------------------
+#  chat_store readiness regression: construction and initialization must
+#  complete under the SAME lock — a second caller may neither skip init
+#  against an early-assigned engine nor return before the DDL finished
+#  (parent follow-up on the lazy-store P2 fix).
+# ----------------------------------------------------------------------
+class _TwoPhaseStore:
+    """MatchStore stand-in: assigns ``engine`` first, then blocks mid-DDL."""
+
+    def __init__(self, data_dir: Any) -> None:
+        self.data_dir = data_dir
+        self.engine: Any = None
+        self.init_calls = 0
+        self.ddl_done = False
+        self.ddl_released = asyncio.Event()
+
+    async def init(self) -> None:
+        self.init_calls += 1
+        self.engine = object()  # early assignment = the old race window
+        await self.ddl_released.wait()  # DDL "in progress"
+        self.ddl_done = True
+
+
+async def test_chat_store_second_caller_waits_for_init_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from host import store as store_module
+
+    plugin = make_plugin(tmp_path)
+    plugin._runtime = None  # force the lazily owned store path
+    api = GamehubApi(plugin)
+    monkeypatch.setattr(store_module, "MatchStore", _TwoPhaseStore)
+
+    first = asyncio.create_task(api.chat_store())
+    # Park init mid-flight: engine already assigned, DDL still blocked.
+    await wait_for(lambda: getattr(api._own_store, "engine", None) is not None)
+    assert api._own_store.engine is not None
+    assert api._own_store.ddl_done is False
+
+    second = asyncio.create_task(api.chat_store())
+    await asyncio.sleep(0.05)
+    # The second caller must remain pending: the old code returned here with
+    # an engine that existed but a schema that did not.
+    assert not second.done()
+    assert not first.done()
+
+    api._own_store.ddl_released.set()
+    ready_a, ready_b = await asyncio.gather(first, second)
+    assert ready_a is ready_b is api._own_store
+    assert ready_a.ddl_done is True  # readiness, not just constructor count
+    assert ready_a.init_calls == 1  # the recheck prevents a double init
+
+
+async def test_chat_store_runtime_store_fallback_init_is_serialized(tmp_path: Path) -> None:
+    plugin = make_plugin(tmp_path)
+    shared = _TwoPhaseStore(tmp_path)
+    plugin._runtime = SimpleNamespace(store=shared)
+    api = GamehubApi(plugin)
+
+    first = asyncio.create_task(api.chat_store())
+    await wait_for(lambda: shared.engine is not None)
+    second = asyncio.create_task(api.chat_store())
+    await asyncio.sleep(0.05)
+    assert not second.done()  # same lock/recheck covers the runtime store
+
+    shared.ddl_released.set()
+    a, b = await asyncio.gather(first, second)
+    assert a is b is shared
+    assert shared.init_calls == 1 and shared.ddl_done is True
+
+
+async def test_chat_store_dispose_serializes_with_in_flight_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from host import store as store_module
+
+    plugin = make_plugin(tmp_path)
+    plugin._runtime = None
+    api = GamehubApi(plugin)
+    monkeypatch.setattr(store_module, "MatchStore", _TwoPhaseStore)
+
+    init_task = asyncio.create_task(api.chat_store())
+    await wait_for(lambda: getattr(api._own_store, "engine", None) is not None)
+
+    dispose_task = asyncio.create_task(api.dispose())
+    await asyncio.sleep(0.05)
+    assert not dispose_task.done()  # dispose waits on the same lock as init
+
+    api._own_store.ddl_released.set()
+    ready = await init_task
+    await asyncio.wait_for(dispose_task, timeout=2.0)
+    assert ready.ddl_done is True
+    assert api._own_store is None  # disposed only after init completed

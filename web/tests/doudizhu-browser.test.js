@@ -8,7 +8,7 @@
  * 5) 终局：结算面板（分数/春天/炸弹）出现，操作行收起；
  * 6) 销毁幂等、宿主 class 复位。
  *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";

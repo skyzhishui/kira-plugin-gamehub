@@ -47,7 +47,22 @@ import pytest
 
 PACKAGE = "gamehub_under_test"
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _find_repo_root() -> Path:
+    """The checkout that contains the host ``core/`` package.
+
+    Walking up beats a hard-coded ``parents[N]`` (T-8): the plugin may sit at
+    any install depth, and a wrong guess made the parse-contract tests skip
+    silently instead of running.
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "core").is_dir():
+            return parent
+    return Path(__file__).resolve().parents[4]
+
+
+REPO_ROOT = _find_repo_root()
 PARSE_SOURCE = REPO_ROOT / "core" / "workflow" / "src" / "im" / "message_delivery.py"
 
 

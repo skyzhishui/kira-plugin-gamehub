@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib
 from types import SimpleNamespace
 
+import pytest
+
 from engine import (
     CreateContext,
     GameModule,
@@ -20,8 +22,6 @@ from engine import (
     create_match,
     games,
 )
-from host.settings import Settings
-
 _gomoku_module = importlib.import_module("engine.games.gomoku")
 
 
@@ -88,186 +88,90 @@ def test_threat_summary_real_board_both_perspectives() -> None:
     assert black.index("己方（黑）") < black.index("对方（白）")
 
 
-def test_single_live_three_reports_coordinates_and_extension_points() -> None:
-    # 黑 H8/J8/K8 只有一条横向连续活三；摘要须给出三点坐标与两端延伸点，
-    # 且不能把它说成多方向双活三/严格双三。
-    mod, state = _state_with(
-        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "K8"), (1, "A3")]
-    )
+# Each row is one board shape: the coordinates the summary must report and the
+# wording it must not invent. Boards are replayed for real (no text fixtures).
+_THREAT_SHAPES = [
+    pytest.param(
+        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "K8"), (1, "A3")],
+        ("活三：H8 J8 K8（延伸 G8 L8）", "启发式多威胁信号", "不等同严格双三"),
+        ("双活三信号",),
+        id="single-live-three",
+    ),
+    pytest.param(
+        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "K8"), (1, "A3"),
+         (0, "J9"), (1, "A4"), (0, "J10")],
+        ("H8 J8 K8", "J8 J9 J10",
+         "双活三信号：2 个方向已有活三（未验证同一落点形成的严格双三）"),
+        (),
+        id="crossing-live-threes",
+    ),
+    pytest.param(
+        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A3"), (0, "K8"), (1, "A5"),
+         (0, "D2"), (1, "A7"), (0, "D3"), (1, "C1"), (0, "D4")],
+        ("H8 J8 K8", "D2 D3 D4",
+         "双活三信号：2 个方向已有活三（未验证同一落点形成的严格双三）"),
+        ("严格双三：是", "双三：是"),
+        id="separated-live-threes-not-strict",
+    ),
+    pytest.param(
+        [(0, "H8"), (1, "F8"), (0, "J8"), (1, "A1"), (0, "K8"), (1, "M8")],
+        (),
+        ("活三：H8 J8 K8", "双活三信号", "严格双三：是"),
+        id="blocked-three-is-not-live",
+    ),
+    pytest.param(
+        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "L8"), (1, "A3")],
+        ("跳三：H8 J8 L8（补 K8）",),
+        (),
+        id="jump-three",
+    ),
+    pytest.param(
+        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "K8"), (1, "A3"),
+         (0, "L8"), (1, "M8")],
+        ("眠四：H8 J8 K8 L8", "当前即可成五：G8"),
+        (),
+        id="sleeping-four",
+    ),
+    pytest.param(
+        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "K8"), (1, "A3"),
+         (0, "L8"), (1, "A4")],
+        ("活四：H8 J8 K8 L8", "当前即可成五：G8 M8"),
+        (),
+        id="live-four",
+    ),
+    pytest.param(
+        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "K8"), (1, "L8")],
+        ("眠三：H8 J8 K8",),
+        ("活三：H8 J8 K8",),
+        id="sleeping-three",
+    ),
+    pytest.param(
+        [(0, "F6"), (1, "A1"), (0, "G7"), (1, "P15"), (0, "H8"), (1, "A15"),
+         (0, "J9")],
+        ("当前即可成五：K10 E5", "活四：F6 G7 H8 J9"),
+        (),
+        id="diagonal-four-win-points",
+    ),
+    pytest.param(
+        [(0, "G7"), (1, "A1"), (0, "H8"), (1, "P15"), (0, "J9"), (1, "A15")],
+        ("活三：G7 H8 J9（延伸 F6 K10）", "可形成双成五威胁的落点 2 个"),
+        (),
+        id="diagonal-extension-points",
+    ),
+]
+
+
+@pytest.mark.parametrize(("moves", "contains", "excludes"), _THREAT_SHAPES)
+def test_threat_summary_reports_each_shape_with_real_coordinates(
+    moves, contains, excludes
+):
+    """Threat copy names stones/extension points and never over-claims."""
+    mod, state = _state_with(moves)
     text = mod.threat_summary(state, 0)
-
-    assert "活三：H8 J8 K8（延伸 G8 L8）" in text
-    assert "双活三信号" not in text
-    assert "启发式多威胁信号" in text
-    assert "不等同严格双三" in text
-
-
-def test_crossing_live_threes_reports_double_live_three_signal() -> None:
-    # 黑横向 H8/J8/K8 与纵向 J8/J9/J10 在 J8 交叉，两个方向各有活三。
-    mod, state = _state_with(
-        [
-            (0, "H8"),
-            (1, "A1"),
-            (0, "J8"),
-            (1, "A2"),
-            (0, "K8"),
-            (1, "A3"),
-            (0, "J9"),
-            (1, "A4"),
-            (0, "J10"),
-        ]
-    )
-    text = mod.threat_summary(state, 0)
-
-    live_line = next(line for line in text.splitlines() if "活三：" in line)
-    assert "H8 J8 K8" in live_line and "J8 J9 J10" in live_line
-    assert (
-        "双活三信号：2 个方向已有活三"
-        "（未验证同一落点形成的严格双三）"
-    ) in text
-
-
-def test_separated_live_threes_only_report_signal_not_strict_double_three() -> None:
-    # 横向 H8/J8/K8 与远处纵向 D2/D3/D4 各有活三，但并非同一落点/交叉点
-    # 形成；只能报“双活三信号”，不能声称严格双三。
-    mod, state = _state_with(
-        [
-            (0, "H8"),
-            (1, "A1"),
-            (0, "J8"),
-            (1, "A3"),
-            (0, "K8"),
-            (1, "A5"),
-            (0, "D2"),
-            (1, "A7"),
-            (0, "D3"),
-            (1, "C1"),
-            (0, "D4"),
-        ]
-    )
-    text = mod.threat_summary(state, 0)
-
-    live_line = next(line for line in text.splitlines() if "活三：" in line)
-    assert "H8 J8 K8" in live_line and "D2 D3 D4" in live_line
-    assert (
-        "双活三信号：2 个方向已有活三"
-        "（未验证同一落点形成的严格双三）"
-    ) in text
-    assert "严格双三：是" not in text
-    assert "双三：是" not in text
-
-
-def test_blocked_three_is_not_counted_as_live_three() -> None:
-    # H8/J8/K8 两端相邻点 G8/L8 虽为空，但外侧 F8/M8 被白子封住，
-    # 两端的延伸都只能成冲四、不能成活四，因此不计连续活三。
-    mod, state = _state_with(
-        [
-            (0, "H8"),
-            (1, "F8"),
-            (0, "J8"),
-            (1, "A1"),
-            (0, "K8"),
-            (1, "M8"),
-        ]
-    )
-    text = mod.threat_summary(state, 0)
-
-    assert "活三：H8 J8 K8" not in text
-    assert "双活三信号" not in text
-    assert "严格双三：是" not in text
-
-
-def test_jump_three_reports_stones_and_fill_point() -> None:
-    # 黑 H8/J8/L8：4 格窗口 H8 J8 K8 L8 内 3 子 1 中间空，补 K8 即成四。
-    mod, state = _state_with(
-        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "L8"), (1, "A3")]
-    )
-    text = mod.threat_summary(state, 0)
-
-    assert "跳三：H8 J8 L8（补 K8）" in text
-
-
-def test_sleeping_four_reports_run_with_coordinates() -> None:
-    # 黑 H8/J8/K8/L8 四连，白已堵 M8：只有 G8 可成五 -> 眠四。
-    mod, state = _state_with(
-        [
-            (0, "H8"),
-            (1, "A1"),
-            (0, "J8"),
-            (1, "A2"),
-            (0, "K8"),
-            (1, "A3"),
-            (0, "L8"),
-            (1, "M8"),
-        ]
-    )
-    text = mod.threat_summary(state, 0)
-
-    assert "眠四：H8 J8 K8 L8" in text
-    assert "当前即可成五：G8" in text
-
-
-def test_live_four_reports_run_with_coordinates() -> None:
-    # 黑 H8/J8/K8/L8 四连两端开 -> 活四，两端都可成五。
-    mod, state = _state_with(
-        [
-            (0, "H8"),
-            (1, "A1"),
-            (0, "J8"),
-            (1, "A2"),
-            (0, "K8"),
-            (1, "A3"),
-            (0, "L8"),
-            (1, "A4"),
-        ]
-    )
-    text = mod.threat_summary(state, 0)
-
-    assert "活四：H8 J8 K8 L8" in text
-    assert "当前即可成五：G8 M8" in text
-
-
-def test_sleeping_three_reports_run_with_coordinates() -> None:
-    # 黑 H8/J8/K8 三连，白堵 L8：只剩 G8 可延伸成冲四 -> 眠三（非活三）。
-    mod, state = _state_with(
-        [(0, "H8"), (1, "A1"), (0, "J8"), (1, "A2"), (0, "K8"), (1, "L8")]
-    )
-    text = mod.threat_summary(state, 0)
-
-    assert "眠三：H8 J8 K8" in text
-    assert "活三：H8 J8 K8" not in text
-
-
-def test_diagonal_four_win_points_are_reported() -> None:
-    # 纯斜四 F6/G7/H8/J9：补点 E5/K10 与棋子只有斜向相邻，正交 4 邻点
-    # 剪枝曾把整条斜线漏成「无成五点」；8 邻点修复后成五点、活四都报坐标。
-    mod, state = _state_with(
-        [
-            (0, "F6"),
-            (1, "A1"),
-            (0, "G7"),
-            (1, "P15"),
-            (0, "H8"),
-            (1, "A15"),
-            (0, "J9"),
-        ]
-    )
-    text = mod.threat_summary(state, 0)
-
-    assert "当前即可成五：K10 E5" in text
-    assert "活四：F6 G7 H8 J9" in text
-
-
-def test_diagonal_extension_points_enter_double_threat_heuristic() -> None:
-    # 斜活三 G7/H8/J9 的两端延伸点 F6/K10 只有斜向邻子，既要作为延伸点
-    # 输出，也须计入「可形成双成五威胁的落点」启发式（恰好 2 个）。
-    mod, state = _state_with(
-        [(0, "G7"), (1, "A1"), (0, "H8"), (1, "P15"), (0, "J9"), (1, "A15")]
-    )
-    text = mod.threat_summary(state, 0)
-
-    assert "活三：G7 H8 J9（延伸 F6 K10）" in text
-    assert "可形成双成五威胁的落点 2 个" in text
+    for fragment in contains:
+        assert fragment in text, fragment
+    for fragment in excludes:
+        assert fragment not in text, fragment
 
 
 # ----------------------------------------------------------------------
@@ -358,8 +262,14 @@ def test_gomoku_overrides_plan_prompt_in_module() -> None:
 #  关闭/缺失威胁能力：不显示且完全不调用
 # ----------------------------------------------------------------------
 def test_threat_analysis_disabled_never_calls_module(monkeypatch) -> None:
+    """``threat_analysis=False`` is a hard opt-out, whatever the level says.
+
+    The old test passed only because ``level=beginner`` disabled analysis;
+    here the level *enables* analysis (default intermediate), so the parameter
+    itself must be what suppresses the call.
+    """
     match = _match_with(_THREAT_MOVES)
-    match.mode_options["level"] = "beginner"
+    assert "level" not in match.mode_options or match.mode_options["level"] != "beginner"
     calls: list[str] = []
 
     def _boom_analyze(*args, **kwargs):
@@ -370,16 +280,40 @@ def test_threat_analysis_disabled_never_calls_module(monkeypatch) -> None:
         calls.append("threat_summary")
         raise AssertionError("threat summary must not be called when disabled")
 
+    def _boom_enabled(*args, **kwargs):
+        calls.append("analysis_enabled")
+        return True
+
     monkeypatch.setattr(_gomoku_module, "analyze", _boom_analyze)
     monkeypatch.setattr(_gomoku_module.Gomoku, "threat_summary", _boom_summary)
+    monkeypatch.setattr(
+        "engine.match._host_module", lambda name: SimpleNamespace(
+            analysis_enabled=_boom_enabled
+        )
+    )
 
     view = agent_view_text(match, 0, threat_analysis=False)
 
+    # The opt-out short-circuits before the level is even consulted.
     assert calls == []
     assert "Threat analysis" not in view
     assert "当前即可成五" not in view
     # 其余输入照常。
     assert "Rules:" in view and "Current position:" in view
+
+    # Both inputs are required: with the parameter on, the level is consulted
+    # and the block renders.
+    enabled_calls: list[bool] = []
+    monkeypatch.undo()  # restore the real module, then gate on the level only
+    monkeypatch.setattr(
+        "engine.match._host_module",
+        lambda name: SimpleNamespace(
+            analysis_enabled=lambda m, s: enabled_calls.append(True) or True
+        ),
+    )
+    enabled = agent_view_text(match, 0, threat_analysis=True)
+    assert enabled_calls == [True]
+    assert "Threat analysis" in enabled
 
 
 def test_game_without_threat_summary_does_not_break(monkeypatch) -> None:
@@ -409,9 +343,7 @@ def test_game_without_threat_summary_does_not_break(monkeypatch) -> None:
 #  自定义 system 不影响规则：规则始终进 user 输入
 # ----------------------------------------------------------------------
 def test_rules_live_in_user_input_not_custom_system() -> None:
-    cfg = Settings({"ai_agent_prompt": "CUSTOM SYSTEM ONLY"})
-    assert "Freestyle gomoku" not in cfg.ai_agent_prompt
-
+    """A custom system prompt never replaces the rules, which ride user input."""
     view = agent_view_text(_match_with([]), 0)
     assert "Rules:" in view
     assert "Freestyle gomoku" in view

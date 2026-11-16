@@ -7,10 +7,12 @@
  * - 聊天：本插件没有宿主 webchat 面板（牌桌旁白走插件 notice 通道），页面只
  *   渲染 match 视图 / WS 帧里的气泡：人设座位气泡 + 陪练/进阶对手座位气泡
  *   （match.chat 增量，初载只记水位，历史不重播）
- * - 媒体：match.chat / 气泡里的图片与语音走宿主归档媒体端点（shared/media.js）
+ * - Seat bubbles are text-only (match.chat carries text); the image/voice rich
+ *   media layer is not wired up, so the .seat-bubble-media container stays empty
+ *   and collapsed via CSS :empty
  */
 
-import { api, ApiError, MatchConnection, readSessionToken, writeSessionToken, PAGE_BASE } from "./shared/api.js";
+import { api, ApiError, MatchConnection, readSessionToken, writeSessionToken } from "./shared/api.js";
 import { spectatorMode, enterSpectator } from "./shared/spectator.js";
 import { errorText } from "./shared/i18n.js";
 import { toast } from "./shared/toast.js";
@@ -36,6 +38,7 @@ import {
   isThreeSeatMatch,
   noriSeatOf,
   noriRoleOf,
+  turnSeatOf,
   seatIdentity,
   seatIdentityLabel,
   delegatedOf,
@@ -53,7 +56,6 @@ import {
   LEVEL_HINTS,
   MATE_NOTE_TEXT,
   setPersonaName,
-  getPersonaName,
   setHostAgentName,
   getHostAgentName,
   setAgentAvatar,
@@ -68,11 +70,12 @@ import {
   seatRoleClass as doudizhuRoleClass,
 } from "./games/doudizhu/logic.js";
 import { cardChip as doudizhuCardChip } from "./games/doudizhu/table.js";
+import { GAME_NAMES } from "./shared/matches.js";
+import { focusKeyOf, restoreFocus } from "./shared/focus-keep.js";
 import "./shared/atmo.js";
 
 const $ = (id) => document.getElementById(id);
 
-const GAME_NAMES = { gomoku: "五子棋", reversi: "黑白棋", doudizhu: "斗地主", chess: "国际象棋" };
 const LOG_SHOW = 12;
 
 /* ---------------- 状态 ---------------- */
@@ -129,23 +132,10 @@ function canAct(match) {
   return !!(match && typeof match.me === "number" && match.me >= 0 && !isOver(match) && !busy);
 }
 
+/* Current-turn seat: single source is turnSeatOf in shared/mode.js (the lobby and
+ * the match page share one three-seat rule), so this file keeps no second copy. */
 function waitingOnSeat(match) {
-  if (!match) return null;
-  const st = match.status || {};
-  let wo = typeof st.waitingOn === "number" ? st.waitingOn : null;
-  // 后端 MatchView.status.waitingOn 是座位列表；单座位回合取唯一项
-  if (wo == null && Array.isArray(st.waitingOn) && st.waitingOn.length === 1 && Number.isInteger(st.waitingOn[0])) {
-    wo = st.waitingOn[0];
-  }
-  const v = match.view;
-  if (wo == null && v && (+v.toPlay === 1 || +v.toPlay === 2)) wo = +v.toPlay - 1;
-  // 三人桌（斗地主）以 view.turn 为当轮座位；不假定座位交替。
-  // 终局 view.turn 为 null：+null===0 会伪装成座位 0，必须显式排除。
-  if (wo == null && v && v.turn != null && Number.isInteger(+v.turn) && +v.turn >= 0 && (+v.turn >= 2 || isThreeSeatMatch(match))) {
-    wo = +v.turn;
-  }
-  const seats = Array.isArray(match.seats) ? match.seats : [];
-  return wo != null && seats[wo] ? { index: wo, seat: seats[wo] } : null;
+  return turnSeatOf(match);
 }
 
 function isCardGame(match) {
@@ -222,15 +212,23 @@ const CONN_TEXT = {
   connecting: "连接中…",
   live: "实时同步",
   retrying: "重连中…",
-  hidden: "已暂停",
+  paused: "已暂停",
   stopped: "插件已停用",
   missing: "对局不存在",
 };
 
+/* Connection state -> chip modifier class. The paused-while-backgrounded state
+ * from MatchConnection is named "hidden", which cannot be used as a class directly:
+ * the global .hidden utility is display:none !important and would swallow the
+ * whole "paused" chip. It is mapped to "paused" instead. */
+function connClassOf(state) {
+  return state === "hidden" ? "paused" : state;
+}
+
 function renderConn(state, info = {}) {
   const chip = $("conn-chip");
-  chip.className = `conn-chip ${state}`;
-  $("conn-label").textContent = CONN_TEXT[state] || state;
+  chip.className = `conn-chip ${connClassOf(state)}`;
+  $("conn-label").textContent = CONN_TEXT[state === "hidden" ? "paused" : state] || state;
   const banner = $("recon-banner");
   const show = state === "retrying";
   banner.classList.toggle("hidden", !show);
@@ -274,9 +272,10 @@ function refreshBoard() {
   gameCtl.update(view, { canAct: humanPlays, busy, over: isOver(view), delegated: delegatedOf(view) });
 }
 
-/* 座位小头像：加载失败退回名字首字，保留同尺寸槽位——卡片高度与气泡锚点
- * 不因图片 404 塌陷。公共 agent-avatar.png 自带 alpha，无需运行时色键
- * （shared/cleankey.js 保留给平涂底素材，本页不再需要）。
+/* Seat avatar: on load failure fall back to the name's first character while
+ * keeping a same-size slot, so card height and bubble anchoring
+ * does not collapse on a 404. The bundled agent-avatar.png already has an alpha
+ * channel, so no runtime colour-keying is needed.
  * 已失败的 src → 重试期限（TTL Map）：座位卡随 WS 帧重建，若每次都再建
  * <img> 会重复发起 404 并闪一帧破图——期限内直接给占位，不再请求。
  * 错误事件无法区分 404 与网络抖动，故不永久定格：过期后下一帧自动重试
@@ -331,7 +330,9 @@ function renderSeats(match) {
   const box = $("seats");
   box.textContent = "";
   const seats = Array.isArray(match.seats) ? match.seats : [];
-  const three = seats.length >= 3;
+  // Three-seat detection shares one rule with the lobby and the turn-seat helper
+  // (shared/mode.js); this file keeps no local seat-count copy.
+  const three = isThreeSeatMatch(match);
   box.classList.toggle("seats-3", three);
   const over = isOver(match);
   const w = waitingOnSeat(match);
@@ -340,7 +341,7 @@ function renderSeats(match) {
   const practice = isPractice(match);
   // 三人桌（斗地主）：座位身份一律按 seat_drivers 判定，不按名字猜；
   // 人设参战局里人设本人座位按「对手位」语义处理（气泡/头像只挂他自己的座位）。
-  const noriSeat = isThreeSeatMatch(match) ? noriSeatOf(match) : null;
+  const noriSeat = three ? noriSeatOf(match) : null;
   const noriSeatStyle = noriSeat != null && noriRoleOf(match) === "player";
   const seatPractice = (i) => practice || (noriSeatStyle && i !== noriSeat);
   const cardGame = isCardGame(match);
@@ -480,7 +481,10 @@ function renderStatus(match) {
   line.className = `status-line k-${info.kind}`;
   const participant = typeof match.me === "number" && match.me >= 0;
   const spectating = !participant;
-  line.textContent = spectating && !isOver(match) ? `观战中 · ${info.text}` : info.text;
+  const text = spectating && !isOver(match) ? `观战中 · ${info.text}` : info.text;
+  // aria-live="polite": assigning the same string again re-announces it. Only
+  // touch the DOM when the text actually changes.
+  if (line.textContent !== text) line.textContent = text;
   // 终局时结果已由玻璃胶囊（贴纸+结果词）呈现，状态行不再重复同一句
   const rt = String((match.status && match.status.resultText) || "");
   const draw = rt.includes("和") || rt.includes("平");
@@ -680,12 +684,29 @@ function renderLog(match) {
   });
 }
 
-function actionBtn({ label, cls = "", disabled = false, onClick }) {
+function actionBtn({ label, cls = "", disabled = false, act = "", onClick }) {
   const b = el("button", `btn${cls ? ` ${cls}` : ""}`, label);
   b.type = "button";
   b.disabled = disabled;
+  if (act) b.dataset.act = act; // stable key used to restore focus after rebuilds
   if (onClick) b.addEventListener("click", onClick);
   return b;
+}
+
+/* ---------------- Action-row focus retention ----------------
+ * The action row (level chips included) is rebuilt wholesale on every WS frame and
+ * action response; clearing it also drops the focused node, which used to throw
+ * keyboard users back to the top of the page. The capture/restore logic lives in
+ * shared/focus-keep.js (DOM-free, unit-tested); here we only supply the two scopes.
+ */
+const ACTION_SCOPE = () => [$("level-row"), $("actions")];
+
+function actionFocusKey() {
+  return focusKeyOf(ACTION_SCOPE(), document.activeElement);
+}
+
+function restoreActionFocus(key) {
+  restoreFocus(key, ACTION_SCOPE());
 }
 
 /** 三档等级（初级/中级/高级）：对人设本人 / 进阶对手显示；陪练没有
@@ -707,6 +728,7 @@ function renderLevelRow(match) {
     const b = el("button", `level-chip${lv === current ? " on" : ""}`, LEVEL_LABELS[lv]);
     b.type = "button";
     b.dataset.level = lv;
+    b.dataset.act = `level:${lv}`;
     b.title = LEVEL_HINTS[lv];
     b.setAttribute("aria-pressed", String(lv === current));
     b.disabled = busy;
@@ -743,6 +765,8 @@ async function onLevelChange(level) {
 
 function renderActions(match) {
   const row = $("actions");
+  // Remember action-area focus (data-act) before the rebuild, restore it after
+  const focusKey = actionFocusKey();
   row.textContent = "";
   if (!match) return;
   renderLevelRow(match);
@@ -753,6 +777,7 @@ function renderActions(match) {
   if (mine) row.appendChild(actionBtn({
     label: restartLabel({ spectator: !mine, over }),
     cls: mine && !over ? "" : "primary",
+    act: "restart",
     disabled: busy,
     onClick: newMatch,
   }));
@@ -764,6 +789,7 @@ function renderActions(match) {
     row.appendChild(actionBtn({
       label: delegated ? `停止${word}` : `让${getHostAgentName()}${word}`,
       cls: delegated ? "delegate on" : "delegate",
+      act: "delegate",
       disabled: busy,
       onClick: onToggleDelegate,
     }));
@@ -773,17 +799,23 @@ function renderActions(match) {
     row.appendChild(actionBtn({
       label: resignArmed ? "再点一次确认认输" : "认输",
       cls: resignArmed ? "danger" : "",
+      act: "resign",
       disabled: busy,
       onClick: onResign,
     }));
   }
 
-  if (spectatorMode()) return;
-  if (!over) row.appendChild(actionBtn({ label: "复制观战链接", onClick: copyLink }));
+  if (spectatorMode()) {
+    restoreActionFocus(focusKey);
+    return;
+  }
+  if (!over) row.appendChild(actionBtn({ label: "复制观战链接", act: "copy-link", onClick: copyLink }));
 
   const back = el("a", "btn ghost", "返回大厅");
   back.href = "./index.html";
+  back.dataset.act = "back";
   row.appendChild(back);
+  restoreActionFocus(focusKey);
 }
 
 /* ---------------- 动作 ---------------- */
@@ -1023,10 +1055,11 @@ function renderSeatBubble(seatIndex, item) {
   if (!b || !item) return;
   const text = String(item.text == null ? "" : item.text).trim();
   if (!text) return;
-  const textEl = b.querySelector(".seat-bubble-text") || b.lastElementChild;
+  const textEl = b.querySelector(".seat-bubble-text");
   if (textEl) textEl.textContent = text;
-  const mediaBox = b.firstElementChild;
-  if (mediaBox && mediaBox.classList && mediaBox.classList.contains("seat-bubble-media")) mediaBox.textContent = "";
+  // The media container (.seat-bubble-media) is kept but always empty because
+  // match.chat only carries text; CSS :empty collapses it, so there is no dead
+  // "clear the media box" code here.
   b.classList.add("show");
 }
 
@@ -1034,7 +1067,7 @@ function hideSeatBubbleAt(seatIndex) {
   const b = chat.seatBubbles.get(+seatIndex);
   if (!b) return;
   b.classList.remove("show");
-  const textEl = b.querySelector(".seat-bubble-text") || b.lastElementChild;
+  const textEl = b.querySelector(".seat-bubble-text");
   if (textEl) textEl.textContent = "";
 }
 
@@ -1047,7 +1080,6 @@ function seatQueue(seatIndex) {
         minShowMs: chat.minShowMs,
         maxShowMs: chat.holdMs,
         onShow: (item) => renderSeatBubble(idx, item),
-        onUpdate: (item) => renderSeatBubble(idx, item),
         onHide: () => hideSeatBubbleAt(idx),
       })
     );

@@ -45,15 +45,15 @@ from typing import Any
 try:  # production: plugin package (``<plugin>.director``)
     from . import modes
     from .engine import games
-    from .engine.match import status_of
-    from .engine.types import GameModule
+    from .engine.match import bot_move, status_of
+    from .room import is_gone_move_error, is_stale_move_error
     from .tools import NOTICE_ACTOR
     from .tools_turn import build_turn_tools, play_tool_name, state_tool_name
 except ImportError:  # standalone tests import these modules as top-level
     import modes
     from engine import games
-    from engine.match import status_of
-    from engine.types import GameModule
+    from engine.match import bot_move, status_of
+    from room import is_gone_move_error, is_stale_move_error
     from tools import NOTICE_ACTOR
     from tools_turn import build_turn_tools, play_tool_name, state_tool_name
 
@@ -541,6 +541,9 @@ def build_nudge_notice(
     carries the whole action contract — tag syntax, move format and a legal
     example (F2's payload moved into the block so no notice stays long
     enough to accumulate in history). No threat, no duplicated example.
+
+    ``tool_name`` is accepted for call-site compatibility only and is not
+    rendered (X-7): the tag name and example live in the context block.
     """
     agent = _agent_name(plugin)
     labels = _seat_labels(match)
@@ -614,7 +617,9 @@ class TurnDirector:
             if str(grant.session_id or "") != target:
                 continue
             self._tools_grant[target] = grant.match_id
-            if len(self._tools_grant) > 64:  # hygiene, same fail-open idea
+            if len(self._tools_grant) > 64:  # hygiene: oldest session evicted;
+                # it may then miss a corrective nudge (fail-closed), never
+                # nudge a surface it cannot see
                 self._tools_grant.pop(next(iter(self._tools_grant)), None)
             return build_turn_tools(
                 self._plugin, grant, match_kind=self._match_kind(grant.match_id)
@@ -689,8 +694,22 @@ class TurnDirector:
             self._handle_event(room, event),
             name=f"gamehub-turn-event-{match_id}",
         )
+
+        def _log_event_failure(done: asyncio.Task[Any]) -> None:
+            # ``_handle_event`` only guards its status_of call; without this
+            # callback a grant/watchdog failure dies as an unretrieved
+            # "Task exception was never retrieved" warning (review P2).
+            self._tasks.discard(done)
+            if done.cancelled() or done.exception() is None:
+                return
+            logger.warning(
+                "turn director: event task failed (%s)",
+                match_id,
+                exc_info=done.exception(),
+            )
+
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(_log_event_failure)
 
     def note_progress(self, sid: str) -> None:
         """Record host-side activity for a session holding a live grant.
@@ -800,8 +819,13 @@ class TurnDirector:
                 continue
             if run_started_after_notice <= grant.notice_sent_at:
                 continue  # the response predates the notice's own run
-            if self._tools_grant.get(target, grant.match_id) != grant.match_id:
-                continue  # this grant's turn surface was not offered
+            if self._tools_grant.get(target) != grant.match_id:
+                # Fail-closed: without a recorded mapping the surface was
+                # never offered (the old ``.get(target, grant.match_id)``
+                # default made every grant pass, contradicting this
+                # docstring — review P2). An evicted session only misses its
+                # corrective nudge; the watchdog fill still covers the turn.
+                continue
             if grant.text_task is not None and not grant.text_task.done():
                 continue  # one corrective in flight is enough
             grant.text_task = asyncio.create_task(
@@ -933,7 +957,6 @@ class TurnDirector:
         cap = int(_cfg(self._plugin, "turn_text_retry_max", 2))
         if grant.tag_retries >= max(0, cap):
             return
-        grant.tag_retries += 1
         state_tool = state_tool_name(grant.match_id)
         hint = "格式错误" if reason == "format" else "动作无效"
         text = (
@@ -944,6 +967,10 @@ class TurnDirector:
         )
         if not await send_notice(self._plugin, str(sid or ""), text):
             return
+        # Count only delivered notices — the same contract as ``_text_nudge``
+        # (a failed send consumed budget but the model never saw anything,
+        # review P2).
+        grant.tag_retries += 1
         logger.info(
             "turn director: play tag rejected, retry notice sent (%s seat %s, %s/%s, %s)",
             grant.match_id, grant.seat, grant.tag_retries, cap, hint,
@@ -1338,14 +1365,10 @@ class TurnDirector:
                     status="no_grant",
                     text="这一手的授权已经结束，不能再落子。",
                 )
-            # The seat name comes from the match host; keep the shape-based
-            # check rather than hard-coding a persona name.
-            gone_error = error in (
-                "对局已经结束",
-                "没有这个座位",
-                "这不是可以代下的人类座位",
-            ) or (error.startswith("这不是") and error.endswith("的座位"))
-            if gone_error:
+            # Error classification lives beside the canonical texts
+            # (room.is_gone_move_error / is_stale_move_error) so a wording
+            # tweak can never silently flip the verdict (review D-4).
+            if is_gone_move_error(error):
                 self._finish(grant, ST_CANCELLED, "gone")
                 return PlayResult(
                     ok=False,
@@ -1354,7 +1377,7 @@ class TurnDirector:
                     text=f"落子失败：{error}。本轮结束。",
                     error=error,
                 )
-            if "局面已经变化" in error or "还没轮到" in error or "过期" in error:
+            if is_stale_move_error(error):
                 self._finish(grant, ST_STALE, "stale_apply")
                 return PlayResult(
                     ok=False,
@@ -1518,13 +1541,20 @@ class TurnDirector:
                         grant.match_id, grant.seat,
                     )
                     continue
-                if type(module).bot is GameModule.bot:
-                    self._finish(grant, ST_CANCELLED, "no_bot_module")
-                    await self._recover_without_bot(room, grant)
-                    return
-                move = module.bot(getattr(match, "state", None), grant.seat)
+                # Engine's canonical entry (bot_move keeps the level-based
+                # perturbation, exactly like paced room stepping — D-20).
+                # no-bot and empty-move share one recovery path, so the old
+                # ``type(module).bot is GameModule.bot`` re-check is gone.
+                try:
+                    move = bot_move(match, grant.seat)
+                except Exception:  # noqa: BLE001 - a broken module must not stall
+                    logger.warning(
+                        "turn director: watchdog bot_move failed (%s seat %s)",
+                        grant.match_id, grant.seat, exc_info=True,
+                    )
+                    move = ""
                 if not move:
-                    self._finish(grant, ST_CANCELLED, "no_bot_move")
+                    self._finish(grant, ST_CANCELLED, "no_bot")
                     await self._recover_without_bot(room, grant)
                     return
                 applied = await self._fill(room, grant, match, str(move))
@@ -1658,7 +1688,10 @@ class TurnDirector:
         grant.state = state
         grant.resolved_at = time.monotonic()
         self._log_grant(grant, reason)
-        for task in (grant.watchdog, grant.text_task):
+        # ``turn_task`` too: without it a resolve landing during the in-flight
+        # ``send_notice`` left the notice task running and could still publish
+        # after the grant closed (narrow race, review P2).
+        for task in (grant.watchdog, grant.text_task, grant.turn_task):
             if task is not None and task is not asyncio.current_task():
                 task.cancel()
 
