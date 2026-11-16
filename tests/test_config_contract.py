@@ -46,7 +46,7 @@ def test_notice_main_model_schema_matches_defaults():
     assert DEFAULTS["notice_main_model"] == field["default"]
     assert "host default LLM" in field["hint"]
     zh = field["locales"]["zh"]
-    assert zh["name"] == "通知回合模型"
+    assert zh["name"] == "主AI游戏模型"
     assert "留空=核心主 LLM" in zh["hint"]
 
 

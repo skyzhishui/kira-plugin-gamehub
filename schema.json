@@ -65,7 +65,7 @@
     "fields": {
       "ai_mode": {
         "type": "string",
-        "name": "Decision Mode",
+        "name": "Game Agent Mode",
         "default": "agent",
         "options": [
           "agent",
@@ -74,22 +74,22 @@
         "hint": "agent = LLM agent makes moves (falls back to the rule bot on failure); bot = rule bot only, no model calls.",
         "locales": {
           "zh": {
-            "name": "决策模式",
+            "name": "对弈者模式",
             "hint": "agent=LLM agent 走子（失败回落规则 bot）；bot=仅规则 bot，不调用模型。"
           }
         }
       },
       "ai_models": {
         "type": "multi_select",
-        "name": "AI Models",
+        "name": "Game Agent Models",
         "source": "model",
         "model_type": "llm",
         "default": [],
-        "hint": "Ordered LLM failover list for the game agent. Empty = the host default LLM (the rule bot only takes over when the host has no default client either). All models share one ai_timeout budget.",
+        "hint": "Ordered LLM failover list for the game agent. Only used when ai_mode=agent; ignored in bot mode. Empty = the host default LLM (the rule bot only takes over when the host has no default client either). All models share one ai_timeout budget.",
         "locales": {
           "zh": {
-            "name": "决策模型",
-            "hint": "game_agent 使用的 LLM 顺序 failover 列表（从上到下依次尝试）。留空=使用宿主默认模型（只有宿主也没有默认模型时才回落规则 bot）。所有模型共享同一个 ai_timeout 总预算。"
+            "name": "对弈者模型",
+            "hint": "仅在对弈者模式为 agent 时生效；bot 模式不调用 LLM，此设置不生效。game_agent 使用的 LLM 顺序 failover 列表（从上到下依次尝试）。留空=使用宿主默认模型（只有宿主也没有默认模型时才回落规则 bot）。所有模型共享同一个 ai_timeout 总预算。"
           }
         }
       },
@@ -113,13 +113,13 @@
       },
       "notice_main_model": {
         "type": "model_select",
-        "name": "Notice Turn Model",
+        "name": "Main AI Game Model",
         "model_type": "llm",
         "default": "",
         "hint": "LLM for the main AI's gamehub notice-driven action turns. Empty = the host default LLM (current behaviour). Only batches made entirely of this plugin's registered turn notices are routed; normal chat, other plugins' notices and start/end notices keep their own model. Unlike ai_models (game_agent seats), this is the host agent's own turn.",
         "locales": {
           "zh": {
-            "name": "通知回合模型",
+            "name": "主AI游戏模型",
             "hint": "主 AI 响应 gamehub 对局通知触发的行动回合所使用的 LLM。留空=核心主 LLM（行为与现状一致）。只作用于整批都由本插件已登记的通知组成的批次；正常聊天、其他插件的通知以及开局/终局通知仍走原选模。与 ai_models（game_agent 座位模型）互不影响，这里选的是宿主 AI 本人的回合。"
           }
         }
