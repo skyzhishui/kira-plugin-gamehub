@@ -169,7 +169,10 @@ host administration, control-token, move, delegation, identity or new-game API.
   an `https://` Origin while the listener is plain HTTP, so scheme equality is
   impossible; authority equality is the boundary, and a proxy that rewrites
   Host must additionally configure `spectator_public_url` to whitelist the
-  public origin. Malformed/foreign origins get 403.
+   public origin. When the Origin authority matches the configured public
+   authority, its configured scheme is authoritative even if Host also matches:
+   an `http://` Origin cannot bypass an explicitly pinned `https://` origin.
+   Malformed/foreign origins get 403.
 
 The player uses **Copy spectator link** to obtain a per-match random invitation.
 The invitation is carried in the fragment and removed from the address bar on

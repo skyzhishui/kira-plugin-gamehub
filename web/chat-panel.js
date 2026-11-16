@@ -384,10 +384,14 @@ export function createChatPanel({
     // trim / out-of-order): aria-live would read every new node, turning a history
     // backfill into one long repeated monologue. polite is restored after the
     // rebuild, so items appended incrementally are still announced one by one.
+    // try/finally: a throwing row builder must not leave the region muted forever.
     scroller.setAttribute("aria-live", "off");
-    scroller.textContent = "";
-    list.forEach((m) => scroller.appendChild(messageRow(m)));
-    scroller.setAttribute("aria-live", "polite");
+    try {
+      scroller.textContent = "";
+      list.forEach((m) => scroller.appendChild(messageRow(m)));
+    } finally {
+      scroller.setAttribute("aria-live", "polite");
+    }
   }
 
   function renderJump() {

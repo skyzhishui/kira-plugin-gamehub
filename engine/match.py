@@ -56,15 +56,21 @@ RESIGNED_INVALID: Seat = -2
 # the log with one warning per read. Keys are bounded (ids of bad rows only).
 _warned_status_keys: set[str] = set()
 
+# Sentinel for ``_log_resign_seat``: distinguishes "not a resign entry" from a
+# resign entry whose persisted seat is ``None``/garbage (which must fail closed).
+_NO_RESIGN = object()
 
-def _warn_status_once(key: str, message: str, *args: Any) -> None:
+
+def _warn_status_once(
+    key: str, message: str, *args: Any, exc_info: bool = False
+) -> None:
     """Warn about a corrupt snapshot once per key, not once per read."""
     if key in _warned_status_keys:
         return
     if len(_warned_status_keys) >= 256:
         _warned_status_keys.clear()
     _warned_status_keys.add(key)
-    logger.warning(message, *args)
+    logger.warning(message, *args, exc_info=exc_info)
 
 
 def _module_or_none(kind: str) -> GameModule | None:
@@ -144,11 +150,19 @@ def _clean_resigned(value: Any, seat_count: int) -> Seat | None:
     return _RESIGNED_BAD
 
 
-def _log_from_resign_entry(entry: Any) -> int | None:
-    """Seat recorded by a ``resign`` log entry, or ``None`` for other entries."""
+def _log_resign_seat(entry: Any) -> Any:
+    """Seat recorded by a ``resign`` log entry; ``_NO_RESIGN`` for other entries.
+
+    The seat is returned unvalidated: a resign entry whose seat is garbage
+    (including ``None``) must still be *found* by the backward scan so the match
+    stays terminal instead of being skipped as if no resignation was logged.
+    Range checking is the caller's job.
+    """
     if not isinstance(entry, LogEntry):
-        return None
-    return entry.seat if str(entry.move or "") == "resign" else None
+        return _NO_RESIGN
+    if str(entry.move or "") != "resign":
+        return _NO_RESIGN
+    return entry.seat
 
 
 def _resignation(match: Match) -> tuple[Seat | None, bool]:
@@ -160,51 +174,94 @@ def _resignation(match: Match) -> tuple[Seat | None, bool]:
       resolved (legacy rows where the column was lost, or garbage values).
 
     The explicit ``resigned`` field wins when it names a real seat. Otherwise
-    (``None`` or a garbage value such as an out-of-range index) a trailing
-    ``resign`` log entry is the fallback — recovery is always preferred to
-    giving up. Only when nothing usable is found is the match reported as
-    unresolvable, which ``status_of`` turns into a safe terminal outcome:
-    reviving it as active would resurrect a finished game.
+    (``None`` or a garbage value such as an out-of-range index) the log is the
+    fallback — recovery is always preferred to giving up. Only when nothing
+    usable is found is the match reported as unresolvable, which ``status_of``
+    turns into a safe terminal outcome: reviving it as active would resurrect a
+    finished game.
 
-    The log lookup only inspects the last entry: a resignation ends the match,
-    so ``apply_match_action`` can never append another move after it (and
-    ``autoplay`` stops once the status is terminal).
+    The log is scanned **backwards** for the last ``resign`` entry, not just
+    the tail. ``apply_match_action`` refuses a resign on a terminal match, so a
+    fresh snapshot never has entries after a resignation; but a legacy/hand-
+    repaired row can, and a tail-only check would then read it as active.
+    Scanning for the newest resign entry is also the correct precedence if a
+    corrupt row ever holds several (the last one ends the match). A found entry
+    whose seat is not a real seat index stays ``unresolvable`` (fail closed)
+    rather than being skipped to an older entry.
     """
     cleaned = _clean_resigned(match.resigned, len(match.seats))
     if cleaned is not None and cleaned is not _RESIGNED_BAD:
         return cleaned, False
     says_resigned = cleaned is _RESIGNED_BAD
-    if match.log:
-        seat = _log_from_resign_entry(match.log[-1])
-        if seat is not None:
-            if isinstance(seat, int) and 0 <= seat < len(match.seats):
-                return seat, False
-            return None, True
+    for entry in reversed(match.log):
+        seat = _log_resign_seat(entry)
+        if seat is _NO_RESIGN:
+            continue
+        if isinstance(seat, int) and not isinstance(seat, bool) and 0 <= seat < len(match.seats):
+            return seat, False
+        return None, True
     return (None, True) if says_resigned else (None, False)
 
 
 def _resign_outcome(match: Match, mod: GameModule, seat: Seat) -> Outcome:
     """Outcome of a resignation (game-aware, so team semantics are right).
 
-    The game module may implement the optional ``outcome_for_resign`` hook
-    (doudizhu does: landlord vs two farmers). Modules without it — including the
-    two-seat turn games — keep the generic rule "everyone but the resigner
-    wins", which is correct for a zero-sum two-player game. The hook exists so
-    a farmer resigning never hands the other farmer (the losing partner) a win.
+    Three cases, distinguished by *how* the module's optional
+    ``outcome_for_resign`` hook is provided:
+
+    - **Game override** (``type(mod).outcome_for_resign`` is not the inherited
+      ``GameModule`` default): the game owns faction semantics (doudizhu:
+      landlord vs two farmers) and a returned ``Outcome`` is used as-is.
+    - **Inherited default** (modules such as the two-seat turn games): the
+      generic rule "everyone but the resigner wins" is correct for a zero-sum
+      two-player game and is kept unchanged.
+    - **Hook failure** (an override raising, returning ``None``, or returning a
+      non-``Outcome``): the verdict is unknown, so no seat may be declared a
+      winner. Returning the generic rule here would hand doudizhu's *teammate*
+      a false win, which is exactly the bug P1-4 fixed. The result is therefore
+      a terminal outcome with ``winners=[]`` — the same safe shape
+      ``status_of`` uses for other underivable results — never a guessed
+      winner.
     """
-    hook = getattr(mod, "outcome_for_resign", None)
-    if callable(hook):
-        try:
-            outcome = hook(match.state, seat)
-        except Exception:  # noqa: BLE001 - bad state falls back to the safe rule
-            logger.warning(
-                "对局 %s 的认输裁决失败，回退默认规则", match.id, exc_info=True
-            )
-            outcome = None
-        if isinstance(outcome, Outcome):
-            return outcome
-    winners = [i for i in range(len(match.seats)) if i != seat]
-    return Outcome(winners=winners, text="认输")
+    declared = getattr(type(mod), "outcome_for_resign", None)
+    if declared is None:
+        # Duck-typed test/extension module: only an instance hook counts as an
+        # override; no hook at all keeps the generic two-seat rule.
+        inherited = not callable(getattr(mod, "outcome_for_resign", None))
+    else:
+        inherited = declared is GameModule.outcome_for_resign
+    if inherited:
+        winners = [i for i in range(len(match.seats)) if i != seat]
+        return Outcome(winners=winners, text="认输")
+    try:
+        outcome = mod.outcome_for_resign(match.state, seat)
+    except Exception:  # noqa: BLE001 - a bad hook must not 500 the status read
+        _warn_status_once(
+            f"resign:{match.id}:{seat}",
+            "对局 %s 的认输裁决失败，按终局无胜者处理",
+            match.id,
+            exc_info=True,
+        )
+        return Outcome(winners=[], text="认输")
+    if isinstance(outcome, Outcome):
+        return outcome
+    if outcome is not None:
+        _warn_status_once(
+            f"resign:{match.id}:{seat}",
+            "对局 %s 的认输裁决返回了非法结果（%r），按终局无胜者处理",
+            match.id,
+            outcome,
+        )
+        return Outcome(winners=[], text="认输")
+    # An override that returns ``None`` did not judge the hand: the verdict is
+    # unknown, so the fail-closed no-winner shape applies (not the generic rule,
+    # which could still declare a teammate a winner).
+    _warn_status_once(
+        f"resign:{match.id}:{seat}",
+        "对局 %s 的认输裁决没有给出结果，按终局无胜者处理",
+        match.id,
+    )
+    return Outcome(winners=[], text="认输")
 
 
 def _host_module(name: str) -> Any | None:

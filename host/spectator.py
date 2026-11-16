@@ -126,31 +126,35 @@ class SpectatorServer:
           host, credentials, path/query/fragment, invalid port, different
           authority) are rejected with 403 by the caller — never a 500.
         - No forwarded header (``X-Forwarded-*``) is ever trusted.
-        - Direct access keeps the strict rule: the Origin authority must equal
-          this listener's ``Host``. Behind a TLS-terminating reverse proxy the
-          browser's Origin is ``https://`` while the listener speaks plain
-          HTTP, and ``request.scheme`` cannot see that — so the **authority**
+        - When ``spectator_public_url`` is configured its origin is
+          **authoritative for that authority**: if the origin's authority is the
+          configured one, the configured scheme must match too. A pinned
+          deployment therefore cannot be reached with an origin of the opposite
+          scheme on the same authority, even when the reverse proxy forwards the
+          public ``Host`` verbatim (the Host branch below would otherwise accept
+          the plaintext/``http`` downgrade).
+        - Without a matching configured origin, direct access keeps the strict
+          rule: the Origin authority must equal this listener's ``Host``.
+          Behind a TLS-terminating reverse proxy the browser's Origin is
+          ``https://`` while the listener speaks plain HTTP, and
+          ``request.scheme`` cannot see that — so the **authority**
           (host:port) equality is the boundary, not the scheme (approved
-          deviation; scheme stays scheme-agnostic only on this branch).
-        - When the proxy rewrites ``Host``, the explicit
-          ``spectator_public_url`` config whitelists that public origin, and
-          there the configured **scheme and authority must both match**.
+          deviation; scheme stays scheme-agnostic only on this branch, and only
+          where no public origin has been pinned).
         """
         parsed_origin = self._parse_origin(origin)
         if parsed_origin is None:
             return False
-        _scheme, origin_authority = parsed_origin
-        host_authority = str(getattr(request, "host", "") or "").strip().lower()
-        if host_authority and origin_authority == host_authority:
-            return True
+        origin_scheme, origin_authority = parsed_origin
         configured = self._configured_public_origin()
         if configured is not None:
             configured_scheme, configured_authority = configured
-            if (
-                parsed_origin[0] == configured_scheme
-                and origin_authority == configured_authority
-            ):
-                return True
+            if origin_authority == configured_authority:
+                # Pinned authority: the configured scheme is part of the rule.
+                return origin_scheme == configured_scheme
+        host_authority = str(getattr(request, "host", "") or "").strip().lower()
+        if host_authority and origin_authority == host_authority:
+            return True
         return False
 
     async def authorize(self, request):

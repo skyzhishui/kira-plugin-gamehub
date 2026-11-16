@@ -476,6 +476,37 @@ test("面板：整表重建期间暂停 aria-live，重建后恢复（历史回�
   }
 });
 
+test("面板：整表重建抛异常时也恢复 polite（try/finally，不停留在静音节流）", async () => {
+  const host = new FakeEl("div");
+  const env = mountPanel({
+    panelHost: host,
+    handler: () =>
+      ok({
+        enabled: true,
+        messages: [
+          msg("m1", 1_700_000_000_000, "agent", "汐祈", "来一局？"),
+          msg("m2", 1_700_000_001_000, "player", "阿空", "好呀"),
+        ],
+      }),
+  });
+  try {
+    const scroller = byClass(host, "chat-win-list")[0];
+    assert.ok(scroller, "聊天滚动区存在");
+    // A row builder that throws mid-rebuild: the region must still go back to
+    // polite instead of staying silent for the rest of the match.
+    scroller.appendChild = () => {
+      throw new Error("row build failed");
+    };
+    // load() absorbs the failure into its hint, so the promise must resolve (a
+    // rejected promise here would surface as unhandled-rejection noise).
+    await env.panel.load();
+    assert.equal(scroller.getAttribute("aria-live"), "polite", "异常后仍在礼貌播报");
+    assert.ok(env.panel.state().hintError, "失败被 load() 收敛为内联提示");
+  } finally {
+    env.restore();
+  }
+});
+
 test("面板：空列表显示中文空状态文案", async () => {
   const host = new FakeEl("div");
   const env = mountPanel({ panelHost: host, handler: () => ok({ enabled: true, messages: [] }) });

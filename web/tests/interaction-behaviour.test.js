@@ -172,6 +172,22 @@ test("radioTarget: arrows wrap, Home/End jump, other keys do nothing", () => {
   assert.equal(radioTarget({ key: "ArrowDown" }, [], "a"), null);
 });
 
+test("radioTarget: no current selection enters from the edge (next -> first, prev -> last)", () => {
+  // Missing / stale current value must not clamp to index 0: "next" would then
+  // land on the second option and skip the first one.
+  assert.equal(radioTarget({ key: "ArrowDown" }, OPTIONS, ""), "a", "next from nothing -> first");
+  assert.equal(radioTarget({ key: "ArrowRight" }, OPTIONS, undefined), "a");
+  assert.equal(radioTarget({ key: "ArrowUp" }, OPTIONS, "stale"), "c", "prev from nothing -> last");
+  assert.equal(radioTarget({ key: "ArrowLeft" }, OPTIONS, null), "c");
+  assert.equal(radioTarget({ key: "Home" }, OPTIONS, ""), "a");
+  assert.equal(radioTarget({ key: "End" }, OPTIONS, ""), "c");
+  // Single-option group: both directions stay on the only option.
+  const one = [{ value: "only" }];
+  assert.equal(radioTarget({ key: "ArrowDown" }, one, ""), "only");
+  assert.equal(radioTarget({ key: "ArrowUp" }, one, ""), "only");
+  assert.equal(radioTarget({ key: "ArrowDown" }, one, "only"), "only", "single option wraps onto itself");
+});
+
 test("onRadioKey: navigation prevents default, commits, non-navigation is a no-op", () => {
   const commits = [];
   let prevented = 0;

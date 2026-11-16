@@ -287,9 +287,45 @@ def test_origin_same_authority_direct_http_is_allowed():
     plugin = make_plugin(None)
     server = SpectatorServer(plugin)
     assert _origin_allowed(server, "http://10.0.0.8:15267")
-    # Any scheme on the same authority is the CSRF boundary — the listener
-    # cannot see a TLS-terminating proxy's scheme.
+    # Without a pinned public origin any scheme on the same authority is the
+    # CSRF boundary — the listener cannot see a TLS-terminating proxy's scheme.
     assert _origin_allowed(server, "https://10.0.0.8:15267")
+
+
+@pytest.mark.parametrize(
+    "configured, host, origin, allowed",
+    [
+        # Regression: the proxy forwards the *public* Host verbatim, so the
+        # Host branch would match the same authority. The pinned configured
+        # scheme must still be enforced (no http downgrade of an https origin).
+        ("https://watch.example.com", "watch.example.com", "https://watch.example.com", True),
+        ("https://watch.example.com", "watch.example.com", "http://watch.example.com", False),
+        # Same rule for an explicitly plaintext public URL.
+        ("http://watch.example.com:8080", "watch.example.com:8080", "http://watch.example.com:8080", True),
+        ("http://watch.example.com:8080", "watch.example.com:8080", "https://watch.example.com:8080", False),
+        # The configured branch is authority-scoped: an origin on a *different*
+        # authority that matches Host keeps the scheme-agnostic Host rule (the
+        # TLS proxy path where Host is rewritten stays intact).
+        ("https://watch.example.com", "internal-lan:15267", "https://internal-lan:15267", True),
+        ("https://watch.example.com", "internal-lan:15267", "http://internal-lan:15267", True),
+    ],
+)
+def test_origin_configured_scheme_is_authoritative_for_its_authority(
+    configured, host, origin, allowed
+):
+    plugin = make_plugin(None)
+    plugin.settings.spectator_public_url = configured
+    server = SpectatorServer(plugin)
+    assert _origin_allowed(server, origin, _FakeRequest(host=host)) is allowed
+
+
+def test_origin_unparseable_configured_url_leaves_host_rule_scheme_agnostic():
+    plugin = make_plugin(None)
+    plugin.settings.spectator_public_url = "https://[::1"
+    server = SpectatorServer(plugin)
+    request = _FakeRequest(host="10.0.0.8:15267")
+    assert _origin_allowed(server, "http://10.0.0.8:15267", request)
+    assert _origin_allowed(server, "https://10.0.0.8:15267", request)
 
 
 @pytest.mark.parametrize(

@@ -216,8 +216,9 @@ class GameModule(ABC):
         zero-sum board games. Multi-faction games (e.g. dou-dizhu: landlord vs
         two farmers) must override it: teammates are on the losing side and
         must not be judged a winner merely because they did not resign.
-        Returning ``None`` likewise falls back to the generic rule; a returned
-        ``Outcome`` is used as-is.
+        An override returning ``None``, an invalid type, or raising fails closed
+        to a terminal outcome without winners. A returned ``Outcome`` is used
+        as-is; only inheriting this default selects the generic rule.
         """
         return None
 

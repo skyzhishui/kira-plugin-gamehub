@@ -22,7 +22,11 @@ export function spectatorCredential() {
 /** Validate the spectator-join response envelope: only { ok:true, data:{ credential, uid } }
  * with both fields non-empty strings is accepted. Server error envelopes, truncated
  * data and non-JSON bodies all throw, so undefined is never written into
- * sessionStorage (which would later send the literal "undefined" as a Bearer token). */
+ * sessionStorage (which would later send the literal "undefined" as a Bearer token).
+ *
+ * The server contract (host/spectator.py join) always emits `uid` as
+ * `<match_id>:<hex digest>` and `credential` as a token_urlsafe string, so a numeric
+ * uid is a shape violation, not an older format: it is rejected, never coerced. */
 export function parseSpectatorJoin(payload) {
   const data = payload && typeof payload === "object" ? payload.data : null;
   const credential = data && typeof data.credential === "string" ? data.credential.trim() : "";

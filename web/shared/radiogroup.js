@@ -16,8 +16,11 @@ export function radioTarget(ev, options, current) {
   if (!ev || !Array.isArray(options) || !options.length) return null;
   const key = String(ev.key || "");
   const at = options.findIndex((o) => o.value === current);
-  if (RADIO_NEXT.has(key)) return options[(at + 1 + options.length) % options.length].value;
-  if (RADIO_PREV.has(key)) return options[(at - 1 + options.length) % options.length].value;
+  // No current selection (nothing checked yet, or a stale stored value): arrows enter
+  // the group from its edge — forward lands on the first option, backward on the last.
+  // Clamping the index to 0 instead would make "next" skip the first option.
+  if (RADIO_NEXT.has(key)) return options[at < 0 ? 0 : (at + 1) % options.length].value;
+  if (RADIO_PREV.has(key)) return options[at < 0 ? options.length - 1 : (at - 1 + options.length) % options.length].value;
   if (key === "Home") return options[0].value;
   if (key === "End") return options[options.length - 1].value;
   return null;

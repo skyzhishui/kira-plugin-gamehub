@@ -19,18 +19,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from engine import (
     NewMatchOptions,
     NewSeat,
+    Outcome,
     apply_match_action,
     create_match,
+    games,
     status_of,
     view_match,
 )
-from engine.match import RESIGNED_INVALID, Match
+from engine.match import RESIGNED_INVALID, LogEntry, Match
+from engine.types import GameModule
 
 
 def _gomoku(seat_kinds=("human", "ai"), match_id="m-status"):
@@ -117,6 +121,55 @@ def test_legacy_none_resigned_with_log_entry_stays_terminal() -> None:
     assert view_match(legacy, None)["resigned"] == 1
 
 
+@pytest.mark.parametrize(
+    "tail",
+    [
+        # A legacy/hand-repaired row with entries *after* the resignation. The
+        # backward scan must still find it instead of reading the match active.
+        [LogEntry(seat=0, move="H8", t=2_100)],
+        [LogEntry(seat=0, move="H8", t=2_100), LogEntry(seat=1, move="J9", t=2_200)],
+        # A newer resignation wins over an older one (the newest ends the match).
+        [LogEntry(seat=1, move="resign", t=2_100), LogEntry(seat=0, move="H8", t=2_200)],
+    ],
+)
+def test_legacy_resignation_is_found_by_scanning_backwards(tail) -> None:
+    """Only the tail entry is checked on the baseline; a later entry hid it."""
+    resigned = apply_match_action(_gomoku(), 1, {"type": "resign"}, 2_000)
+    assert resigned.ok
+    legacy = replace(resigned.match, resigned=None, log=[*resigned.match.log, *tail])
+    status = status_of(legacy)
+    assert status.outcome is not None  # terminal, never active again
+    assert status.waiting_on == []
+    assert status.result_text == "P1 认输"
+    assert view_match(legacy, None)["resigned"] == 1
+
+
+@pytest.mark.parametrize("bad_seat", [99, -1, True, "x", None])
+def test_malformed_resign_log_entry_fails_closed(bad_seat) -> None:
+    """A resign entry with a garbage seat stays unresolvable (terminal).
+
+    The entry must not be skipped as if nothing was logged — that would read
+    the match as active — and it must not index the seat list.
+    """
+    match = replace(
+        _gomoku(match_id=f"m-bad-resign-{bad_seat}"),
+        log=[LogEntry(seat=bad_seat, move="resign", t=2_000)],
+    )
+    _assert_terminal(match)
+    assert status_of(match).outcome.winners == []
+    assert status_of(match).result_text == "对局已认输（座位数据异常）"
+    assert view_match(match, None)["resigned"] is None
+
+
+def test_log_without_resign_entry_keeps_active_match_active() -> None:
+    """The backward scan must not invent a resignation from ordinary moves."""
+    moved = apply_match_action(_gomoku(), 0, {"type": "move", "move": "H8"}, 2_000)
+    assert moved.ok
+    status = status_of(replace(moved.match, resigned=None))
+    assert status.outcome is None
+    assert status.waiting_on == [1]
+
+
 def test_active_match_and_unknown_kind_do_not_raise() -> None:
     status = status_of(_gomoku())
     assert status.outcome is None
@@ -177,6 +230,68 @@ def test_two_seat_resign_keeps_legacy_rule() -> None:
     assert status.outcome is not None
     assert status.outcome.winners == [1]
     assert status.outcome.text == "认输"
+
+
+def _three_seat_resignation():
+    """Resign seat 1 of a three-seat match (two partners around the resigner)."""
+    resigned = apply_match_action(_doudizhu(), 1, {"type": "resign"}, 3_000)
+    assert resigned.ok
+    return resigned.match
+
+
+@pytest.mark.parametrize(
+    "hook",
+    [
+        pytest.param(lambda state, seat: None, id="returns-none"),
+        pytest.param(
+            lambda state, seat: (_ for _ in ()).throw(RuntimeError("bad hook")),
+            id="raises",
+        ),
+        pytest.param(lambda state, seat: "not-an-outcome", id="wrong-type"),
+    ],
+)
+def test_failed_override_hook_is_terminal_without_winners(monkeypatch, hook) -> None:
+    """A broken camp hook must never award the resigner's teammate a win.
+
+    The generic "everyone but the resigner" fallback would list seat 2 here,
+    which is precisely the P1-4 bug for a multi-faction game.
+    """
+    import engine.match as match_module
+
+    match = _three_seat_resignation()
+    fake = SimpleNamespace(outcome_for_resign=hook)
+    monkeypatch.setattr(match_module.games, "get", lambda kind: fake)
+    status = status_of(match)
+    assert status.outcome is not None  # still terminal
+    assert status.waiting_on == []
+    assert status.outcome.winners == []  # fail closed, never [0, 2]
+    assert status.result_text == "A 认输"
+
+
+def test_override_hook_outcome_is_used_as_is(monkeypatch) -> None:
+    import engine.match as match_module
+
+    match = _three_seat_resignation()
+    fake = SimpleNamespace(
+        outcome_for_resign=lambda state, seat: Outcome(winners=[0], text="自定义裁决")
+    )
+    monkeypatch.setattr(match_module.games, "get", lambda kind: fake)
+    status = status_of(match)
+    assert status.outcome.winners == [0]
+    assert status.outcome.text == "自定义裁决"
+
+
+def test_inherited_default_hook_still_uses_the_generic_rule() -> None:
+    """The base ``GameModule`` default is not a failure: two-seat semantics hold.
+
+    ``GameModule.outcome_for_resign`` returns ``None``; only an *override* that
+    returns ``None`` is treated as an undecided verdict.
+    """
+    assert GameModule.outcome_for_resign(object(), {}, 0) is None
+    assert type(games.get("gomoku")).outcome_for_resign is GameModule.outcome_for_resign
+    resigned = apply_match_action(_gomoku(), 1, {"type": "resign"}, 2_000)
+    assert resigned.ok
+    assert status_of(resigned.match).outcome.winners == [0]
 
 
 # ----------------------------------------------------------------------
