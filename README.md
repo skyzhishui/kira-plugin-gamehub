@@ -101,4 +101,4 @@ before any host import, so a fresh clone runs out of the box.
 ## License
 
 Released under the [GNU Affero General Public License v3.0](LICENSE)
-(AGPL-3.0), same as `kira-ai-plugin-noriflow-memory`.
+(AGPL-3.0).
