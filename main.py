@@ -324,6 +324,16 @@ class GamehubPlugin(BasePlugin):
 
         await route_group_message(self, event)
 
+    @on.im_batch_message(priority=Priority.HIGH)
+    async def route_notice_model(self, event):
+        """Apply the configured model to batches of this plugin's notices.
+
+        Thin wrapper: the gate and routing live in ``host/notice_model.py``.
+        """
+        from .host.notice_model import apply as apply_notice_model
+
+        apply_notice_model(self, event)
+
     @on.llm_request(priority=Priority.MEDIUM)
     async def inject_game_context(self, event, request, tag_set=None):
         """Inject the board block and request-scoped turn tools."""

@@ -17,8 +17,11 @@ The nori ``game_agent`` consumes an async generator shaped like
 - ``ai_models`` values are ``provider:model_id`` strings resolved through
   ``ctx.get_llm_client`` and tried in order (ordered failover); an empty list
   falls back to ``ctx.get_default_llm_client()``;
-- streaming uses ``client.chat_stream(request)`` and degrades to
-  ``client.chat(request)`` when streaming fails before any output.
+- streaming uses ``client.chat_stream(request, reasoning_effort=...)`` and
+  degrades to ``client.chat(request, reasoning_effort=...)`` when streaming
+  fails before any output. The caller chooses the level (``game_agent`` reads
+  ``game_agent_reasoning_effort``, default ``none``) and the provider validates
+  it against the selected model.
 
 Importing ``core.provider`` is deferred to call time so standalone plugin
 tests (which run outside the full host dependency set) can import this module
@@ -29,7 +32,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Literal
 
 try:  # production: KiraAI host logging (AGENTS.md)
     from core.plugin import logger
@@ -132,14 +135,16 @@ def _contract_event(
     }
 
 
-async def _stream_one(client: Any, request: Any) -> AsyncGenerator[dict[str, Any], None]:
+async def _stream_one(
+    client: Any, request: Any, *, reasoning_effort: str
+) -> AsyncGenerator[dict[str, Any], None]:
     """Yield text/reasoning events, then the final contract event."""
     reasoning_parts: list[str] = []
     tool_acc: dict[int, dict[str, Any]] = {}
     finish_reason = ""
     saw_any = False
 
-    async for chunk in client.chat_stream(request):
+    async for chunk in client.chat_stream(request, reasoning_effort=reasoning_effort):
         saw_any = True
         delta_text = getattr(chunk, "delta_text", "") or ""
         if delta_text:
@@ -180,9 +185,11 @@ async def _stream_one(client: Any, request: Any) -> AsyncGenerator[dict[str, Any
     )
 
 
-async def _chat_one(client: Any, request: Any) -> AsyncGenerator[dict[str, Any], None]:
+async def _chat_one(
+    client: Any, request: Any, *, reasoning_effort: str
+) -> AsyncGenerator[dict[str, Any], None]:
     """Non-streaming path: text first, then the contract event."""
-    response = await client.chat(request)
+    response = await client.chat(request, reasoning_effort=reasoning_effort)
     text = getattr(response, "text_response", "") or ""
     reasoning = getattr(response, "reasoning_content", "") or ""
     tool_calls = [tc for tc in (getattr(response, "tool_calls", None) or []) if isinstance(tc, dict)]
@@ -198,6 +205,8 @@ async def _chat_one(client: Any, request: Any) -> AsyncGenerator[dict[str, Any],
 
 
 NO_DEFAULT_MODEL_MESSAGE = "no default LLM client is configured"
+
+ReasoningEffort = Literal["none", "low", "medium", "high"]
 
 
 class NoDefaultModel(RuntimeError):
@@ -244,6 +253,7 @@ async def run_replyer_stream(
     model_list: list[str] | None = None,
     stream: bool = True,
     media: Any = None,
+    reasoning_effort: ReasoningEffort = "none",
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Host-side stand-in for nori ``task_router.run_replyer_stream``.
 
@@ -257,7 +267,11 @@ async def run_replyer_stream(
     last_error: BaseException | None = None
     for label, client in pairs:
         produced = False
-        events = _stream_one(client, request) if stream else _chat_one(client, request)
+        events = (
+            _stream_one(client, request, reasoning_effort=reasoning_effort)
+            if stream
+            else _chat_one(client, request, reasoning_effort=reasoning_effort)
+        )
         try:
             async for event in events:
                 produced = True
@@ -284,7 +298,9 @@ async def run_replyer_stream(
                 # the same model once with the non-streaming path before
                 # moving on to the next model.
                 try:
-                    async for event in _chat_one(client, request):
+                    async for event in _chat_one(
+                        client, request, reasoning_effort=reasoning_effort
+                    ):
                         produced = True
                         yield event
                     return

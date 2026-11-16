@@ -165,6 +165,10 @@ class TurnGrant:
     resolved_at: float = 0.0
     notice_sent: bool = False
     notice_session_id: str = ""
+    # Exact notice texts delivered for this grant. The batch hook only
+    # applies the configured model when every message is a notice whose
+    # text is in this set (see host/notice_model.py).
+    notice_texts: set[str] = field(default_factory=set)
     # One explicit "you have not acted yet" reminder before the bot fill.
     nudged: bool = False
     # F1: corrective nudges for text-only replies (capped, shortened window).
@@ -641,6 +645,22 @@ class TurnDirector:
                 return grant
         return None
 
+    def notice_texts_for(self, sid: str) -> set[str]:
+        """Exact notice texts of every ST_ACTIVE grant announced to ``sid``.
+
+        Read-only view for the notice-model hook. Aggregating is required
+        because several matches may share one target session; resolved
+        grants drop out implicitly (no separate cleanup state).
+        """
+        target = str(sid or "").strip()
+        if not target or self._stopping:
+            return set()
+        texts: set[str] = set()
+        for grant in list(self._grants.values()):
+            if grant.state == ST_ACTIVE and str(grant.session_id or "") == target:
+                texts.update(grant.notice_texts)
+        return texts
+
     def owns(self, match: Any) -> bool:
         """Whether talk/judge must yield this match to the turn director."""
         grant = self._grants.get(str(getattr(match, "id", "") or ""))
@@ -900,6 +920,7 @@ class TurnDirector:
             return
         if not await send_notice(self._plugin, grant.session_id, text):
             return
+        grant.notice_texts.add(text)
         if not self._is_current(grant):  # resolved while the notice was in flight
             return
         grant.text_nudges += 1
@@ -967,6 +988,7 @@ class TurnDirector:
         )
         if not await send_notice(self._plugin, str(sid or ""), text):
             return
+        grant.notice_texts.add(text)
         # Count only delivered notices — the same contract as ``_text_nudge``
         # (a failed send consumed budget but the model never saw anything,
         # review P2).
@@ -1231,6 +1253,7 @@ class TurnDirector:
                 grant.match_id, grant.session_id,
             )
             return
+        grant.notice_texts.add(text)
         grant.notice_sent_at = time.monotonic()
 
     # ------------------------------------------------------------------
@@ -1435,7 +1458,10 @@ class TurnDirector:
                 grant.match_id, grant.seat, exc_info=True,
             )
             return False
-        return await send_notice(self._plugin, sid, text)
+        if not await send_notice(self._plugin, sid, text):
+            return False
+        grant.notice_texts.add(text)
+        return True
 
     async def _recover_without_bot(self, room: Any, grant: TurnGrant) -> None:
         """Manual recovery when the game has no rule bot to fill with.

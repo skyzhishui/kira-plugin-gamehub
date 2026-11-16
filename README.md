@@ -59,10 +59,23 @@ All options live in the plugin config form (`schema.json`, Chinese + English).
 The most relevant ones:
 
 - `agent_name` / `agent_persona` — who the game agent is.
-- `ai_models` — ordered LLM failover list (`provider:model_id`); empty = the
-  host default LLM.
-- `ai_mode` — `agent` (LLM) or `bot` (rules only).
-- `notice_target_session_id` — where table talk and turn notices are delivered.
+- `ai_mode` — Game Agent Mode: `agent` (LLM) or `bot` (rules only).
+- `ai_models` — Game Agent Models (`对弈者模型`): ordered LLM failover list
+  (`provider:model_id`); empty = the host default LLM. Only used when
+  `ai_mode=agent`; ignored in bot mode.
+- `notice_main_model` — Main AI Game Model (`主AI游戏模型`): LLM for the host
+  agent's gamehub notice-driven action turns (`provider:model_id`); empty = the
+  host default LLM. Only batches made entirely of this plugin's registered turn
+  notices are routed, so normal chat and other plugins' notices keep their own
+  model. Separate from `ai_models` (that list drives `game_agent` seats, not
+  the host agent).
+- `game_agent_reasoning_effort` — `none` (default) / `low` / `medium` / `high`;
+  forwarded to the selected model, which must support that level (GLM requires
+  at least `low`). Only affects game_agent, not the main AI's chat replies.
+- `notice_target_session_id` — where WebUI-origin table talk and turn notices
+  are delivered (e.g. a companion/desktop-pet session). Chat-origin matches
+  always deliver notices back to their own starting session and ignore this
+  option.
 
 ## i18n
 
@@ -84,3 +97,8 @@ before any host import, so a fresh clone runs out of the box.
 
 `docs/HOST_ADAPTER.md` describes how the plugin binds to the KiraAI host
 (adapter provisioning, notices, request-scoped tools, REST/WS routes).
+
+## License
+
+Released under the [GNU Affero General Public License v3.0](LICENSE)
+(AGPL-3.0), same as `kira-ai-plugin-noriflow-memory`.

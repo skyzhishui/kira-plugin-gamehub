@@ -32,6 +32,9 @@ DEFAULTS: dict[str, Any] = {
     # model & decision
     "ai_mode": "agent",
     "ai_models": [],
+    # Per-call reasoning effort forwarded to the provider as a request kwarg;
+    # "none" keeps game-agent latency low unless the operator opts in.
+    "game_agent_reasoning_effort": "none",
     "ai_max_concurrency": 2,
     "ai_timeout": 20.0,
     "ai_agent_rounds": 5,
@@ -47,6 +50,9 @@ DEFAULTS: dict[str, Any] = {
     "ai_agent_prompt": "",
     "ai_decision_log": True,
     # notice-driven turn
+    # LLM for batches made only of this plugin's registered turn notices;
+    # "" = the host default LLM (unchanged behaviour).
+    "notice_main_model": "",
     "turn_play_timeout_s": 90.0,
     "turn_fallback_delay_s": 1.0,
     # Text-only replies: a completed LLM response that did not submit the move

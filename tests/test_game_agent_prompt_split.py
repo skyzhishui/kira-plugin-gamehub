@@ -114,6 +114,7 @@ class RecordingRouter:
         extra_messages: Any = None,
         stream: bool = True,
         model_list: Any = None,
+        reasoning_effort: str = "none",
     ):
         self.calls.append(
             {
@@ -122,6 +123,7 @@ class RecordingRouter:
                 "tools": tools,
                 "extra_messages": list(extra_messages or []),
                 "model_list": list(model_list or []),
+                "reasoning_effort": reasoning_effort,
             }
         )
         step = self.script.pop(0) if self.script else {"type": "text", "text": ""}

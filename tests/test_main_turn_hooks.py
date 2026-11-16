@@ -97,6 +97,7 @@ def _ensure_core_plugin_importable() -> Any:
         "Priority": types.SimpleNamespace(LOW=10, MEDIUM=50, HIGH=90),
         "on": types.SimpleNamespace(
             im_message=lambda **kw: _identity_decorator(),
+            im_batch_message=lambda **kw: _identity_decorator(),
             llm_request=lambda **kw: _identity_decorator(),
             llm_response=lambda **kw: _identity_decorator(),
             after_xml_parse=lambda **kw: _identity_decorator(),
@@ -265,6 +266,19 @@ async def test_hook_skips_non_list_actions_and_missing_grant(monkeypatch) -> Non
         _plugin(director), _Event(sid="other"), actions=[]
     )
     assert calls == []
+
+
+async def test_notice_model_hook_is_a_thin_delegate(monkeypatch) -> None:
+    """``route_notice_model`` only forwards to ``host.notice_model.apply``."""
+    calls: list[tuple] = []
+    module = importlib.import_module(f"{PACKAGE}.host.notice_model")
+    monkeypatch.setattr(module, "apply", lambda plugin, event: calls.append((plugin, event)))
+    plugin = _plugin(_HookDirector(_Grant()))
+    event = _Event()
+
+    await MAIN.GamehubPlugin.route_notice_model(plugin, event)
+
+    assert calls == [(plugin, event)]
 
 
 # ----------------------------------------------------------------------
