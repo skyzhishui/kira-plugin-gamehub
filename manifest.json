@@ -9,7 +9,7 @@
     "game",
     "entertainment"
   ],
-  "repo": "http://10.0.1.90:13000/nori-home/kira-plugin-gamehub",
+  "repo": "https://github.com/skyzhishui/kira-plugin-gamehub",
   "icon": "icon.png",
   "locales": {
     "zh": {
@@ -20,5 +20,6 @@
       "display_name": "Game Hub",
       "description": "Game Hub: gomoku, reversi and doudizhu — play against the AI in chat (start, move, inspect the board, resign) and enjoy a WebUI lobby with live match pages."
     }
-  }
+  },
+  "license": "AGPL-3.0"
 }
