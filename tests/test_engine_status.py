@@ -161,6 +161,66 @@ def test_malformed_resign_log_entry_fails_closed(bad_seat) -> None:
     assert view_match(match, None)["resigned"] is None
 
 
+@pytest.mark.parametrize("bad_seat", [99, -1, True, "x", None])
+def test_latest_malformed_resign_fails_closed_even_with_older_valid_one(bad_seat) -> None:
+    """Newest resign wins; a malformed newest entry must not fall back.
+
+    The backward scan stops at the first ``resign`` entry it finds. Skipping a
+    corrupt newest entry to an older valid one would report the *wrong*
+    resigner (and, for team games, the wrong camp), so the match stays
+    unresolvable/terminal instead. This pins the fail-closed choice the review
+    asked about, together with the older valid entry that must be ignored.
+    """
+    match = replace(
+        _gomoku(match_id=f"m-latest-bad-resign-{bad_seat}"),
+        log=[
+            LogEntry(seat=1, move="resign", t=2_000),
+            LogEntry(seat=bad_seat, move="resign", t=2_100),
+        ],
+    )
+    status = status_of(match)
+    _assert_terminal(match)
+    assert status.outcome.winners == []
+    assert status.result_text == "对局已认输（座位数据异常）"
+    assert view_match(match, None)["resigned"] is None  # never seat 1
+
+
+def test_newest_valid_resign_wins_over_older_one() -> None:
+    """Contrast case: two *valid* resign entries resolve to the newest seat."""
+    match = replace(
+        _gomoku(match_id="m-two-valid-resigns"),
+        log=[
+            LogEntry(seat=1, move="resign", t=2_000),
+            LogEntry(seat=0, move="resign", t=2_100),
+        ],
+    )
+    assert status_of(match).result_text == "P0 认输"
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        # A single out-of-range resign entry, as it arrives from the DB.
+        [{"seat": 99, "move": "resign", "t": 2_000}],
+        # Newest malformed + older valid: the older seat must not be reported.
+        [
+            {"seat": 1, "move": "resign", "t": 2_000},
+            {"seat": 99, "move": "resign", "t": 2_100},
+        ],
+    ],
+    ids=["single-bad", "newest-bad-older-valid"],
+)
+def test_persisted_out_of_range_resign_stays_terminal(log) -> None:
+    """The fail-closed precedence survives a persistence reload."""
+    data = _gomoku(match_id=f"m-persist-bad-resign-{len(log)}-{log[-1]['t']}").to_dict()
+    data["resigned"] = None
+    data["log"] = log
+    reloaded = Match.from_dict(data)
+    _assert_terminal(reloaded)
+    assert status_of(reloaded).result_text == "对局已认输（座位数据异常）"
+    assert view_match(reloaded, None)["resigned"] is None
+
+
 def test_log_without_resign_entry_keeps_active_match_active() -> None:
     """The backward scan must not invent a resignation from ordinary moves."""
     moved = apply_match_action(_gomoku(), 0, {"type": "move", "move": "H8"}, 2_000)
@@ -345,6 +405,65 @@ def test_from_dict_rejects_a_malformed_seat_instead_of_filtering() -> None:
     for row in bad_rows:
         with pytest.raises(ValueError):
             Match.from_dict(row)
+
+
+# Every numeric column read by ``from_dict`` must reject garbage with
+# ``ValueError`` (the store/room contract), never leak ``TypeError`` from a bare
+# ``int(None)``/``int(dict)``. Values are appended to an otherwise valid row so
+# the numeric path is what rejects it, not an earlier shape check.
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["log"].append({"seat": None, "move": "H8", "t": 1}),
+        lambda d: d["log"].append({"seat": 0, "move": "H8", "t": "later"}),
+        lambda d: d["log"].append({"seat": {}, "move": "H8", "t": 1}),
+        lambda d: d["chat"].append({"seat": None, "text": "hi", "t": 1, "at": 1}),
+        lambda d: d["chat"].append({"seat": 0, "text": "hi", "t": [], "at": 1}),
+        lambda d: d["chat"].append({"seat": 0, "text": "hi", "t": 1, "at": "now"}),
+        lambda d: d.__setitem__("created_at", {"bad": 1}),
+        lambda d: d.__setitem__("updated_at", "yesterday"),
+        lambda d: d.__setitem__("version", ["v1"]),
+    ],
+    ids=[
+        "log-seat-null",
+        "log-t-text",
+        "log-seat-object",
+        "chat-seat-null",
+        "chat-t-list",
+        "chat-at-text",
+        "created-at-object",
+        "updated-at-text",
+        "version-list",
+    ],
+)
+def test_from_dict_rejects_malformed_numbers_with_value_error(mutate) -> None:
+    data = _gomoku().to_dict()
+    mutate(data)
+    with pytest.raises(ValueError):
+        Match.from_dict(data)
+
+
+def test_from_dict_still_accepts_legacy_integer_strings_and_defaults() -> None:
+    """Normalising the exception type must not reject legacy persisted rows."""
+    data = _gomoku().to_dict()
+    data["created_at"] = "1000"
+    data["version"] = "2"
+    data["log"] = [{"seat": "1", "move": "H8", "t": "5"}]
+    data["chat"] = [{"seat": "0", "text": "hi", "t": "6", "at": "7"}]
+    restored = Match.from_dict(data)
+    assert (restored.created_at, restored.version) == (1_000, 2)
+    assert (restored.log[0].seat, restored.log[0].t) == (1, 5)
+    assert (restored.chat[0].seat, restored.chat[0].t, restored.chat[0].at) == (0, 6, 7)
+
+    # Missing keys keep their historical defaults.
+    for key in ("created_at", "updated_at", "version"):
+        data.pop(key)
+    data["log"] = [{"move": "H8"}]
+    data["chat"] = [{"text": "hi"}]
+    restored = Match.from_dict(data)
+    assert (restored.created_at, restored.updated_at, restored.version) == (0, 0, 1)
+    assert (restored.log[0].seat, restored.log[0].t) == (0, 0)
+    assert (restored.chat[0].seat, restored.chat[0].t, restored.chat[0].at) == (0, 0, 0)
 
 
 @pytest.mark.parametrize(

@@ -164,7 +164,28 @@ Tests (`tests/test_spectator.py`):
   index-zero clamp would incorrectly skip the first option on next. Tests cover
   missing/stale values, Home/End, and single-option groups.
 
-## Verification
+## Round 2 — review of `1395775`
+
+- **Confirmed intentional:** a malformed newest resignation does not fall back
+  to an older valid resignation. That would invent a different resigner and
+  potentially award the wrong camp a win. The match remains terminal without
+  an attributable winner. Regression coverage now includes an older valid
+  resignation followed by a malformed one; the explanatory comment is clarified.
+- **Accepted:** `from_dict` numeric conversions normalize TypeError, ValueError,
+  and OverflowError to ValueError. This covers log/chat and header fields while
+  retaining accepted legacy integer strings and existing missing-field defaults.
+  Malformed rows are rejected rather than repaired by shifting seats or times.
+- **No production change needed:** `Settings` merges both delay endpoints from
+  `host/settings.py::DEFAULTS` before the parser sees configuration. Supplying
+  only max therefore keeps the default min (1000 ms), and supplying only min
+  keeps the default max (2000 ms). Bare partial test doubles are not the actual
+  configuration path. The existing parser test now pins both single-key cases
+  with production defaults restored from the suite's zero-delay speed fixture.
+
+Focused round-2 checks: engine status **56 passed**; single-source delay parser
+**1 passed**. Full integration results are recorded in the PR response.
+
+## Round 1 verification
 
 Focused (this lane's validation):
 

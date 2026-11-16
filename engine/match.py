@@ -150,6 +150,26 @@ def _clean_resigned(value: Any, seat_count: int) -> Seat | None:
     return _RESIGNED_BAD
 
 
+def _persisted_int(value: Any, field: str) -> int:
+    """Read a persisted integer field, normalising failures to ``ValueError``.
+
+    ``from_dict`` rejects a bad row with ``ValueError``; that is the contract
+    the store relies on. A bare ``int(...)`` on persisted data escapes with
+    ``TypeError`` for ``None``/containers, so every numeric conversion goes
+    through here. Only *conversion* is guarded: an integer spelling in a string
+    (``"5"``) stays accepted for legacy rows, while malformed values reject the
+    whole row instead of silently falling back to a default (which would shift
+    log/chat seat indices or timestamps). Log/chat call sites pass
+    ``x.get(key, 0)``, so a missing key keeps its legacy default while an
+    explicit ``null`` fails closed; header call sites keep their historical
+    ``or 0`` / ``or 1`` normalisation.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"persisted match {field} is not an integer") from exc
+
+
 def _log_resign_seat(entry: Any) -> Any:
     """Seat recorded by a ``resign`` log entry; ``_NO_RESIGN`` for other entries.
 
@@ -175,7 +195,7 @@ def _resignation(match: Match) -> tuple[Seat | None, bool]:
 
     The explicit ``resigned`` field wins when it names a real seat. Otherwise
     (``None`` or a garbage value such as an out-of-range index) the log is the
-    fallback — recovery is always preferred to giving up. Only when nothing
+    fallback — a usable log entry is preferred over giving up. Only when nothing
     usable is found is the match reported as unresolvable, which ``status_of``
     turns into a safe terminal outcome: reviving it as active would resurrect a
     finished game.
@@ -416,9 +436,9 @@ class Match:
             raise ValueError("persisted match log entry is not an object")
         log = [
             LogEntry(
-                int(e.get("seat", 0)),
+                _persisted_int(e.get("seat", 0), "log seat"),
                 str(e.get("move", "")),
-                int(e.get("t", 0)),
+                _persisted_int(e.get("t", 0), "log t"),
                 list(e["cards"]) if isinstance(e.get("cards"), list) else None,
             )
             for e in raw_log or []
@@ -430,10 +450,10 @@ class Match:
             raise ValueError("persisted match chat entry is not an object")
         chat = [
             MatchChat(
-                int(c.get("seat", 0)),
+                _persisted_int(c.get("seat", 0), "chat seat"),
                 str(c.get("text", "")),
-                int(c.get("t", 0)),
-                int(c.get("at", 0)),
+                _persisted_int(c.get("t", 0), "chat t"),
+                _persisted_int(c.get("at", 0), "chat at"),
                 str(c.get("by") or ""),
             )
             for c in raw_chat or []
@@ -463,9 +483,9 @@ class Match:
         return cls(
             id=str(data["id"]),
             kind=str(data["kind"]),
-            created_at=int(data.get("created_at") or 0),
-            updated_at=int(data.get("updated_at") or 0),
-            version=int(data.get("version") or 1),
+            created_at=_persisted_int(data.get("created_at") or 0, "created_at"),
+            updated_at=_persisted_int(data.get("updated_at") or 0, "updated_at"),
+            version=_persisted_int(data.get("version") or 1, "version"),
             seats=seats,
             state=data.get("state"),
             resigned=resigned,

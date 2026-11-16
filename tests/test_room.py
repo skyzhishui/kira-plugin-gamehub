@@ -1033,7 +1033,7 @@ async def test_set_bot_name_propagates_to_live_rooms() -> None:
     assert error == "这不是汐祈的座位"
 
 
-def test_bot_delay_range_parse_single_source() -> None:
+def test_bot_delay_range_parse_single_source(monkeypatch) -> None:
     """D-2: one parser for the room layer and game_agent's fallback fill."""
     from room import bot_delay_range_s
 
@@ -1043,6 +1043,13 @@ def test_bot_delay_range_parse_single_source() -> None:
     assert bot_delay_range_s(Settings({"bot_move_delay_min_ms": 1000, "bot_move_delay_max_ms": 2000})) == (1.0, 2.0)
     # Inverted intervals clamp to a fixed lo instead of an inverted draw.
     assert bot_delay_range_s(Settings({"bot_move_delay_min_ms": 800, "bot_move_delay_max_ms": 300})) == (0.8, 0.8)
+    # Real settings fill an omitted endpoint from defaults, not from zero.
+    from host.settings import DEFAULTS
+
+    monkeypatch.setitem(DEFAULTS, "bot_move_delay_min_ms", 1000)
+    monkeypatch.setitem(DEFAULTS, "bot_move_delay_max_ms", 2000)
+    assert bot_delay_range_s(Settings({"bot_move_delay_max_ms": 3000})) == (1.0, 3.0)
+    assert bot_delay_range_s(Settings({"bot_move_delay_min_ms": 1500})) == (1.5, 2.0)
     # Keys absent entirely (bare fake configs) keep the module default window
     # (conftest pins that constant to zero, so compare symbolically).
     class _Bare:
