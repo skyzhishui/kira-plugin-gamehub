@@ -49,10 +49,13 @@ def test_retired_session_ids_never_appear_in_config():
     assert "gamehub:gm:room" in raw
 
 
-def test_manifest_repo_points_at_the_real_gitea_project():
-    """C-40: ``nori/kira-plugin-gamehub`` only exists as a redirect."""
+def test_manifest_repo_points_at_the_public_project():
+    """``manifest.repo`` must point at the public open-source repo, not an
+    internal-only address."""
     manifest = json.loads((_PLUGIN_ROOT / "manifest.json").read_text(encoding="utf-8"))
-    assert "nori-home/kira-plugin-gamehub" in manifest["repo"]
+    assert manifest["repo"] == "https://github.com/skyzhishui/kira-plugin-gamehub"
+    assert manifest["license"] == "AGPL-3.0"
+    assert (_PLUGIN_ROOT / "LICENSE").is_file()
 
 
 def test_identity_module_keeps_only_the_shared_cap():
