@@ -575,33 +575,34 @@ export function mountTable(host, { onPlace } = {}) {
     // 用一句等待说明替代（按钮态切换不改变牌桌高度之外的结构）。
     const showPlayRow = phase === "play" && my && !spectator && !opts.delegated;
     playRow.classList.toggle("hidden", !showPlayRow);
-    waitEl.classList.toggle("hidden", showPlayRow);
     hintsBox.classList.toggle("hidden", !hintsOpen);
     hintBtn.classList.toggle("hidden", phase !== "play" || !hints.length);
 
+    // Wait line: compute the single string first, then decide visibility once (empty
+    // text collapses it). The old code toggled the same element from three branches
+    // whose rules overrode one another and relied on the initial toggle as a fallback.
+    let waitText = "";
     if (spectator) {
-      waitEl.textContent = "观战中";
+      waitText = "观战中";
     } else if (phase === "over") {
-      waitEl.textContent = "本局结束";
+      waitText = "本局结束";
     } else if (opts.delegated && my) {
       // 代打方是宿主主 agent（行动通知回合驱动），名字随配置走，不写死
       const who = getHostAgentName();
-      waitEl.textContent =
-        phase === "bid" ? `${who}正在替你叫分…` : `${who}正在替你出牌…`;
+      waitText = phase === "bid" ? `${who}正在替你叫分…` : `${who}正在替你出牌…`;
     } else if (phase === "bid") {
-      waitEl.textContent = my
+      waitText = my
         ? legalBidChoices(view).length
           ? ""
           : "等待可叫的分数…"
         : "等待其他玩家叫分…";
-      waitEl.classList.toggle("hidden", !waitEl.textContent);
     } else if (phase === "play" && !my) {
-      waitEl.textContent = `等待 ${seatName(current.seats, Number(view.turn))} 出牌…`;
+      waitText = `等待 ${seatName(current.seats, Number(view.turn))} 出牌…`;
     } else if (opts.busy) {
-      waitEl.textContent = "正在提交…";
-    } else {
-      waitEl.textContent = "";
+      waitText = "正在提交…";
     }
+    waitEl.textContent = waitText;
+    waitEl.classList.toggle("hidden", !waitText || showPlayRow);
 
     passBtn.classList.toggle("hidden", !passVisible(view, { canAct: opts.canAct, busy: opts.busy, you }));
     syncSelection();

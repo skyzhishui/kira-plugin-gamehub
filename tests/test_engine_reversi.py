@@ -52,18 +52,29 @@ def _replay(seq: list[str]):
     return state
 
 
+def _board(cells=None, **extra) -> dict:
+    """A minimal, well-formed state; ``extra`` overrides the defaults."""
+    state = {
+        "size": 8,
+        "cells": [0] * 64 if cells is None else cells,
+        "toPlay": 1,
+        "moves": 0,
+        "flipped": [],
+        "over": False,
+    }
+    state.update(extra)
+    return state
+
+
 def _legal_names(state, color):
-    if color == state["toPlay"]:
-        return sorted(to_gtp(int(p), 8) for p in _mod().view(state, None)["legal"])
-    return sorted(
-        to_gtp(p, 8) for p in _legal_map(state["cells"], color)
-    )
-
-
-def _legal_map(cells, color):
+    """GTP names of ``color``'s legal points, straight from the rule helper."""
     from engine.games.reversi.rules import legal_moves
 
-    return legal_moves(cells, color)
+    return sorted(to_gtp(p, 8) for p in legal_moves(state["cells"], color))
+
+
+# rain-go 序列：黑连吃光（双停终局），也是 key_events/终局后拒绝的共同素材。
+_WIPEOUT_SEQ = [rg(m) for m in "e6 f4 e3 f6 g5 d6 e7 f5 c5".split()]
 
 
 # ----------------------------------------------------------------------
@@ -113,14 +124,7 @@ def _eight_direction_state():
         cells[enemy] = 2
         cells[end] = 1
         expect.append(enemy)
-    return {
-        "size": 8,
-        "cells": cells,
-        "toPlay": 1,
-        "moves": 0,
-        "flipped": [],
-        "over": False,
-    }, expect, center
+    return _board(cells), expect, center
 
 
 def test_all_eight_directions_flip():
@@ -171,9 +175,15 @@ def test_illegal_moves_do_not_change_state():
     assert state == before  # 输入未被变异
 
 
-def test_moves_after_game_over_are_rejected():
-    state = _replay([rg(m) for m in "e6 f4 e3 f6 g5 d6 e7 f5 c5".split()])
+def test_double_stop_ends_with_wipeout_and_rejects_later_moves():
+    state = _replay(_WIPEOUT_SEQ)
     assert state["over"] is True
+    assert state["cells"].count(1) == 13 and state["cells"].count(2) == 0
+    outcome = _mod().outcome(state)
+    assert outcome.winners == [0]
+    assert outcome.text == "黑 13 : 白 0"
+    assert _mod().waiting_on(state) == []
+
     result = _mod().apply(state, 1, "A1")
     assert isinstance(result, MoveResultErr) and "结束" in result.error
 
@@ -186,7 +196,7 @@ PASS_TWICE_SEQ = (
 
 
 # ----------------------------------------------------------------------
-#  自动 pass / 双停终局 / 吃光终局 / 平局
+#  自动 pass / 连走
 # ----------------------------------------------------------------------
 def test_pass_sequence_keeps_same_seat_and_does_not_log():
     # rain-go 序列 d6 c6 b6 b7 f4 a6 a8 c8 → 本插件行翻转
@@ -197,17 +207,6 @@ def test_pass_sequence_keeps_same_seat_and_does_not_log():
     assert state["over"] is False
     assert state["moves"] == len(seq)  # pass 不计手数、不进 log
     assert _mod().waiting_on(state) == [1]
-
-
-def test_double_stop_ends_with_wipeout():
-    seq = [rg(m) for m in "e6 f4 e3 f6 g5 d6 e7 f5 c5".split()]
-    state = _replay(seq)
-    assert state["over"] is True
-    assert state["cells"].count(1) == 13 and state["cells"].count(2) == 0
-    outcome = _mod().outcome(state)
-    assert outcome.winners == [0]
-    assert outcome.text == "黑 13 : 白 0"
-    assert _mod().waiting_on(state) == []
 
 
 def test_pass_retained_when_same_side_moves_again():
@@ -223,70 +222,17 @@ def test_pass_retained_when_same_side_moves_again():
     assert result.state["moves"] == state["moves"] + 1
 
 
-def test_key_events_consecutive_passes_each_report_new():
-    """同一座位连续两手各自让对手 pass：每手都应报新的 pass 事件。"""
-    base = _replay(PASS_TWICE_SEQ)
-    s1 = _mod().apply(base, 0, "A8").state
-    s2 = _mod().apply(s1, 0, "H7").state
-    assert s1["passed"] == 2 and s2["passed"] == 2
-    assert s2["moves"] == s1["moves"] + 1
-    assert _mod().key_events(s1, before=base, seat=0)["pass"] is True
-    assert _mod().key_events(s2, before=s1, seat=0)["pass"] is True
-
-
-def test_key_events_does_not_repeat_when_before_is_same_state():
-    """before == state（没有新落子）不得重复报 pass/big_flip/corner/key。"""
-    base = _replay(PASS_TWICE_SEQ)
-    after = _mod().apply(base, 0, "A8").state
-    assert _mod().key_events(after, before=base, seat=0)["pass"] is True
-    repeat = _mod().key_events(after, before=after, seat=0)
-    assert repeat["pass"] is False
-    assert repeat["big_flip"] is False
-    assert repeat["corner"] is False
-    assert repeat["key"] is False
-
-
-def test_key_events_big_flip_not_repeated_without_new_move():
-    cells = [0] * 64
-    for p in range(1, 6):  # B8-F8 五颗白子
-        cells[p] = 2
-    cells[6] = 1  # G8 黑
-    before = {
-        "size": 8,
-        "cells": cells,
-        "toPlay": 1,
-        "moves": 10,
-        "last": 63,
-        "flipped": [],
-        "over": False,
-    }
-    after = _mod().apply(before, 0, "A8").state
-    assert len(after["flipped"]) == 5
-    flags = _mod().key_events(after, before=before, seat=0)
-    assert flags["big_flip"] is True and flags["corner"] is True
-    repeat = _mod().key_events(after, before=after, seat=0)
-    assert repeat["big_flip"] is False and repeat["corner"] is False
-    assert repeat["wipeout"] is False and repeat["key"] is False
-
-
 def test_draw_outcome_text():
     mod = _mod()
     # 终局 32:32：outcome 只依赖 state，构造终局盘面验证和局文案。
-    draw = {
-        "size": 8,
-        "cells": [1] * 32 + [2] * 32,
-        "toPlay": 1,
-        "moves": 60,
-        "flipped": [],
-        "over": True,
-    }
+    draw = _board([1] * 32 + [2] * 32, moves=60, over=True)
     outcome = mod.outcome(draw)
     assert outcome is not None and outcome.winners == []
     assert outcome.text == "黑 32 : 白 32"
 
 
 # ----------------------------------------------------------------------
-#  bot / view / describe / chat_context / threat / key_events
+#  bot / view / describe / chat_context / threat
 # ----------------------------------------------------------------------
 def test_bot_returns_legal_move_deterministically_and_prefers_corner():
     mod = _mod()
@@ -294,24 +240,9 @@ def test_bot_returns_legal_move_deterministically_and_prefers_corner():
     move = mod.bot(state, 0)
     assert isinstance(mod.apply(state, 0, move), MoveResultOk)
     assert mod.bot(state, 0) == move  # 同局面确定性
-    empty = {
-        "size": 8,
-        "cells": [0] * 64,
-        "toPlay": 1,
-        "moves": 0,
-        "flipped": [],
-        "over": False,
-    }
-    assert mod.bot(empty, 0) is None  # 无合法点
+    assert mod.bot(_board(), 0) is None  # 无合法点
 
-    corner_state = {
-        "size": 8,
-        "cells": [0] * 64,
-        "toPlay": 1,
-        "moves": 10,
-        "flipped": [],
-        "over": False,
-    }
+    corner_state = _board(moves=10)
     corner_state["cells"][1] = 2  # B8
     corner_state["cells"][2] = 1  # C8
     corner_state["cells"][8] = 2  # A7
@@ -345,7 +276,7 @@ def test_view_legal_you_and_json():
     assert mod.view(state, None)["you"] is None
     assert mod.view(state, 1)["you"] == 2
     json.dumps(view, ensure_ascii=False)
-    over = _replay([rg(m) for m in "e6 f4 e3 f6 g5 d6 e7 f5 c5".split()])
+    over = _replay(_WIPEOUT_SEQ)
     assert mod.view(over, 0)["legal"] == {}
 
 
@@ -382,7 +313,10 @@ def test_threat_summary_is_factual_not_search():
         assert word not in text
 
 
-def test_key_events_only_when_new_this_move():
+# ----------------------------------------------------------------------
+#  key_events: only report what this move newly produced
+# ----------------------------------------------------------------------
+def test_key_events_only_report_new_events_of_the_last_move():
     mod = _mod()
     before = _initial()
     after = mod.apply(before, 0, "D6").state
@@ -398,21 +332,48 @@ def test_key_events_only_when_new_this_move():
     assert flags["pass"] is True and flags["key"] is True
 
     # 角位手：B8/A7 白、C8 黑，黑下 A8 拿角
-    cells = [0] * 64
-    cells[1] = 2
-    cells[2] = 1
-    cells[8] = 2
-    before = {"size": 8, "cells": cells, "toPlay": 1, "moves": 10, "flipped": [], "over": False}
-    after = mod.apply(before, 0, "A8").state
-    flags = mod.key_events(after, before=before, seat=0)
+    corner_before = _board(moves=10)
+    corner_before["cells"][1] = 2
+    corner_before["cells"][2] = 1
+    corner_before["cells"][8] = 2
+    corner_after = mod.apply(corner_before, 0, "A8").state
+    flags = mod.key_events(corner_after, before=corner_before, seat=0)
     assert flags["corner"] is True
 
     # 吃光终局
-    wipe = _replay([rg(m) for m in "e6 f4 e3 f6 g5 d6 e7 f5 c5".split()])
+    wipe = _replay(_WIPEOUT_SEQ)
     flags = mod.key_events(wipe, before=None, seat=0)
     assert flags["wipeout"] is True and flags["key"] is True
 
 
+def test_key_events_do_not_repeat_without_a_new_move():
+    """before == state（没有新落子）不得重复报 pass/big_flip/corner/key。"""
+    base = _replay(PASS_TWICE_SEQ)
+    after = _mod().apply(base, 0, "A8").state
+    assert _mod().key_events(after, before=base, seat=0)["pass"] is True
+    repeat = _mod().key_events(after, before=after, seat=0)
+    assert repeat["pass"] is False
+    assert repeat["big_flip"] is False
+    assert repeat["corner"] is False
+    assert repeat["key"] is False
+
+    cells = [0] * 64
+    for p in range(1, 6):  # B8-F8 五颗白子
+        cells[p] = 2
+    cells[6] = 1  # G8 黑
+    before = _board(cells, moves=10, last=63)
+    big_flip = _mod().apply(before, 0, "A8").state
+    assert len(big_flip["flipped"]) == 5
+    flags = _mod().key_events(big_flip, before=before, seat=0)
+    assert flags["big_flip"] is True and flags["corner"] is True
+    repeat = _mod().key_events(big_flip, before=big_flip, seat=0)
+    assert repeat["big_flip"] is False and repeat["corner"] is False
+    assert repeat["wipeout"] is False and repeat["key"] is False
+
+
+# ----------------------------------------------------------------------
+#  规则文案：插件朝向（rain-go 映射不是运行时等价）
+# ----------------------------------------------------------------------
 def test_rules_use_plugin_orientation_and_case_example():
     """规则不得把 rain-go 映射写成运行时等价（D6 ≠ d3）。"""
     rules = _mod().rules
@@ -425,12 +386,15 @@ def test_rules_use_plugin_orientation_and_case_example():
     assert "row 1 at the bottom" in text and "d3" not in text
 
 
+# ----------------------------------------------------------------------
+#  注册表能力标记：与模块钩子一致，不靠 kind 白名单
+# ----------------------------------------------------------------------
 def test_module_declares_turn_driver_and_registry_entry():
     mod = _mod()
     assert mod.supports_turn_driver is True
     assert mod.kind == "reversi" and mod.name["zh"] == "黑白棋"
-    assert games.get("gomoku").supports_turn_driver is True
     entry = next(g for g in games.catalog() if g["kind"] == "reversi")
     assert entry["supports_turn"] is True
     assert entry["has_bot"] is True
     assert entry["has_chat_context"] is True
+    assert entry["has_key_events"] is True

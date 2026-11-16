@@ -5,11 +5,14 @@ KiraAI session grammar is ``adapter:dm|gm:session_id``:
 - ``platform_of_session_id`` returns the first segment (the adapter name);
   ``webchat`` is treated as the web platform.
 - ``session_type_of`` maps ``dm`` -> ``private`` and ``gm`` -> ``group``.
+- ``is_private_session`` is the strict private-chat test used by the tool
+  entry points (web / ``dm`` sessions with a parseable session id).
 - ``webuserid_of_session_id`` / ``validate_web_session_id`` only accept
   ``webchat:dm:<userid>`` and return the third segment.
 
-Pure functions: no database access, no adapter lookups. Shared by
-``main`` / ``talk`` / ``web_api``.
+Pure functions: no database access, no adapter lookups. Production importers
+are ``talk`` (tier routing), ``tools`` (private-link + session-type tests) and
+``host.web`` (platform label); not every helper here has a caller.
 """
 
 from __future__ import annotations

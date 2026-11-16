@@ -269,3 +269,39 @@ def test_clear_match_and_clear() -> None:
     assert history.entry_count("b", 1) == 1
     history.clear()
     assert history.entry_count("b", 1) == 0
+
+# ----------------------------------------------------------------------
+#  D-17 regression: a single normalize_tool_calls implementation serves
+#  both consumers.
+# ----------------------------------------------------------------------
+def test_normalize_tool_calls_synthesizes_ids_for_the_live_transcript():
+    from agent_history import normalize_tool_calls
+
+    raw = [
+        {"function": {"name": "play", "arguments": {"move": "H8"}}},
+        {"id": "call-x", "function": {"name": "", "arguments": ""}},
+        "not-a-dict",
+    ]
+    calls = normalize_tool_calls(raw, id_factory=lambda i: f"call_0_{i}")
+    assert [c["id"] for c in calls] == ["call_0_0", "call-x"]
+    assert calls[0]["function"]["arguments"] == '{"move": "H8"}'
+    assert calls[1]["function"]["name"] == "unknown_tool"
+
+
+def test_normalize_tool_calls_drops_unidentified_for_history():
+    from agent_history import normalize_tool_calls
+
+    raw = [
+        {"function": {"name": "play", "arguments": "{}"}},  # no id, no info trail
+        {"id": "call-1", "function": {"name": "play", "arguments": '{"move": "J9"}'}},
+    ]
+    assert normalize_tool_calls(raw, drop_unidentified=True) == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "play", "arguments": '{"move": "J9"}'},
+        }
+    ]
+    # Non-list input degrades to [] for both consumers.
+    assert normalize_tool_calls(None) == []
+    assert normalize_tool_calls("x", id_factory=lambda i: f"c{i}") == []

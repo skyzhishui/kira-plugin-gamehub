@@ -22,6 +22,7 @@ import pytest
 import director as director_module
 import modes
 from director import PlayResult, TurnDirector
+from engine import games
 from engine.types import GameModule
 from room import RoomManager
 from tools_turn import play_tool_name, state_tool_name, submit_play_from_actions
@@ -279,10 +280,29 @@ async def test_watchdog_bot_fallback_plays_ai_seat_once():
     await _wait(lambda: director.grant_of(room.match.id).state == "filled")
     assert len(room.match.log) == 2
     assert room.match.log[-1].seat == 1
+    await director.stop()
 
-    # Late play: the grant is resolved (watchdog filled), no move lands.
+
+@pytest.mark.parametrize("no_target", [False, True], ids=["target", "no_target"])
+async def test_late_play_after_watchdog_fill_is_refused(no_target):
+    """Once the rule bot filled the turn, a late submission never lands.
+
+    Also covers early boot (no resolvable notice target): the notice is
+    skipped, the grant is still minted and the watchdog still fills.
+    """
+    rooms, plugin, _recorder, director = _harness_bound(
+        turn_play_timeout_s=0.5, turn_fallback_delay_s=0.05
+    )
+    if no_target:
+        plugin.notice_target = None  # host wiring not ready
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    await _wait(lambda: director.grant_of(room.match.id).state == "filled")
+    assert len(room.match.log) == 2
+
     grant = director.grant_of(room.match.id)
-    result = await director.submit_play(room.match.id, grant.key, "K9")
+    result = await director.submit_play(room.match.id, grant.key, "J9")
     assert result.terminal is True and result.ok is False
     assert "结束" in result.text
     assert len(room.match.log) == 2
@@ -711,17 +731,34 @@ async def test_no_bot_module_disables_delegation_and_does_not_stall(
     room, _seat, _token = await _create(rooms, mode_options=dict(DELEGATED))
     await _wait(lambda: director.grant_of(room.match.id) is not None)
 
-    class _NoBot:
-        # Same object as the base default: means "no rule bot".
+    class _NoBotModule:
+        """The real gomoku module with the rule bot switched off.
+
+        Everything else (``outcome``/``describe``/…) delegates so ``status_of``
+        keeps working; ``bot`` at class level equals the base default, which
+        is exactly how the engine's ``_has_bot`` detects "no rule bot".
+        """
+
         bot = GameModule.bot
+
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
 
     class _ProxyGames:
         @staticmethod
-        def get(_kind):
-            return _NoBot()
+        def get(kind: str):
+            return _NoBotModule(games.get(kind))
 
-    # Only the director's registry view is replaced; rooms/engine stay real.
-    monkeypatch.setattr(director_module, "games", _ProxyGames())
+    # The watchdog now takes its move from engine.match.bot_move (the
+    # canonical entry that keeps difficulty perturbation), which consults
+    # engine.match's own registry — patch there so the bot-less module is
+    # visible on exactly the path the fill uses.
+    from engine import match as engine_match
+
+    monkeypatch.setattr(engine_match, "games", _ProxyGames())
     await _wait(
         lambda: director.grant_of(room.match.id) is not None
         and director.grant_of(room.match.id).state != "active"
@@ -737,6 +774,8 @@ async def test_no_bot_module_disables_delegation_and_does_not_stall(
 #  Request-scoped tools: visible only to the notice session, gone after play
 # ----------------------------------------------------------------------
 async def test_tools_for_only_the_announced_session():
+    """Request-scoped tools: only the announced session, gone after play, and
+    each schema carries its *instance* name for the provider payload."""
     rooms, _plugin, recorder, director = _harness_bound()
     room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
     assert director.tools_for("private-u1") == []  # no grant yet
@@ -746,9 +785,17 @@ async def test_tools_for_only_the_announced_session():
     session_id = recorder.sent[0][0]
 
     tools = director.tools_for(session_id)
-    names = {tool.name for tool in tools}
     # The move rides the play tag channel; only the read view stays a tool.
-    assert names == {state_tool_name(room.match.id)}
+    assert {tool.name for tool in tools} == {state_tool_name(room.match.id)}
+    for tool in tools:
+        schema = tool.get_schema()
+        # A classmethod schema would serialise the parent name; the instance
+        # name must reach the provider or the request is rejected.
+        assert schema["name"] == state_tool_name(room.match.id)
+        assert schema["description"]
+        params = schema["parameters"]
+        assert isinstance(params, dict) and params.get("type") == "object"
+        assert isinstance(params.get("properties"), dict)
     assert director.tools_for("private-other") == []  # other sessions: nothing
     assert director.tools_for("") == []
 
@@ -757,33 +804,6 @@ async def test_tools_for_only_the_announced_session():
     result = await director.submit_play(room.match.id, grant.key, "J9")
     assert result.ok
     assert director.tools_for(session_id) == []
-    await director.stop()
-
-
-async def test_turn_tool_schemas_are_named_for_the_model():
-    """Every injected tool must expose its *instance* name to the model.
-
-    ``BaseTool.get_schema`` is a classmethod; the host builds ``request.tools``
-    from ``ToolSet.to_list()``, so a turn tool that only sets ``self.name``
-    would serialise ``{"name": null}`` and the provider rejects the request
-    ("tools[n] must include a function name").
-    """
-    rooms, _plugin, recorder, director = _harness_bound()
-    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
-    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
-    await _wait(lambda: bool(recorder.sent))
-    session_id = recorder.sent[0][0]
-
-    tools = director.tools_for(session_id)
-    assert tools
-    schemas = {tool.get_schema()["name"]: tool.get_schema() for tool in tools}
-    assert state_tool_name(room.match.id) in schemas
-    for name, schema in schemas.items():
-        assert name, "tool schema must carry a name"
-        assert schema["description"], f"{name}: description must not be empty"
-        params = schema["parameters"]
-        assert isinstance(params, dict) and params.get("type") == "object"
-        assert isinstance(params.get("properties"), dict)
     await director.stop()
 
 
@@ -870,37 +890,6 @@ async def test_illegal_move_is_correctable_and_watchdog_still_fills():
     await director.stop()
 
 
-async def test_busy_queued_notice_watchdog_fills_and_late_play_is_stale():
-    rooms, _plugin, _recorder, director = _harness_bound(
-        turn_play_timeout_s=0.5, turn_fallback_delay_s=0.05
-    )
-    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
-    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
-    await _wait(lambda: director.grant_of(room.match.id) is not None)
-    await _wait(lambda: director.grant_of(room.match.id).state == "filled")
-    assert len(room.match.log) == 2
-
-    grant = director.grant_of(room.match.id)
-    result = await director.submit_play(room.match.id, grant.key, "J9")
-    assert result.terminal is True and "结束" in result.text
-    assert len(room.match.log) == 2
-    await director.stop()
-
-
-async def test_restore_without_target_still_fills_via_watchdog():
-    """No resolvable target (early boot) → no notice, watchdog fills anyway."""
-    rooms, plugin, _recorder, director = _harness_bound(
-        turn_play_timeout_s=0.5, turn_fallback_delay_s=0.05
-    )
-    plugin.notice_target = None  # host wiring not ready
-    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
-    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
-    await _wait(lambda: director.grant_of(room.match.id) is not None)
-    await _wait(lambda: director.grant_of(room.match.id).state == "filled")
-    assert len(room.match.log) == 2
-    await director.stop()
-
-
 async def test_stop_button_watchdog_fills_minted_grant_then_no_future():
     """Stop-next-turn: an already minted grant may finish; no new grants."""
     rooms, _plugin, _recorder, director = _harness_bound(
@@ -919,7 +908,7 @@ async def test_stop_button_watchdog_fills_minted_grant_then_no_future():
     await director.stop()
 
 
-async def test_restore_active_rearms_waiting_turns():
+async def test_restore_active_rearms_only_matches_whose_seat_owes_a_move():
     rooms, _plugin, recorder, director = _harness_bound(turn_play_timeout_s=5.0)
     room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
     # First event: the human opens and the AI seat is already waiting.
@@ -928,11 +917,20 @@ async def test_restore_active_rearms_waiting_turns():
     director.cancel_match(room.match.id, reason="test")
     await asyncio.sleep(0.1)
 
+    # A teammate match with no delegation never owes a turn → no grant.
+    teammate_room, _sb, _tb = await _create(
+        rooms, actor="ub", opponent="bot",
+        mode_options={"mode": "bot", "difficulty": "easy"},
+    )
+    await teammate_room.apply(0, {"type": "move", "move": "C3"}, client_version=1)
+    await _wait(lambda: len(teammate_room.match.log) == 2)
+
     count = await director.restore_active()
-    assert count == 1
+    assert count == 1  # only the waiting turn, never the teammate match
     grant = director.grant_of(room.match.id)
     assert grant is not None and grant.state == "active"
     assert grant.move_count == len(room.match.log)
+    assert director.grant_of(teammate_room.match.id) is None
     await director.stop()
 
 
@@ -1092,7 +1090,10 @@ async def test_text_only_reply_gets_corrective_nudge_and_fast_fill():
     sid = grant.session_id
 
     # A run that started AFTER the notice completes with plain text only
-    # (no play submission) — the F1 arming precondition.
+    # (no play submission) — the F1 arming precondition. Production offers
+    # the turn surface on every request (host/prompt.inject_into_request),
+    # so the test mirrors that before marking the run.
+    director.tools_for(sid)
     director.note_llm_request(sid)
     director.note_response(sid)
     await _wait(lambda: any("刚才只发了文字" in t for _s, t in recorder.sent))
@@ -1149,6 +1150,7 @@ async def test_corrective_nudge_is_capped_per_grant():
     sid = grant.session_id
 
     for _ in range(5):
+        director.tools_for(sid)  # the request offers the surface (production)
         director.note_llm_request(sid)
         director.note_response(sid)
         await asyncio.sleep(0.08)
@@ -1161,11 +1163,12 @@ async def test_corrective_nudge_is_capped_per_grant():
     await director.stop()
 
 
-async def test_llm_request_without_response_marks_the_turn_in_flight():
+async def test_turn_in_flight_marking_and_its_ttl():
     """F3：请求已发出、还没有任何回复 → 视作在途，不判静默。
 
     旧代码探测核心不存在的 ``session_mgr.is_busy``（永远 False），导致
-    18:17:35 明明有 101s 的 run 在跑却被判静默、催促被提前浪费。
+    18:17:35 明明有 101s 的 run 在跑却被判静默、催促被提前浪费。只发过
+    request、永不回复的死 run 标记必须按 TTL 失效，否则会楔死后续回合。
     """
     rooms, _plugin, recorder, director = _harness_bound(
         turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05
@@ -1181,7 +1184,12 @@ async def test_llm_request_without_response_marks_the_turn_in_flight():
     director.note_llm_request(sid)
     assert await director._turn_in_flight(grant), "open run must count as busy"
     director.note_response(sid)  # answered → no longer in flight per se
-    await asyncio.sleep(0.05)
+
+    # A request mark older than the TTL is a dead run: it must not wedge.
+    # (Clear the progress signal so only the run mark is under test.)
+    grant.last_progress = 0.0
+    director._llm_req[sid] = time.monotonic() - 301.0
+    assert not await director._turn_in_flight(grant)
     await director.stop()
 
 
@@ -1257,6 +1265,7 @@ async def test_open_run_past_short_deadline_gets_bounded_extensions_then_fills()
     await _wait(lambda: bool(recorder.sent))
     sid = grant.session_id
 
+    director.tools_for(sid)  # the request offers the surface (production)
     director.note_llm_request(sid)
     director.note_response(sid)
     await _wait(lambda: grant.text_nudges == 1)  # corrective sent
@@ -1271,25 +1280,6 @@ async def test_open_run_past_short_deadline_gets_bounded_extensions_then_fills()
     # The fill happened no earlier than the short deadline and no later than
     # the ceiling (bounded extensions, then the rule bot takes over).
     assert grant.short_deadline > 0
-    await director.stop()
-
-
-async def test_dead_run_mark_expires_and_cannot_wedge_the_turn():
-    """F3 TTL：只发过 request、永不回复的死 run 标记 5 分钟后失效。"""
-    rooms, _plugin, recorder, director = _harness_bound(
-        turn_play_timeout_s=30.0, turn_fallback_delay_s=0.05
-    )
-    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
-    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
-    await _wait(lambda: director.grant_of(room.match.id) is not None)
-    grant = director.grant_of(room.match.id)
-    await _wait(lambda: bool(recorder.sent))
-    sid = grant.session_id
-
-    director._llm_req[sid] = time.monotonic() - 301.0  # older than the TTL
-    assert not await director._turn_in_flight(grant)
-    director._llm_req[sid] = time.monotonic()  # fresh mark counts
-    assert await director._turn_in_flight(grant)
     await director.stop()
 
 
@@ -1328,4 +1318,85 @@ async def test_shared_session_nudges_only_the_grant_whose_tools_were_offered():
     await asyncio.sleep(0.2)
     assert nudged.text_nudges == 1, "the offered grant gets the corrective"
     assert other.text_nudges == 0, "the grant without tools is never blamed"
+    await director.stop()
+
+
+# ----------------------------------------------------------------------
+#  2026-11-16 remediation regressions (P2).
+# ----------------------------------------------------------------------
+async def test_note_tag_rejected_only_counts_delivered_notices():
+    """Budget is consumed by delivered notices, not failed sends (P2)."""
+    rooms, _plugin, _recorder, director = _harness_bound()
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+
+    original = director_module.send_notice
+
+    async def failing(plugin, sid, text):
+        return False
+
+    director_module.send_notice = failing
+    try:
+        await director.note_tag_rejected("s", grant, "zz", "无效动作")
+    finally:
+        director_module.send_notice = original
+    assert grant.tag_retries == 0  # nothing delivered → no budget consumed
+    assert grant.last_rejection == ("zz", "无效动作")  # the context trail stays
+
+    await director.note_tag_rejected("s", grant, "zz", "无效动作")
+    assert grant.tag_retries == 1
+    await director.stop()
+
+
+async def test_note_response_without_offered_surface_never_nudges():
+    """Fail-closed: a grant whose tools were never offered gets no nudge (P2)."""
+    rooms, _plugin, recorder, director = _harness_bound(
+        turn_play_timeout_s=30.0,
+        turn_fallback_delay_s=0.05,
+        turn_text_grace_s=0.02,
+        turn_text_retry_s=0.3,
+    )
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+    await _wait(lambda: bool(recorder.sent))
+
+    # No tools_for() call: the mapping has no entry for this session.
+    assert director._tools_grant.get(grant.session_id) is None
+    director.note_llm_request(grant.session_id)
+    director.note_response(grant.session_id)
+    await asyncio.sleep(0.2)  # past the grace + retry window
+    assert grant.text_task is None, "no corrective without an offered surface"
+    assert grant.text_nudges == 0
+    await director.stop()
+
+
+async def test_finish_cancels_an_in_flight_notice_task():
+    """``_finish`` also cancels ``turn_task`` (narrow notice-after-close race)."""
+    rooms, _plugin, _recorder, director = _harness_bound()
+    room, _seat, _token = await _create(rooms, mode_options=dict(NORI))
+    await room.apply(0, {"type": "move", "move": "H8"}, client_version=1)
+    await _wait(lambda: director.grant_of(room.match.id) is not None)
+    grant = director.grant_of(room.match.id)
+
+    original = director_module.send_notice
+    release = asyncio.Event()
+
+    async def slow_send(plugin, sid, text):
+        await release.wait()  # park mid-delivery
+        return True
+
+    director_module.send_notice = slow_send
+    try:
+        await _wait(lambda: grant.notice_sent)  # _run_turn is inside send now
+        director.cancel_match(room.match.id, "test_close")
+        assert grant.state != "active"
+        await asyncio.sleep(0.05)
+        assert grant.turn_task is None or grant.turn_task.done()
+    finally:
+        release.set()
+        director_module.send_notice = original
     await director.stop()

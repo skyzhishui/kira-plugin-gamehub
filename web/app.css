@@ -586,6 +586,12 @@ a.btn:hover { color: var(--ink); }
 .conn-chip.stopped .dot,
 .conn-chip.missing .dot { background: var(--bad); }
 
+/* Connection paused while the tab is in the background: neutral grey, no blinking
+ * (distinct from reconnect/auth failures). The class is "paused" rather than "hidden"
+ * because .hidden is the global display:none!important utility. */
+.conn-chip.paused { color: var(--ink-soft); border-color: var(--line); }
+.conn-chip.paused .dot { background: var(--faint); animation: none; }
+
 @keyframes breathe { 50% { opacity: 0.4; } }
 
 /* ---------------- 骨架 / 空态 ---------------- */
@@ -2063,159 +2069,6 @@ a.go:hover::after { transform: translateX(2px); }
   from { opacity: 0; transform: translateY(24px); }
 }
 
-/* ---------------- 聊天富媒体（segments：表情包图片 / TTS 语音） ---------------- */
-
-/* 图片：尺寸自适应 + 纵横比 contain，气泡/聊天窗都不挤爆布局 */
-.msg-media-img {
-  display: block;
-  max-width: 100%;
-  width: auto;
-  height: auto;
-  max-width: min(100%, 190px);
-  max-height: 128px;
-  object-fit: contain;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  margin: 3px 0;
-  background: var(--sky-pale);
-}
-
-/* 图片 loading 占位：blob 拉取/解码期间的真实空态（借 .skel 微光语言），
- * 图片完整就绪才原位亮图 —— 全程不闪 alt 文本/破损图标；尺寸固定不跳版 */
-.msg-media-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: min(100%, 190px);
-  height: 92px;
-  margin: 3px 0;
-  border-radius: 10px; /* 与 .msg-media-img 同形，换入时不跳 */
-  color: var(--sky);
-}
-.msg-media-loading .ph-ic {
-  display: inline-flex;
-  width: 22px;
-  height: 22px;
-  opacity: 0.5;
-  animation: breathe 2.4s ease infinite;
-}
-.msg-media-loading .ph-ic svg { width: 100%; height: 100%; }
-
-/* 图片就绪亮场：轻微淡入上浮（prefers-reduced-motion 下被全局压平） */
-.msg-media-img.is-ready { animation: media-in 0.22s ease; }
-@keyframes media-in {
-  from { opacity: 0; transform: translateY(2px); }
-}
-
-/* 未缓存/加载失败占位：可读文案，不发远端请求，不破图 */
-.msg-media-ph {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  margin: 3px 0;
-  padding: 5px 10px;
-  border: 1px dashed var(--line);
-  border-radius: 10px;
-  color: var(--ink-soft);
-  font-size: 11px;
-}
-.msg-media-ph .ph-ic { display: inline-flex; width: 14px; height: 14px; flex: none; }
-.msg-media-ph .ph-ic svg { width: 100%; height: 100%; }
-.msg-media-ph small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 语音芯片：手动播放兜底控件（用户/宿主主 agent 语音都可点）；播放中波形起伏 */
-.voice-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  max-width: 100%;
-  margin: 3px 0;
-  padding: 7px 12px;
-  border-radius: 14px;
-  border: 1px solid var(--line);
-  background: var(--sky-pale);
-  color: var(--sky-dark);
-  font: inherit;
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 1;
-  cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
-}
-.msg.mine .voice-chip {
-  background: var(--pink-soft);
-  border-color: var(--pink);
-  color: var(--pink-deep);
-}
-.voice-chip:hover { border-color: var(--line-hover); transform: translateY(-1px); }
-.voice-chip:active { transform: translateY(0); }
-.voice-chip .vc-ic { display: inline-flex; width: 14px; height: 14px; flex: none; }
-.voice-chip .vc-ic svg { width: 100%; height: 100%; }
-.voice-chip .vc-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.voice-chip .v-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; flex: none; }
-.voice-chip .v-bars i {
-  width: 2.5px;
-  height: 4px;
-  border-radius: 2px;
-  background: currentColor;
-  opacity: 0.55;
-}
-.voice-chip.playing .v-bars i { opacity: 1; animation: vwave 0.9s ease-in-out infinite; }
-.voice-chip.playing .v-bars i:nth-child(2) { animation-delay: 0.14s; }
-.voice-chip.playing .v-bars i:nth-child(3) { animation-delay: 0.28s; }
-@keyframes vwave {
-  0%, 100% { height: 4px; }
-  50% { height: 12px; }
-}
-/* 自动播放被浏览器拦截：不声称已播放，明确引导点按 */
-.voice-chip.blocked {
-  border-style: dashed;
-  border-color: var(--warn);
-  color: var(--warn);
-}
-
-/* speaker 喇叭动效徽标：只挂在真实 playing 消息的宿主主 agent 头像旁 */
-.speakable { position: relative; }
-.speak-badge {
-  position: absolute;
-  right: -5px;
-  bottom: -5px;
-  z-index: 3;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--white);
-  background: linear-gradient(140deg, var(--sky) 0%, var(--pink-deep) 100%);
-  border: 1.5px solid var(--white);
-  box-shadow: 2px 3px 7px rgba(116, 160, 200, 0.35);
-  opacity: 0;
-  transform: scale(0.6);
-  transition: opacity 0.18s ease, transform 0.18s ease;
-  pointer-events: none;
-}
-.speakable.speaking .speak-badge { opacity: 1; transform: none; }
-.speak-badge svg { width: 11px; height: 11px; }
-.speak-badge svg [stroke] { animation: spk-wave 1s ease-in-out infinite; }
-@keyframes spk-wave {
-  0%, 100% { opacity: 0.45; }
-  50% { opacity: 1; }
-}
-html.dark .speak-badge { border-color: var(--pink); }
-
 /* ---------------- 宿主主 agent 座位发言气泡（锚在 AI 座位卡上，不占布局） ---------------- */
 
 .seat { position: relative; }
@@ -2276,38 +2129,12 @@ html.dark .speak-badge { border-color: var(--pink); }
   overflow-wrap: anywhere;
 }
 
-/* 气泡媒体区：表情包小图 + 语音状态芯片；空时收起不占位 */
+/* Bubble media area: seat bubbles render text only (match.chat carries just text);
+ * the media container stays mounted but empty, and :empty collapses it so it costs no
+ * space or reserved height. Rich-media wiring is not implemented, so its child styles
+ * were removed instead of being left dead. */
 .seat-bubble-media { display: block; }
 .seat-bubble-media:empty { display: none; }
-.seat-bubble-media .bubble-img {
-  display: block;
-  max-width: 100%;
-  width: auto;
-  height: auto;
-  max-height: 64px;
-  object-fit: contain;
-  border-radius: 8px;
-  margin: 2px 0;
-}
-/* 气泡 loading 占位：同一条装载链路，尺寸小巧贴合座位卡（skel 基类供微光） */
-.seat-bubble-media .bubble-media-loading {
-  width: 84px;
-  height: 56px;
-  margin: 2px 0;
-  border-radius: 8px;
-}
-.seat-bubble-media .bubble-media-loading .ph-ic { width: 16px; height: 16px; }
-/* 气泡里的语音芯片是状态展示（气泡 pointer-events:none + aria-hidden），
- * 与聊天窗同 key 共享播放态，不构成第二路播放 */
-.seat-bubble-media .voice-chip { margin: 2px 0; cursor: default; }
-.seat-bubble-media .voice-chip.mini {
-  padding: 5px 9px;
-  font-size: 10.5px;
-  gap: 5px;
-  border-radius: 11px;
-}
-.seat-bubble-media .voice-chip.mini .vc-ic { width: 12px; height: 12px; }
-.seat-bubble-media .voice-chip.mini .v-bars { height: 10px; }
 
 /* ---------------- 对局页响应式 ---------------- */
 
@@ -2361,10 +2188,6 @@ html.dark .speak-badge { border-color: var(--pink); }
   .seat-bubble { max-width: 148px; right: 38px; top: -6px; }
   .seat-bubble::after { top: 20px; }
   .seat-bubble-text { -webkit-line-clamp: 3; }
-  /* 375px 档：媒体进一步收身，图文混排不挤爆气泡/聊天窗 */
-  .msg-media-img { max-width: min(100%, 150px); max-height: 108px; }
-  .seat-bubble-media .bubble-img { max-height: 52px; }
-  .voice-chip { padding: 6px 10px; }
 }
 
 /* ---------------- 动效克制 ---------------- */
@@ -2379,11 +2202,6 @@ html.dark .speak-badge { border-color: var(--pink); }
   }
   .reveal { animation: none !important; }
   .result-sticker { animation: none !important; }
-  /* 聊天媒体：波形/喇叭动效静止；喇叭徽标保留静态可见（仍指示「正在播放」） */
-  .voice-chip.playing .v-bars i { animation: none !important; height: 9px; }
-  .voice-chip:hover { transform: none; }
-  .speak-badge svg [stroke] { animation: none !important; }
-  .speak-badge { transition: none; }
   body.lobby::before,
   body.lobby::after,
   .fx-atmo,

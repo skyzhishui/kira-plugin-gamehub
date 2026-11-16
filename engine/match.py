@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -35,6 +36,175 @@ SOURCE_WEBUI = "webui"
 
 # 陪练座位默认显示名（可配置；同一局多个陪练时第二位起加序号）。
 DEFAULT_PRACTICE_NAME = "小白"
+
+# Engine-layer logger: standalone stdlib logger (the engine must stay importable
+# without the host). Bad persisted snapshots are logged, never silently accepted.
+logger = logging.getLogger(__name__)
+
+# Status boundary: invalid resigned seats become a terminal marker rather than
+# indexing player names or reviving a finished match as active.
+_RESIGNED_BAD = object()
+
+# Canonical persisted marker for "somebody resigned, but the recorded seat was
+# corrupt". It is an int so it survives the DB integer column and a reload, and
+# it is out of range so ``status_of`` keeps treating the match as terminal.
+# ``-2`` is used (not ``-1``): SQLite happily stores negative ints, and a
+# smaller sentinel keeps it out of every ``0 <= seat < len(seats)`` test.
+RESIGNED_INVALID: Seat = -2
+
+# Status derivation runs on every view/broadcast; a corrupt row must not flood
+# the log with one warning per read. Keys are bounded (ids of bad rows only).
+_warned_status_keys: set[str] = set()
+
+
+def _warn_status_once(key: str, message: str, *args: Any) -> None:
+    """Warn about a corrupt snapshot once per key, not once per read."""
+    if key in _warned_status_keys:
+        return
+    if len(_warned_status_keys) >= 256:
+        _warned_status_keys.clear()
+    _warned_status_keys.add(key)
+    logger.warning(message, *args)
+
+
+def _module_or_none(kind: str) -> GameModule | None:
+    """Resolve a game module without raising (unknown/unregistered kind).
+
+    ``get`` is the canonical entry point; unknown kinds raise ``KeyError`` there,
+    so the lookup is wrapped. Test doubles that only expose part of the registry
+    API therefore keep working, and a removed/renamed game degrades to a
+    terminal status instead of a 500 on every read.
+    """
+    try:
+        return games.get(kind)
+    except Exception:  # noqa: BLE001 - unknown kind -> terminal status
+        return None
+
+
+def _probe_module(
+    module: GameModule, seats: list[SeatInfo], state: Any, match_id: Any
+) -> str:
+    """Probe a persisted snapshot against its game module; "" = accepted.
+
+    Two independent checks, both minimal shape only:
+
+    - seat count must fit the module's declared ``players`` range (a truncated
+      or padded seat list would silently change which seat owns a token);
+    - the module's optional ``validate_state`` hook must accept the state.
+
+    Returns a short reason string for the caller to raise; a raising probe is
+    treated as a rejection (never allowed to escape as a 500).
+    """
+    players = getattr(module, "players", None)
+    minimum = int(getattr(players, "min", 0) or 0)
+    maximum = int(getattr(players, "max", 0) or 0)
+    if maximum >= minimum and not (minimum <= len(seats) <= maximum):
+        return (
+            f"persisted match seat count {len(seats)} not in "
+            f"{minimum}-{maximum} for {module.kind}"
+        )
+    try:
+        problem = module.validate_state(state)
+    except Exception:  # noqa: BLE001 - probe must never escape as a 500
+        logger.warning(
+            "对局 %s 的 state 形状探测失败，按坏行拒绝",
+            match_id,
+            exc_info=True,
+        )
+        return "persisted match state probe failed"
+    return str(problem or "")
+
+
+def _clean_resigned(value: Any, seat_count: int) -> Seat | None:
+    """Validate a persisted ``resigned`` value at the status boundary.
+
+    Returns the seat index when it is a real seat, ``None`` when the match is
+    not resigned, and the ``_RESIGNED_BAD`` sentinel when the value is garbage
+    (wrong type or out of range). Callers must not treat ``_RESIGNED_BAD`` as
+    "not resigned": reviving a match whose row says it was resigned would
+    resurrect it as active, so it is resolved to a safe terminal outcome
+    instead of ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return _RESIGNED_BAD
+    if isinstance(value, int):
+        if 0 <= value < seat_count:
+            return value
+        return _RESIGNED_BAD
+    # A numeric string is what a loose column reader can hand over; only an
+    # exact integer spelling is accepted (never floats / free text).
+    if isinstance(value, str) and value.strip().lstrip("+-").isdigit():
+        try:
+            seat = int(value.strip())
+        except (TypeError, ValueError):  # pragma: no cover - guarded by isdigit
+            return _RESIGNED_BAD
+        return seat if 0 <= seat < seat_count else _RESIGNED_BAD
+    return _RESIGNED_BAD
+
+
+def _log_from_resign_entry(entry: Any) -> int | None:
+    """Seat recorded by a ``resign`` log entry, or ``None`` for other entries."""
+    if not isinstance(entry, LogEntry):
+        return None
+    return entry.seat if str(entry.move or "") == "resign" else None
+
+
+def _resignation(match: Match) -> tuple[Seat | None, bool]:
+    """Resolve a match's resignation to ``(seat, unresolvable)``.
+
+    - ``(None, False)``: the match was not resigned.
+    - ``(seat, False)``: a real seat resigned.
+    - ``(None, True)``: the snapshot says resigned but no valid seat can be
+      resolved (legacy rows where the column was lost, or garbage values).
+
+    The explicit ``resigned`` field wins when it names a real seat. Otherwise
+    (``None`` or a garbage value such as an out-of-range index) a trailing
+    ``resign`` log entry is the fallback — recovery is always preferred to
+    giving up. Only when nothing usable is found is the match reported as
+    unresolvable, which ``status_of`` turns into a safe terminal outcome:
+    reviving it as active would resurrect a finished game.
+
+    The log lookup only inspects the last entry: a resignation ends the match,
+    so ``apply_match_action`` can never append another move after it (and
+    ``autoplay`` stops once the status is terminal).
+    """
+    cleaned = _clean_resigned(match.resigned, len(match.seats))
+    if cleaned is not None and cleaned is not _RESIGNED_BAD:
+        return cleaned, False
+    says_resigned = cleaned is _RESIGNED_BAD
+    if match.log:
+        seat = _log_from_resign_entry(match.log[-1])
+        if seat is not None:
+            if isinstance(seat, int) and 0 <= seat < len(match.seats):
+                return seat, False
+            return None, True
+    return (None, True) if says_resigned else (None, False)
+
+
+def _resign_outcome(match: Match, mod: GameModule, seat: Seat) -> Outcome:
+    """Outcome of a resignation (game-aware, so team semantics are right).
+
+    The game module may implement the optional ``outcome_for_resign`` hook
+    (doudizhu does: landlord vs two farmers). Modules without it — including the
+    two-seat turn games — keep the generic rule "everyone but the resigner
+    wins", which is correct for a zero-sum two-player game. The hook exists so
+    a farmer resigning never hands the other farmer (the losing partner) a win.
+    """
+    hook = getattr(mod, "outcome_for_resign", None)
+    if callable(hook):
+        try:
+            outcome = hook(match.state, seat)
+        except Exception:  # noqa: BLE001 - bad state falls back to the safe rule
+            logger.warning(
+                "对局 %s 的认输裁决失败，回退默认规则", match.id, exc_info=True
+            )
+            outcome = None
+        if isinstance(outcome, Outcome):
+            return outcome
+    winners = [i for i in range(len(match.seats)) if i != seat]
+    return Outcome(winners=winners, text="认输")
 
 
 def _host_module(name: str) -> Any | None:
@@ -160,46 +330,90 @@ class Match:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Match":
+        # Minimal shape validation of the persisted snapshot. Nothing is
+        # filtered or dropped: a malformed element would shift seat indices
+        # (and therefore token/actor ownership), so any bad element rejects
+        # the whole row and the store skips it.
+        raw_seats = data.get("seats")
+        if not isinstance(raw_seats, list) or not raw_seats:
+            raise ValueError("persisted match seats is not a non-empty list")
+        if not all(isinstance(s, dict) for s in raw_seats):
+            raise ValueError("persisted match seat is not an object")
+        seats = [
+            SeatInfo(
+                kind=s.get("kind", "human"),
+                name=str(s.get("name") or ""),
+                token=str(s.get("token") or ""),
+                joined=bool(s.get("joined")),
+                plan=s.get("plan"),
+                actor=str(s.get("actor") or ""),
+                session_id=str(s.get("session_id") or ""),
+                source=str(s.get("source") or ""),
+            )
+            for s in raw_seats
+        ]
+        raw_log = data.get("log")
+        if raw_log is not None and not isinstance(raw_log, list):
+            raise ValueError("persisted match log is not a list")
+        if raw_log is not None and not all(isinstance(e, dict) for e in raw_log):
+            raise ValueError("persisted match log entry is not an object")
+        log = [
+            LogEntry(
+                int(e.get("seat", 0)),
+                str(e.get("move", "")),
+                int(e.get("t", 0)),
+                list(e["cards"]) if isinstance(e.get("cards"), list) else None,
+            )
+            for e in raw_log or []
+        ]
+        raw_chat = data.get("chat")
+        if raw_chat is not None and not isinstance(raw_chat, list):
+            raise ValueError("persisted match chat is not a list")
+        if raw_chat is not None and not all(isinstance(c, dict) for c in raw_chat):
+            raise ValueError("persisted match chat entry is not an object")
+        chat = [
+            MatchChat(
+                int(c.get("seat", 0)),
+                str(c.get("text", "")),
+                int(c.get("t", 0)),
+                int(c.get("at", 0)),
+                str(c.get("by") or ""),
+            )
+            for c in raw_chat or []
+        ]
+        state = data.get("state")
+        if not isinstance(state, dict):
+            raise ValueError("persisted match state is not an object")
+        module = _module_or_none(str(data.get("kind") or ""))
+        if module is not None:
+            problem = _probe_module(module, seats, state, data.get("id"))
+            if problem:
+                raise ValueError(problem)
+        resigned = _clean_resigned(data.get("resigned"), len(seats))
+        if resigned is _RESIGNED_BAD:
+            # Do not drop the value to ``None``: that would revive a resigned
+            # match as active. Normalise it to a canonical out-of-range marker
+            # (an int, so it survives the DB integer column and a reload) and
+            # let ``status_of`` derive a safe terminal outcome from it.
+            already_marked = data.get("resigned") == RESIGNED_INVALID
+            if not already_marked:
+                logger.warning(
+                    "对局 %s 的 resigned 字段非法（%r），按终局安全处理",
+                    data.get("id"),
+                    data.get("resigned"),
+                )
+            resigned = RESIGNED_INVALID
         return cls(
             id=str(data["id"]),
             kind=str(data["kind"]),
             created_at=int(data.get("created_at") or 0),
             updated_at=int(data.get("updated_at") or 0),
             version=int(data.get("version") or 1),
-            seats=[
-                SeatInfo(
-                    kind=s.get("kind", "human"),
-                    name=str(s.get("name") or ""),
-                    token=str(s.get("token") or ""),
-                    joined=bool(s.get("joined")),
-                    plan=s.get("plan"),
-                    actor=str(s.get("actor") or ""),
-                    session_id=str(s.get("session_id") or ""),
-                    source=str(s.get("source") or ""),
-                )
-                for s in data.get("seats") or []
-            ],
+            seats=seats,
             state=data.get("state"),
-            resigned=data.get("resigned"),
-            log=[
-                LogEntry(
-                    int(e.get("seat", 0)),
-                    str(e.get("move", "")),
-                    int(e.get("t", 0)),
-                    list(e["cards"]) if isinstance(e.get("cards"), list) else None,
-                )
-                for e in data.get("log") or []
-            ],
-            chat=[
-                MatchChat(
-                    int(c.get("seat", 0)),
-                    str(c.get("text", "")),
-                    int(c.get("t", 0)),
-                    int(c.get("at", 0)),
-                    str(c.get("by") or ""),
-                )
-                for c in data.get("chat") or []
-            ],
+            resigned=resigned,
+            log=log,
+            chat=chat,
             mode_options=(
                 dict(data["mode_options"])
                 if isinstance(data.get("mode_options"), dict)
@@ -379,20 +593,72 @@ def create_match(opts: NewMatchOptions) -> Match:
 
 
 def status_of(match: Match) -> MatchStatus:
-    mod = games.get(match.kind)
-    names = [s.name for s in match.seats]
-    if match.resigned is not None:
-        winners = [i for i in range(len(match.seats)) if i != match.resigned]
+    mod = _module_or_none(match.kind)
+    if mod is None:
+        # Unknown/unregistered kind (removed game, legacy row): stay terminal
+        # instead of raising ``KeyError`` on every read.
+        _warn_status_once(
+            f"kind:{match.id}:{match.kind}",
+            "对局 %s 的游戏类型未知（%s），按终局处理",
+            match.id,
+            match.kind,
+        )
         return MatchStatus(
             waiting_on=[],
-            outcome=Outcome(winners=winners, text="认输"),
-            result_text=f"{names[match.resigned]} 认输",
+            outcome=Outcome(winners=[], text="对局数据异常"),
+            result_text="对局数据异常（未知游戏）",
         )
-    outcome = mod.outcome(match.state)
-    if outcome is None:
+    names = [s.name for s in match.seats]
+    seat, unresolvable = _resignation(match)
+    if seat is not None:
         return MatchStatus(
-            waiting_on=mod.waiting_on(match.state), outcome=None, result_text=None
+            waiting_on=[],
+            outcome=_resign_outcome(match, mod, seat),
+            result_text=f"{names[seat]} 认输",
         )
+    if unresolvable:
+        # A row that says "resigned" but whose seat cannot be resolved must
+        # stay terminal: returning an active status here would resurrect the
+        # match and every later read would re-derive the same broken row.
+        _warn_status_once(
+            f"resigned:{match.id}:{match.resigned!r}",
+            "对局 %s 的认输座位无法解析（%r），按终局处理",
+            match.id,
+            match.resigned,
+        )
+        return MatchStatus(
+            waiting_on=[],
+            outcome=Outcome(winners=[], text="认输"),
+            result_text="对局已认输（座位数据异常）",
+        )
+    try:
+        outcome = mod.outcome(match.state)
+    except Exception:  # noqa: BLE001 - bad persisted state must not 500 forever
+        _warn_status_once(
+            f"outcome:{match.id}",
+            "对局 %s 的胜负无法派生，按终局处理",
+            match.id,
+        )
+        return MatchStatus(
+            waiting_on=[],
+            outcome=Outcome(winners=[], text="对局数据异常"),
+            result_text="对局数据异常",
+        )
+    if outcome is None:
+        try:
+            waiting = mod.waiting_on(match.state)
+        except Exception:  # noqa: BLE001 - same boundary as outcome()
+            _warn_status_once(
+                f"waiting:{match.id}",
+                "对局 %s 的等待座位无法派生，按终局处理",
+                match.id,
+            )
+            return MatchStatus(
+                waiting_on=[],
+                outcome=Outcome(winners=[], text="对局数据异常"),
+                result_text="对局数据异常",
+            )
+        return MatchStatus(waiting_on=waiting, outcome=None, result_text=None)
     who = (
         f"{'、'.join(names[s] for s in outcome.winners)} 胜"
         if outcome.winners
@@ -542,22 +808,9 @@ def apply_match_action(
         return MatchActionErr("bad_seat", "没有这个座位")
 
     def bump(patch: dict[str, Any]) -> Match:
-        data = {
-            "id": match.id,
-            "kind": match.kind,
-            "created_at": match.created_at,
-            "updated_at": now,
-            "version": match.version + 1,
-            "seats": match.seats,
-            "state": match.state,
-            "resigned": match.resigned,
-            "log": match.log,
-            "chat": match.chat,
-            "mode_options": match.mode_options,
-            "plan": match.plan,
-        }
-        data.update(patch)
-        return Match(**data)
+        # ``dataclasses.replace`` keeps every existing field in sync: a new
+        # field can never be silently dropped from a hand-written list.
+        return replace(match, updated_at=now, version=match.version + 1, **patch)
 
     kind = str(action.get("type") or "")
     status = status_of(match)
@@ -592,7 +845,11 @@ def apply_match_action(
     if kind == "resign":
         if status.outcome is not None:
             return MatchActionErr("game_over", "对局已经结束")
-        log = [*match.log, LogEntry(seat=seat, move="resign", t=now)][-MAX_LOG:]
+        log = [*match.log, LogEntry(seat=seat, move="resign", t=now)]
+        # Doudizhu keeps every move (authorisation relies on len(log)); the
+        # other games cap the log, same as their move path.
+        if match.kind != "doudizhu":
+            log = log[-MAX_LOG:]
         return MatchActionOk(bump({"resigned": seat, "log": log}))
 
     if kind == "say":
@@ -655,7 +912,7 @@ def open_seat(match: Match, kind: SeatKind) -> Seat | None:
 
 def view_match(match: Match, viewer: Seat | None) -> dict[str, Any]:
     """一个座位（或观战 None）可见的视图：剥 state/token，插入 me/view/status/labels。"""
-    mod = games.get(match.kind)
+    mod = _module_or_none(match.kind)
     status = status_of(match)
     # UI / SSE 规范模式选项（与 GET /mode 同源）；旧局按座位/kind 读时回填。
     modes_module = _host_module("modes")
@@ -666,6 +923,14 @@ def view_match(match: Match, viewer: Seat | None) -> dict[str, Any]:
         else dict(getattr(match, "mode_options", None) or {})
     )
 
+    # Dou-dizhu's lobby summary exposes the configured hand count. Persisted
+    # state is validated minimally at deserialization, but this is still a
+    # read path: never index a missing key (a corrupt row must not 500 the view).
+    hands_options: dict[str, Any] = {}
+    if match.kind == "doudizhu" and isinstance(match.state, dict):
+        hands = match.state.get("hands")
+        if hands is not None:
+            hands_options = {"options": {"hands": str(hands)}}
     return {
         "id": match.id,
         "kind": match.kind,
@@ -673,13 +938,14 @@ def view_match(match: Match, viewer: Seat | None) -> dict[str, Any]:
         "updated_at": match.updated_at,
         "version": match.version,
         "mode_options": mode_options,
-        **({"options": {"hands": str(match.state["hands"])}} if match.kind == "doudizhu" else {}),
+        **hands_options,
         "seats": [s.to_public() for s in match.seats],
-        "resigned": match.resigned,
+        "resigned": _resignation(match)[0],
         "log": [e.to_dict() for e in match.log],
         "chat": [c.to_dict() for c in match.chat],
         "me": viewer,
-        "view": mod.view(match.state, viewer),
+        # Unknown kind: no module view exists, but the read path must not 500.
+        "view": mod.view(match.state, viewer) if mod is not None else {},
         "status": {
             "waitingOn": status.waiting_on,
             "outcome": (
@@ -692,7 +958,7 @@ def view_match(match: Match, viewer: Seat | None) -> dict[str, Any]:
             ),
             "resultText": status.result_text,
         },
-        "labels": mod.seat_labels(match.state),
+        "labels": mod.seat_labels(match.state) if mod is not None else [],
     }
 
 
@@ -763,15 +1029,18 @@ def agent_view_text(
 ) -> str:
     """``game_agent`` 的整盘 user prompt（不含旧 ``MOVE:`` 文本协议）。
 
-    输出结构固定为：规则 → 当前局面/最近聊天 → 计划/游戏策略 → 威胁分析。
+    输出结构固定为：规则 → 当前局面/最近聊天 → 计划/游戏策略 → 威胁分析
+    → Bot 前三候选（``assistance.recommendation_text``，仅高级档/代打座位）。
     规则来自 ``mod.rules``，坐标说明来自 ``mod.move_help``；棋盘只在
     「当前局面」块由 ``mod.describe`` 输出一次，身份/座位/状态行保持原有
     口径，不会出现两套规则文本漂移。计划块内先注入有效 ``plan_text``，
     再注入游戏模块的 ``plan_prompt`` 动态策略；没有 plan 时不伪造
     ``Current plan``，只显示动态策略（若模块提供）。
 
-    ``threat_analysis=False`` 时完全不调用游戏模块的威胁摘要；模块没有
-    ``threat_summary`` 时也直接跳过，因此未来没有该能力的游戏不会报错。
+    ``threat_analysis=False`` 时完全不调用游戏模块的威胁摘要（也不调用
+    assistance 等级判定）；模块没有 ``threat_summary`` 时同样直接跳过，
+    因此未来没有该能力的游戏不会报错。``threat_analysis=True`` 时棋类
+    仍受该局等级约束（beginner 关闭、代打人类座位强制开启）。
 
     Default output stays complete (rules / move format / seat identity and
     turn instructions), so existing callers keep their behaviour.
@@ -883,7 +1152,9 @@ def agent_view_text(
     analysis_enabled = getattr(assistance, "analysis_enabled", None)
     recommendation_text = getattr(assistance, "recommendation_text", None)
     if match.kind in ("gomoku", "reversi") and callable(analysis_enabled):
-        threat_analysis = analysis_enabled(match, seat)
+        # ``threat_analysis=False`` is a hard opt-out: the level only *adds*
+        # analysis, it can never override an explicit request to skip it.
+        threat_analysis = threat_analysis and bool(analysis_enabled(match, seat))
     if threat_analysis:
         summary_fn = getattr(mod, "threat_summary", None)
         threat_text = ""

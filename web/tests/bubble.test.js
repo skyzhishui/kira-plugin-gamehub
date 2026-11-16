@@ -1,16 +1,15 @@
-/* nori-bubble.test.js — 座位发言气泡水位 + 队友区 CSS 锚点回归（node:test，零依赖）。
+/* bubble.test.js — seat-speech bubble watermark + teammate-zone CSS anchors
+ * (node:test, zero deps).
  *
- * 历史首载/重拉的气泡语义（与 shared/bubble-queue.js 一起锁定）：
- * 1) 初载只播种（seed）水位，绝不弹历史旧表情包；
- * 2) 相同历史重拉不得复播；键以 DB id 优先，媒体注解变化不改 id → 不重放；
- * 3) 同一次重拉里的多条新回复按时间正序全部入队（不取最新、不合并）；
- * 4) 相同内容不同 id 是两条独立消息。
- * 逐条展示的 1s/3s 时序与 SSE 增量结算见 bubble-queue.test.js。
+ * Covers two areas:
+ * 1) Queue watermark: the first frame only seeds (never displays), keys dedupe, a
+ *    batch queues in arrival order, same text under different keys shows twice each
+ *    (per-entry 1s/3s timing lives in bubble-queue.test.js);
+ * 2) practice-opponent game_agent say entries (match.chat {seat,text,t}): the first
+ *    frame only seeds and never pops; only new non-human seat entries enter; a
+ *    human's hand-typed say never shows a bubble.
  *
- * 另覆盖 practice 对手 game_agent say（match.chat {seat,text,t}）的水位：
- * 首帧只播种不弹；仅非人类座位的新增量进入；人类手打 say 永不弹。
- *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -18,10 +17,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { noriBubbleKey, pickNewMatchSays, matchSayKey } from "../shared/chat.js";
+import { pickNewMatchSays, matchSayKey } from "../shared/chat.js";
 import { createBubbleQueue } from "../shared/bubble-queue.js";
 
-/* ---------------- 历史气泡水位（match.js reloadChatHistory 同构） ---------------- */
+/* ---------------- queue watermark (seed / dedupe / order) ----------------
+ * The match page has no "refetch host chat history" path: bubbles are driven only by
+ * match.chat snapshot deltas (watermark signature = matchSayKey). These tests lock the
+ * queue's own seed/dedupe semantics instead of modelling the removed host-history API.
+ */
 
 /** 不触发任何计时的气泡队列：只观察是否入队/是否被去重。 */
 function memoryQueue() {
@@ -34,83 +37,28 @@ function memoryQueue() {
   return { q, shown };
 }
 
-/** 与 match.js 相同的选择逻辑：消费历史里所有未见过的宿主消息（正序）。 */
-function takeFresh(items, queue) {
-  const fresh = [];
-  for (const m of items) {
-    if (!m || m.role !== "assistant") continue;
-    const key = noriBubbleKey(m);
-    if (!key || queue.hasSeen(key)) continue;
-    fresh.push(key);
-  }
-  return fresh;
-}
-
-test("历史首载：播种水位且不弹旧表情包；相同历史重拉不重播", () => {
-  const history = [
-    { id: 1, role: "user", content: "来一局", timestamp: "2026-11-12T10:00:00Z" },
-    {
-      id: 2,
-      role: "assistant",
-      content: "[表情包:偷笑]",
-      segments: [{ type: "emoji", text: "偷笑", hash: "h2", local_media: true, local_url: "/api/sessions/media/h2" }],
-    },
-  ];
+test("首帧播种：seed 记水位且不弹旧条目；同 key 再入队被去重", () => {
   const { q, shown } = memoryQueue();
-  const keys = history.map(noriBubbleKey).filter(Boolean);
-  q.seed(keys); // 初载
-  assert.equal(shown.length, 0, "初载绝不自动弹历史气泡");
-  assert.equal(q.hasSeen("id:2"), true, "初载必须播种水位");
-
-  takeFresh(history, q).forEach((key) => q.enqueue({ key, text: "x" }));
-  assert.equal(shown.length, 0, "未变化的历史重拉不得复播旧表情包");
+  assert.equal(q.seed(["say:1", "say:2"]), 2, "播种返回新增条数");
+  assert.equal(shown.length, 0, "首帧绝不自动弹历史气泡");
+  assert.equal(q.enqueue({ key: "say:2", text: "旧" }), "duplicate");
+  assert.equal(q.enqueue({ key: "say:3", text: "新" }), "queued");
+  assert.deepEqual(shown, ["say:3"]);
 });
 
-test("媒体注解落库改变 content：id 优先，同一条历史不重放", () => {
-  const before = { id: 7, role: "assistant", content: "[表情包]" };
-  const after = {
-    id: 7,
-    role: "assistant",
-    content: "[表情包:偷笑]",
-    segments: [{ type: "emoji", text: "偷笑", hash: "h7", local_media: true, local_url: "/api/sessions/media/h7" }],
-  };
-  assert.equal(noriBubbleKey(after), "id:7", "注解变化不改变水位键");
+test("同一批次的多条新条目：按到达顺序全部入队（不取最新、不合并）", () => {
   const { q, shown } = memoryQueue();
-  q.seed([noriBubbleKey(before)]);
-  takeFresh([after], q).forEach((key) => q.enqueue({ key, text: "x" }));
-  assert.equal(shown.length, 0, "旧消息注解补全不得重播");
+  q.seed(["say:1"]);
+  ["say:3", "say:4"].forEach((key) => q.enqueue({ key, text: "x" }));
+  assert.deepEqual(shown, ["say:3"], "首条立即展示");
+  assert.deepEqual(q.pendingKeys(), ["say:4"], "后续条目排队，不被最新一条吞掉");
+  assert.equal(q.enqueue({ key: "say:1", text: "x" }), "duplicate", "已播种的旧 key 不再入队");
 });
 
-test("同批次多条新回复：按时间正序全部入队，不取最新、不合并", () => {
-  const { q, shown } = memoryQueue();
-  q.seed(["id:1"]);
-  const items = [
-    { id: 1, role: "assistant", content: "开场" },
-    { id: 2, role: "user", content: "嗯" },
-    { id: 3, role: "assistant", content: "这手走这里" },
-    {
-      id: 4,
-      role: "assistant",
-      content: "[表情包:得意]",
-      segments: [{ type: "emoji", text: "得意", hash: "h4", local_media: true, local_url: "/api/sessions/media/h4" }],
-    },
-  ];
-  takeFresh(items, q).forEach((key) => q.enqueue({ key, text: "x" }));
-  // onShow 只触发首条；排队顺序用 pendingKeys 断言
-  assert.deepEqual(shown, ["id:3"], "首条立即展示");
-  assert.deepEqual(q.pendingKeys(), ["id:4"], "表情包紧随其后排队（不被最新一条吞掉）");
-  assert.equal(q.hasSeen("id:1"), true, "已见过的旧消息不再入队");
-});
-
-test("相同内容不同 id：两条独立消息，各自入队（不误吞同文本新消息）", () => {
+test("相同内容不同 key：两条独立消息，各自入队（不误吞同文本新消息）", () => {
   const { q } = memoryQueue();
-  assert.notEqual(noriBubbleKey({ id: 8, content: "好" }), noriBubbleKey({ id: 9, content: "好" }));
-  assert.equal(q.enqueue({ key: "id:8", text: "好" }), "queued");
-  assert.equal(q.enqueue({ key: "id:9", text: "好" }), "queued", "同文不同 id 是两条");
-  // 无 DB id 的乐观消息回落 content 键
-  assert.equal(noriBubbleKey({ role: "assistant", content: "你好" }), "text:你好");
-  assert.equal(noriBubbleKey(null), "");
-  assert.equal(noriBubbleKey({ role: "assistant", id: 0, content: "x" }), "id:0", "id=0 也是有效水位");
+  assert.equal(q.enqueue({ key: "say:8", text: "好" }), "queued");
+  assert.equal(q.enqueue({ key: "say:9", text: "好" }), "queued", "同文不同 key 是两条");
 });
 
 /* ---------------- practice 对手 say 水位（match.chat） ---------------- */
@@ -230,12 +178,13 @@ test("match.chat allowSeat 拥有完整裁决权（收整条 say）：可按 by 
   );
 });
 
-/* ---------------- match.js 接线：单条临时气泡 + 全量正序入队 + 上下限钳制 ---------------- */
+/* ---------------- match.js wiring: one bubble per seat queue ---------------- */
 
-const matchSrc = fs.readFileSync(
-  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "match.js"),
-  "utf8"
-);
+/* Normalise line endings before source-text assertions: multi-line regexes must not
+ * depend on LF, or a CRLF checkout fails spuriously. */
+const matchSrc = fs
+  .readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "match.js"), "utf8")
+  .replace(/\r\n/g, "\n");
 
 test("match.js：没有宿主聊天输入/SSE（旁白走插件 notice 通道，页面只读气泡）", () => {
   assert.doesNotMatch(matchSrc, /chat-form|chat-text|chat-send|sendChatMessage|NoriStream/, "不得保留聊天输入与 SSE");
@@ -263,10 +212,9 @@ test("match.js：离页清理销毁全部座位气泡排队器（清计时器与
 
 /* ---------------- app.css：合法注释 + 头像锚点 / 375 边界 ---------------- */
 
-const css = fs.readFileSync(
-  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "app.css"),
-  "utf8"
-);
+const css = fs
+  .readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "app.css"), "utf8")
+  .replace(/\r\n/g, "\n");
 
 test("app.css 无 CSS 非法 `//` 行注释（旧缺陷会丢弃后续规则）", () => {
   const illegal = css

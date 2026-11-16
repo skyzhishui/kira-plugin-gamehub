@@ -247,10 +247,10 @@ class Doudizhu(GameModule):
         return apply(state, seat, move)
 
     def waiting_on(self, state):
-        return [] if state["phase"] == "over" else [state["turn"]]
+        return [] if state.get("phase") == "over" else [state["turn"]]
 
     def outcome(self, state):
-        if state["phase"] != "over":
+        if state.get("phase") != "over":
             return None
         scores = state["scores"]
         return Outcome(
@@ -260,11 +260,65 @@ class Doudizhu(GameModule):
             "积分 " + " · ".join(f"{n:+d}" for n in scores),
         )
 
+    def validate_state(self, state):
+        """Shape probe for persisted snapshots (not a rules check)."""
+        if not isinstance(state, dict):
+            return "state 不是对象"
+        for key in ("phase", "cards", "bottom", "scores", "results", "plays"):
+            if key not in state:
+                return f"state 缺少 {key}"
+        if state["phase"] not in ("bid", "play", "over"):
+            return "state.phase 非法"
+        cards = state["cards"]
+        if not isinstance(cards, list) or len(cards) != 3:
+            return "state.cards 不是三家手牌"
+        if not all(isinstance(hand, list) for hand in cards):
+            return "state.cards 元素不是列表"
+        if not isinstance(state["bottom"], list):
+            return "state.bottom 不是列表"
+        if not isinstance(state["scores"], list) or len(state["scores"]) != 3:
+            return "state.scores 不是三家积分"
+        if not isinstance(state["results"], list) or not isinstance(state["plays"], list):
+            return "state.results/plays 不是列表"
+        landlord = state.get("landlord")
+        if landlord is not None and (type(landlord) is not int or landlord not in range(3)):
+            return "state.landlord 非法"
+        turn = state.get("turn")
+        if type(turn) is not int or turn not in range(3):
+            return "state.turn 非法"
+        return ""
+
+    def outcome_for_resign(self, state, seat):
+        """Resignation verdict by camp (three seats, landlord vs two farmers).
+
+        The landlord resigning loses the whole hand; a farmer resigning loses
+        for *both* farmers, so the partner must never be listed as a winner
+        (the legacy "everyone but the resigner wins" rule did exactly that).
+        The verdict is per-hand and does not depend on the accumulated score,
+        so an early resignation (before the landlord is decided) is still
+        terminal and unambiguous: a bidding seat resigning forfeits the deal.
+        """
+        if type(seat) is not int or seat not in range(3):
+            return None
+        landlord = state.get("landlord")
+        if type(landlord) is not int or landlord not in range(3):
+            # Bidding phase: no camp is fixed yet. The resigner forfeits; the
+            # remaining seats share the win (there is no partner to misjudge).
+            return Outcome(
+                winners=[i for i in range(3) if i != seat], text="认输"
+            )
+        if seat == landlord:
+            farmers = [i for i in range(3) if i != landlord]
+            return Outcome(winners=farmers, text="地主认输 · 农民胜")
+        return Outcome(winners=[landlord], text="农民认输 · 地主胜")
+
     def seat_labels(self, state):
-        if state["landlord"] is not None:
+        if not isinstance(state, dict):
+            return ["地主", "农民", "农民"]
+        if state.get("landlord") is not None:
             return ["地主" if i == state["landlord"] else "农民" for i in range(3)]
         return [
-            "叫分中" if i == state["turn"] and state["phase"] == "bid" else "待定"
+            "叫分中" if i == state.get("turn") and state.get("phase") == "bid" else "待定"
             for i in range(3)
         ]
 
@@ -404,7 +458,9 @@ class Doudizhu(GameModule):
 
     def key_events(self, state, *, before=None, seat=None):
         if before is None:
-            return {}
+            # Contract: always expose the summary bit ("at least the ``key``
+            # slot"), even without a before snapshot (offline diagnostics).
+            return {"key": False}
         last = state["plays"][-1] if state["plays"] else None
         new_play = (
             len(state["plays"]) > len(before["plays"])

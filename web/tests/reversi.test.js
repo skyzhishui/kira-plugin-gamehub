@@ -8,7 +8,7 @@
  * 5) 模块契约（目录式 games/reversi/index.js）与 registry 两种布局；
  * 6) 卡片素材落在游戏目录、用户可见文案不出现技术词。
  *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";

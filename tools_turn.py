@@ -44,9 +44,21 @@ except ImportError:  # standalone tests import this module as top-level
         parent: str | None = None
 
 try:  # production: plugin package (``<plugin>.tools_turn``)
-    from .tools import BaseTool, GameStateTool, NOTICE_ACTOR, TURN_KEY
+    from .naming import play_tool_name, state_tool_name
+    from .tools import (
+        BOUND_STATE_DESCRIPTION,
+        BaseTool,
+        GameStateTool,
+        NOTICE_ACTOR,
+    )
 except ImportError:  # standalone tests import this module as top-level
-    from tools import BaseTool, GameStateTool, NOTICE_ACTOR, TURN_KEY
+    from naming import play_tool_name, state_tool_name
+    from tools import (
+        BOUND_STATE_DESCRIPTION,
+        BaseTool,
+        GameStateTool,
+        NOTICE_ACTOR,
+    )
 
 try:  # production: KiraAI host logging (AGENTS.md)
     from core.plugin import logger
@@ -57,6 +69,11 @@ except ImportError:  # standalone tests outside the host: a plain stdlib logger
 
 
 _NO_GRANT = "本回合没有有效的落子授权（可能已被停止或已结束）。"
+
+# Schema default for ``max_say_len`` (mirrors ``host/settings.py`` /
+# ``schema.json``); used when the configured value is missing or invalid so a
+# broken setting never silently disables the table-talk cap.
+DEFAULT_MAX_SAY_LEN = 280
 
 
 def build_turn_context(grant: Any) -> dict[str, Any]:
@@ -83,22 +100,11 @@ def _module_of(match_kind: str) -> Any:
         return None
 
 
-def _safe_id(match_id: str) -> str:
-    return "".join(ch for ch in str(match_id or "") if ch.isalnum())[:24]
-
-
-def play_tool_name(match_id: str) -> str:
-    """Turn-scoped move surface name: ``play_<match_id>``.
-
-    Several matches may share one target session, so the name carries the
-    match id: a bare ``play`` would collide across concurrent matches (the
-    name is shared by the old native tool and today's root tag).
-    """
-    return f"play_{_safe_id(match_id) or 'turn'}"
-
-
-def state_tool_name(match_id: str) -> str:
-    return f"state_{_safe_id(match_id) or 'turn'}"
+# ``play_tool_name`` / ``state_tool_name`` live in the dependency-free
+# ``naming`` leaf module so the prompt context (``context._turn_requirements``)
+# spells the surface exactly like this module registers it; they are
+# re-exported here because ``director``/``host.prompt`` import them from this
+# module.
 
 
 def _play_tag_description(move_help: str) -> str:
@@ -122,15 +128,23 @@ def _play_tag_description(move_help: str) -> str:
 
 
 def _truncate_say(plugin: Any, say: Any) -> str:
-    """Cut the table-talk line to the configured limit."""
+    """Cut the table-talk line to the configured limit.
+
+    ``0`` means "no limit" (the schema default is 280, so a zero can only come
+    from an explicit configuration choice); invalid values fall back to the
+    schema default rather than silently disabling the cap.
+    """
     text = str(say or "").strip()
     if not text:
         return ""
     settings = getattr(plugin, "settings", None)
+    raw = getattr(settings, "max_say_len", DEFAULT_MAX_SAY_LEN)
     try:
-        limit = int(getattr(settings, "max_say_len", 0) or 0)
+        limit = int(raw if raw is not None else DEFAULT_MAX_SAY_LEN)
     except (TypeError, ValueError):
-        limit = 0
+        limit = DEFAULT_MAX_SAY_LEN
+    if limit < 0:
+        limit = DEFAULT_MAX_SAY_LEN
     return text[:limit] if limit > 0 else text
 
 
@@ -267,16 +281,18 @@ async def submit_play_from_actions(
       arming handles it — it now always arms, see ``director.note_response``).
 
     Returns ``None`` when the reply carries no play tag (the caller must not
-    touch the event), ``False`` when the tag was rejected (invalid/stale or
-    malformed — the reply keeps delivering normally and a bounded retry
-    notice re-opens the feedback loop through ``director.note_tag_rejected``),
-    and ``True`` when the move was applied. On ``True`` the reply is
-    terminated (``event.stop()``): the agent loop ends, the remaining
-    delivery tail is skipped and ``final_result`` fires immediately, which
-    releases the next turn's pending trigger hours—er, seconds earlier. The
-    table talk does NOT ride the aborted delivery; it goes to the page
-    window through ``runtime.record_agent_line`` (same read-model row + WS
-    frame the delivery path produces) and stays on the match bubble via the
+    touch the event), ``False`` when the tag was rejected, and ``True`` when
+    the move was applied. Rejections keep the reply delivering normally:
+    a malformed tag (nested/misplaced or empty body) and an ``invalid`` move
+    each re-open the feedback loop through a bounded
+    ``director.note_tag_rejected`` notice, while a terminal/``stale`` move is
+    logged and not retried (no legal retry exists for a resolved turn). On
+    ``True`` the reply is terminated (``event.stop()``): the agent loop ends,
+    the remaining delivery tail is skipped and ``final_result`` fires
+    immediately, which releases the next turn's pending trigger seconds
+    earlier. The table talk does NOT ride the aborted delivery; it goes to the
+    page window through ``runtime.record_agent_line`` (same read-model row +
+    WS frame the delivery path produces) and stays on the match bubble via the
     atomic ``say``. Session memory is unaffected — finalize saves it for
     stopped turns by contract.
     """
@@ -331,6 +347,7 @@ async def submit_play_from_actions(
         return False
     grant.last_rejection = None  # the contract feedback is resolved
     grant.tag_misplaced = ""  # any stale nested-tag marker is moot now
+    grant.tag_misplaced_at = 0.0
     logger.info(
         "turn director: play tag submitted (%s seat %s <- %s)",
         grant.match_id, grant.seat, move,
@@ -386,7 +403,16 @@ class BoundStateTool(GameStateTool):
     each other's tool (same reasoning as ``play_<match_id>``). Unlike the
     move, a read query needs a request/response round trip, so this stays a
     native tool next to the tag channel.
+
+    The description is its own (``BOUND_STATE_DESCRIPTION``): the inherited
+    ``GAME_STATE_DESCRIPTION`` promises a plan/TTL section the bound path does
+    not render, tells the model to "call game_state first" — which is
+    explicitly rejected during a notice turn — and names ``play`` as the move
+    surface instead of the ``play_<match>`` tag. Same name/parameters shape,
+    different contract.
     """
+
+    description = BOUND_STATE_DESCRIPTION
 
     def __init__(self, plugin: Any, grant: Any, *, ctx: Any = None) -> None:
         bound = build_turn_context(grant)

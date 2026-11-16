@@ -192,5 +192,34 @@ class GameModule(ABC):
         """实时制：现在是否适合发起 5-15s 的 LLM 回合。"""
         return True
 
+    def validate_state(self, state: Any) -> str:
+        """Optional: minimal state shape validation (for deserialisation and
+        bad-data entry points).
+
+        Returns an empty string on success, or a short human-readable reason
+        on failure (the caller rejects the whole snapshot based on it). This
+        only probes the **shape** (required keys present, container types and
+        lengths consistent with the seat count); it does not check rule
+        legality and makes no move decisions. The default implementation
+        accepts any dict state; concrete games should override it so that a
+        bad row cannot reach view/state derivation, fail with a 500, and never
+        get archived.
+        """
+        return ""
+
+    def outcome_for_resign(self, state: Any, seat: Seat) -> Outcome | None:
+        """Optional: the verdict when seat ``seat`` resigns (by game faction
+        semantics).
+
+        The default ``None`` means the match layer applies the generic rule
+        (everyone except the resigning seat is a winner), which suits two-seat
+        zero-sum board games. Multi-faction games (e.g. dou-dizhu: landlord vs
+        two farmers) must override it: teammates are on the losing side and
+        must not be judged a winner merely because they did not resign.
+        Returning ``None`` likewise falls back to the generic rule; a returned
+        ``Outcome`` is used as-is.
+        """
+        return None
+
     def trigger_events(self, state: Any, prev: Any) -> list[GameEvent]:
         return []

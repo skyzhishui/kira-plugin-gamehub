@@ -13,8 +13,9 @@
 - **广播**：每个 socket 一个发送队列 + 发送任务，per-socket 保序；发送
   失败移除 socket；队列投递不阻塞房间锁。
 - **ai_pending**：锁内 check-and-add；``try_apply_ai`` 成功/终局时移除；
-  可选 ``drive_ai_hook`` 供 M2 的 ai_player 注入（M1 默认 None，仅保留
-  结构与不变量）。
+  ``drive_ai_hook`` is injected by ``host.runtime.start`` and routes by seat
+  driver (turn=director / bot=rule practice / agent=game_agent); None=no
+  automatic AI driving.
 
 所有对外视图都经 ``engine.match.view_match`` / ``SeatInfo.to_public``，
 口令（token）不进入任何广播或 ``public_state``。
@@ -90,6 +91,10 @@ DEFAULT_OPPONENT_NAME = "陪练"
 # 规则陪练座位默认显示名（插件配置 ``practice_name`` 可覆盖）。
 DEFAULT_PRACTICE_NAME = "小白"
 
+# Neutral host bot display name (RoomManager/GameRoom fallback; never a
+# hard-coded persona name).
+DEFAULT_HOST_NAME = "对手"
+
 # 规则陪练（kind=bot）出手前的拟人化延迟区间（秒）：引擎内联的 autoplay
 # 会让陪练在同一个请求里瞬间应手，房间层改为按此区间延迟调度。
 DEFAULT_BOT_DELAY_S = (1.0, 2.0)
@@ -98,6 +103,85 @@ DEFAULT_BOT_DELAY_S = (1.0, 2.0)
 def _default_now() -> int:
     """毫秒时间戳（与 engine 的 ``t`` / ``created_at`` 单位一致）。"""
     return int(time.time() * 1000)
+
+
+# ----------------------------------------------------------------------
+#  Rule-practice pacing: one parser for the config range (game_agent's
+#  fallback fill shares the same helper)
+# ----------------------------------------------------------------------
+def bot_delay_range_s(config: Any) -> tuple[float, float]:
+    """Parse the plugin config's bot-move delay range (seconds).
+
+    - Both keys absent from the config object (test fakes / partial stubs)
+      → ``DEFAULT_BOT_DELAY_S``;
+    - Explicit values are honoured, **including ``0/0`` = no pacing delay**
+      (previously 0/0 silently fell back to 1-2s and the delay could not be
+      disabled by configuration);
+    - ``hi < lo`` clamps to a fixed ``lo`` instead of drawing from an
+      inverted interval.
+    """
+    lo_raw = getattr(config, "bot_move_delay_min_ms", None)
+    hi_raw = getattr(config, "bot_move_delay_max_ms", None)
+    if lo_raw is None and hi_raw is None:
+        return DEFAULT_BOT_DELAY_S
+    try:
+        lo = max(0.0, float(lo_raw or 0))
+    except (TypeError, ValueError):
+        lo = 0.0
+    try:
+        hi = max(0.0, float(hi_raw if hi_raw is not None else lo_raw or 0))
+    except (TypeError, ValueError):
+        hi = lo
+    if hi < lo:
+        hi = lo
+    return lo / 1000.0, hi / 1000.0
+
+
+def sample_bot_delay_s(config: Any) -> float:
+    """One sampled delay (seconds) from :func:`bot_delay_range_s`."""
+    return random.uniform(*bot_delay_range_s(config))
+
+
+# ----------------------------------------------------------------------
+#  Canonical room-level move-error texts (stable cross-module contract)
+#
+#  game_agent (stale detection) and director (gone/stale classification)
+#  both go through is_stale_move_error / is_gone_move_error below instead
+#  of maintaining their own Chinese-substring lists (review D-4: three
+#  independent judgements silently drift whenever a wording tweak lands).
+# ----------------------------------------------------------------------
+ERR_MATCH_OVER = "对局已经结束"
+ERR_NO_SEAT = "没有这个座位"
+ERR_NOT_DELEGATABLE = "这不是可以代下的人类座位"
+ERR_STALE_POSITION = "局面已经变化（等待期间已有人落子），本手作废"
+
+
+def not_ai_seat_error(bot_name: str) -> str:
+    return f"这不是{(bot_name or '').strip() or DEFAULT_HOST_NAME}的座位"
+
+
+def stale_turn_error(who: str = "你") -> str:
+    return f"现在还没轮到{who}（或这手已经过期）"
+
+
+def is_gone_move_error(error: str) -> bool:
+    """The seat/match this submission targeted no longer exists."""
+    text = str(error or "")
+    if text in (ERR_MATCH_OVER, ERR_NO_SEAT, ERR_NOT_DELEGATABLE):
+        return True
+    # Seat-ownership errors: wording may name different display names per
+    # mode, so the shape is matched instead of a hard-coded persona name.
+    return text.startswith("这不是") and text.endswith("的座位")
+
+
+def is_stale_move_error(error: str) -> bool:
+    """The turn this submission belonged to is gone (never re-draughts it)."""
+    text = str(error or "")
+    if text == ERR_STALE_POSITION:
+        return True
+    # Both "not your turn yet" room texts share one template
+    # (``stale_turn_error``).
+    return "还没轮到" in text and "这手已经过期" in text
 
 
 def _has_bot(module: GameModule) -> bool:
@@ -150,13 +234,18 @@ class GameRoom:
         now_fn: Callable[[], int] | None = None,
         drive_ai_hook: Callable[["GameRoom", int], Any] | None = None,
         bot_delay_fn: Callable[[], float] | None = None,
+        bot_name: str | None = None,
     ) -> None:
         self.match = match
         self.repository = repository
         self.now_fn = now_fn or _default_now
-        # M2 注入：``drive_ai_hook(room, seat)``；M1 默认 None（不自动驱动 AI）。
+        # Host bot display name (injected by RoomManager; set_bot_name syncs
+        # live rooms). Non-ai-seat error copy references it (P1-6: a missing
+        # attribute used to raise AttributeError inside the error branch).
+        self.bot_name = (bot_name or "").strip() or DEFAULT_HOST_NAME
+        # Event consumers are injected on demand (runtime.start always wires
+        # the director/talk chain); None = no notices.
         self.drive_ai_hook = drive_ai_hook
-        # M1.5 注入：``event_hook(room, event)``（table_talk 消费）；None=不发通知。
         self.event_hook: Callable[["GameRoom", dict[str, Any]], Any] | None = None
         # 规则陪练（kind=bot）每手前的拟人化延迟来源；None=默认 1-2 秒。
         self.bot_delay_fn = bot_delay_fn
@@ -170,7 +259,6 @@ class GameRoom:
         self.status = "over" if status_of(match).outcome is not None else "active"
         # 设计 §5.3 的软在途锁字段（M3 table_talk 使用；此处仅保留状态位）。
         self.last_talk_ts = 0.0
-        self.last_plan_ts = 0.0
 
         self._writers: dict[Any, _SocketWriter] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -567,21 +655,21 @@ class GameRoom:
             status = status_of(self.match)
             if self.status == "over" or status.outcome is not None:
                 self.ai_pending.discard(seat)
-                return None, "对局已经结束"
+                return None, ERR_MATCH_OVER
             if not isinstance(seat, int) or not (0 <= seat < len(self.match.seats)):
                 self.ai_pending.discard(seat)
-                return None, "没有这个座位"
+                return None, ERR_NO_SEAT
             if self.match.seats[seat].kind != "ai":
                 self.ai_pending.discard(seat)
-                return None, f"这不是{self.bot_name}的座位"
+                return None, not_ai_seat_error(self.bot_name)
             if seat not in status.waiting_on:
                 self.ai_pending.discard(seat)
-                return None, "现在还没轮到你（或这手已经过期）"
+                return None, stale_turn_error("你")
             if expected_move_count is not None and len(self.match.log) != int(
                 expected_move_count
             ):
                 self.ai_pending.discard(seat)
-                return None, "局面已经变化（等待期间已有人落子），本手作废"
+                return None, ERR_STALE_POSITION
             before_state = self.match.state
             before_chat = len(self.match.chat)
             action: dict[str, Any] = {"type": "move", "move": move}
@@ -662,17 +750,17 @@ class GameRoom:
         async with self.lock:
             status = status_of(self.match)
             if self.status == "over" or status.outcome is not None:
-                return None, "对局已经结束"
+                return None, ERR_MATCH_OVER
             if not isinstance(seat, int) or not (0 <= seat < len(self.match.seats)):
-                return None, "没有这个座位"
+                return None, ERR_NO_SEAT
             if self.match.seats[seat].kind != "human":
-                return None, "这不是可以代下的人类座位"
+                return None, ERR_NOT_DELEGATABLE
             if seat not in status.waiting_on:
-                return None, "现在还没轮到这个座位（或这手已经过期）"
+                return None, stale_turn_error("这个座位")
             if expected_move_count is not None and len(self.match.log) != int(
                 expected_move_count
             ):
-                return None, "局面已经变化（等待期间已有人落子），本手作废"
+                return None, ERR_STALE_POSITION
             before_state = self.match.state
             before_chat = len(self.match.chat)
             action: dict[str, Any] = {"type": "move", "move": move}
@@ -733,8 +821,11 @@ class GameRoom:
         - **省略项继承当前值**：只改 delegation（``set_mode_options(
           delegation=True)``）或 mode 不变时，保留当前 ``difficulty``，
           不会把 advanced 陪练局降级成 easy（那会因座位不兼容而 409）；
-        - ``client_version`` 给出时在**同一把房间锁内**比对（与走子动作
-          同口径的 ``stale_version`` 防护，页面防在过期视图上切换）；
+        - ``client_version`` is compared under the same room lock when given
+          (``stale_version`` guard). Today only the delegation toggle (the
+          delegate action of ``/matches/{id}/actions``) passes it; the main
+          REST ``set_mode`` entry does not (the page refreshes its view
+          before switching).
         - 只改选项并持久化，**不 bump version**（不产生走子/页面失效），
           也不广播——委托/模式状态经 ``GET /matches/{id}/mode`` 读取；
         - 返回归一后的完整选项（dict）。
@@ -807,11 +898,14 @@ class GameRoom:
 
 
     async def ai_step(self, seat: int) -> Match | None:
-        """AI 一步（M1.5 规则 bot 兜底驱动）：锁内取招 → 应用 → 落库 → 广播。
+        """One AI step (rule-bot fallback drive): fetch move → apply → persist
+        → broadcast, all under the lock.
 
-        M2 的 ai_player 会替换 ``drive_ai_hook``，届时由 LLM 决定走子；这里
-        先把「轮到 AI 却没人动」的死局补上。已结束/不在等待位/该游戏没有
-        bot 时直接清理 ``ai_pending``，不产生副作用。
+        This covers the "it is an AI seat's turn and nobody moved" deadlock:
+        ``host.runtime._drive_ai`` lands here for bot-driven seats and for
+        agent-driving fallbacks. Finished matches / seats not waiting on /
+        games without a rule bot just clear ``ai_pending`` with no side
+        effects.
         """
         event: dict[str, Any] | None = None
         bot_follow: list[int] = []
@@ -925,7 +1019,10 @@ class GameRoom:
             return True
 
     async def flush(self) -> None:
-        """强制落库（stop 前调用）；失败仍以内存为准并保持 dirty。"""
+        """Force a persist (called by ``runtime.stop``'s ``flush_all`` path).
+
+        Failures keep the in-memory state authoritative and stay dirty.
+        """
         async with self.lock:
             await self._persist_locked(force=True)
 
@@ -984,10 +1081,12 @@ class GameRoom:
     #  规则陪练（kind=bot）的节奏化步进
     # ------------------------------------------------------------------
     def _bot_delay(self) -> float:
-        """本次 bot 出手前的拟人化延迟（秒）。
+        """Human-like delay (seconds) before this bot move.
 
-        来源是插件配置 ``bot_move_delay_min_ms`` / ``bot_move_delay_max_ms``；
-        未注入或配置异常时退回 ``DEFAULT_BOT_DELAY_S``（1-2 秒）。
+        The value comes from the injected ``bot_delay_fn`` (parsing lives in
+        ``RoomManager._bot_delay``, sampling the plugin config range); when
+        not injected or on injection errors it falls back to
+        ``DEFAULT_BOT_DELAY_S`` (1-2s).
         """
         fallback = random.uniform(*DEFAULT_BOT_DELAY_S)
         fn = self.bot_delay_fn
@@ -1165,14 +1264,15 @@ class RoomManager:
         # 进阶陪练座位的显示名（默认「陪练」，由上层传入实际名字）。
         self.opponent_name = (opponent_name or "").strip() or DEFAULT_OPPONENT_NAME
         # 宿主 bot 昵称（核心配置）；缺席时中性「对手」，不硬编码人设名。
-        self.bot_name = (bot_name or "").strip() or "对手"
+        self.bot_name = (bot_name or "").strip() or DEFAULT_HOST_NAME
         # 规则陪练座位显示名（插件配置，默认「小白」）；多个陪练自动加序号。
         self.practice_name = (practice_name or "").strip() or DEFAULT_PRACTICE_NAME
         # 规则陪练出手延迟的显式注入（测试/上层定制）；None=按配置区间。
         self._bot_delay_override = bot_delay_fn
-        # M2 注入 ai_player 驱动；M1 保持 None。
+        # Event consumers are injected on demand (runtime.start always wires
+        # the director/talk chain).
         self.drive_ai_hook: Callable[[GameRoom, int], Any] | None = None
-        # M1.5 注入 table_talk 事件消费；None=不发通知。
+        # Event hook: None = no notices.
         self.event_hook: Callable[[GameRoom, dict[str, Any]], Any] | None = None
 
         self._rooms: dict[str, GameRoom] = {}
@@ -1291,12 +1391,19 @@ class RoomManager:
     def active_rooms(self) -> list[GameRoom]:
         return [room for room in self._rooms.values() if room.status == "active"]
 
+    def all_rooms(self) -> list[GameRoom]:
+        """Every cached room incl. finished ones (stop-path flush/close)."""
+        return list(self._rooms.values())
+
     def count(self) -> int:
         """当前活跃局数（不含已结束但仍缓存的局）。"""
         return len(self.active_rooms())
 
     def set_bot_name(self, name: str | None) -> None:
-        self.bot_name = (name or "").strip() or "对手"
+        """Update the host bot display name (manager + every live room)."""
+        self.bot_name = (name or "").strip() or DEFAULT_HOST_NAME
+        for room in self._rooms.values():
+            room.bot_name = self.bot_name
 
     def set_opponent_name(self, name: str | None) -> None:
         """设置进阶陪练座位显示名（上层在加载配置后调用；空=保留默认）。"""
@@ -1416,8 +1523,6 @@ class RoomManager:
                     opponent = "bot"
                 else:
                     opponent = "ai"
-                if opponent not in ("ai", "bot"):
-                    raise RoomError("bad_opponent", f"对手只能是{self.bot_name}本人或规则陪练")
                 if opponent == "bot" and not _has_bot(module):
                     raise RoomError("bad_opponent", f"{module.name['zh']}没有规则陪练座位")
                 normalized_mode = normalize_mode_options(
@@ -1520,22 +1625,27 @@ class RoomManager:
                 return match_id
 
     def _new_room(self, match: Match) -> GameRoom:
-        # 传稳定代理而不是当前 hook 值：hook 可在 RoomManager 上后置注入/替换
-        # （M1.5 bot 兜底 → M2 ai_player），已建房间也随即可用。
+        # Pass stable proxies instead of current hook values: hooks may be
+        # injected/replaced later on the RoomManager (bot fallback →
+        # agent-driven play), and existing rooms pick them up immediately.
         room = GameRoom(
             match,
             repository=self.repository,
             now_fn=self.now_fn,
             drive_ai_hook=self._dispatch_drive,
             bot_delay_fn=self._bot_delay,
+            bot_name=self.bot_name,
         )
         room.event_hook = self._dispatch_event
         return room
 
     def _bot_delay(self) -> float:
-        """规则陪练每手前的拟人化延迟（秒），来自插件配置区间。
+        """Human-like delay (seconds) before each rule-practice move, from
+        the plugin config range.
 
-        未配置（或区间非法）时退回 ``DEFAULT_BOT_DELAY_S``（1-2 秒）。
+        Without an injection (``_bot_delay_override``) the configured range
+        is sampled (``0/0`` = pacing disabled, ``hi<lo`` clamps to a fixed
+        lo); injection errors fall back to ``DEFAULT_BOT_DELAY_S``.
         """
         if self._bot_delay_override is not None:
             try:
@@ -1543,11 +1653,7 @@ class RoomManager:
             except Exception:  # noqa: BLE001 - 注入异常不能卡住对局
                 logger.debug("gamehub: bot 延迟注入异常，使用默认节奏", exc_info=True)
                 return random.uniform(*DEFAULT_BOT_DELAY_S)
-        lo = max(0, int(getattr(self.config, "bot_move_delay_min_ms", 0) or 0))
-        hi = int(getattr(self.config, "bot_move_delay_max_ms", 0) or 0)
-        if lo <= 0 and hi <= 0:
-            return random.uniform(*DEFAULT_BOT_DELAY_S)
-        return random.uniform(lo, max(lo, hi)) / 1000.0
+        return sample_bot_delay_s(self.config)
 
     async def _dispatch_drive(self, room: GameRoom, seat: int) -> None:
         hook = self.drive_ai_hook

@@ -22,6 +22,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
+try:  # production: plugin package
+    from . import modes
+except ImportError:  # standalone tests import this module as top-level
+    import modes
+
 PLAN_SOURCE_AGENT = "agent"
 MAX_PLAN_TEXT = 400
 
@@ -29,15 +34,6 @@ MAX_PLAN_TEXT = 400
 def normalize_plan_text(value: Any) -> str:
     """裁剪 plan 文本；空串表示没有有效内容。"""
     return str(value or "").strip()[:MAX_PLAN_TEXT]
-
-
-def clamp_ttl_moves(value: Any, default: int) -> int:
-    """``ttl_moves`` 只接受正整数；非法/缺省走配置默认值。"""
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return max(1, int(default))
-    return max(1, min(100, number))
 
 
 def plan_move_count(match: Any) -> int:
@@ -50,11 +46,11 @@ def ai_seat_index(match: Any) -> int | None:
 
     只认 ``kind == "ai"``：``bot`` 是规则陪练，``human`` 是用户，都不能被
     ``game_resign`` 代认输，也不该接收 ``game_plan``。
+
+    实现只有 ``modes.ai_seat_index`` 一份（座位遍历口径与房间/通知层一致），
+    这里只是历史导入点的转发，避免两份副本漂移。
     """
-    for index, seat in enumerate(getattr(match, "seats", ()) or ()):
-        if getattr(seat, "kind", "") == "ai":
-            return index
-    return None
+    return modes.ai_seat_index(match)
 
 
 def make_plan(

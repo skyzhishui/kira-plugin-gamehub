@@ -9,7 +9,7 @@
     "game",
     "entertainment"
   ],
-  "repo": "http://10.0.1.90:13000/nori/kira-plugin-gamehub",
+  "repo": "http://10.0.1.90:13000/nori-home/kira-plugin-gamehub",
   "icon": "icon.png",
   "locales": {
     "zh": {

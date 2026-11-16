@@ -38,6 +38,7 @@ from .rules import (
     initial_cells,
     legal_moves,
 )
+from ..common import color_of, seat_of
 
 # 一次翻掉至少这么多子记为「大翻」（通知/关键手信号口径，纯规则）。
 BIG_FLIP = 5
@@ -56,14 +57,6 @@ WEIGHTS = (
 
 COLOR_NAMES = {1: "黑", 2: "白"}
 SYMBOLS = {1: "X（黑）", 2: "O（白）"}
-
-
-def color_of(seat: Seat) -> int:
-    return 1 if seat == 0 else 2
-
-
-def seat_of(color: int) -> Seat:
-    return color - 1
 
 
 def _other(color: int) -> int:
@@ -123,7 +116,7 @@ def _corner_owner(cells: list[int], size: int, color: int) -> str:
 
 
 def reversi_ranked_moves(state: dict[str, Any], seat: Seat) -> list[dict[str, Any]]:
-    """单层贪心：位置权重 + 翻子数 + 确定性微扰；无合法点返回 None。"""
+    """单层贪心：位置权重 + 翻子数 + 确定性微扰；无合法点返回空列表。"""
     size = int(state.get("size") or SIZE)
     cells = _cells_of(state)
     if len(cells) != size * size:
@@ -326,8 +319,8 @@ def key_events(
     变化且落点此前为空，才把本手的大翻/pass/角位/吃光计入；重复判定同一
     局面（``before == state``）或手数未推进时不会重复报 key。连续两手各自
     让对手 pass 仍是两次新事件（每手 moves 递增、last 不同）。``before=None``
-    退化为现状诊断（离线/兼容用途）。``seat`` 只用于解析执色，不参与其它
-    判断。
+    退化为现状诊断（离线/兼容用途）。``seat`` 不参与本函数判断：执色由
+    ``state.toPlay``/``last`` 的实际棋子颜色决定。
     """
     flags: dict[str, Any] = {name: False for name in KEY_EVENT_NAMES}
     flags["key"] = False
@@ -422,6 +415,27 @@ class Reversi(GameModule):
             "flipped": [],
             "over": False,
         }
+
+    def validate_state(self, state: dict[str, Any]) -> str:
+        """Shape probe for persisted snapshots (not a rules check)."""
+        if not isinstance(state, dict):
+            return "state 不是对象"
+        size = state.get("size")
+        if type(size) is not int or size < 1:
+            return "state.size 非法"
+        cells = state.get("cells")
+        if not isinstance(cells, list) or len(cells) != size * size:
+            return "state.cells 长度不符"
+        if not all(type(value) is int and value in (0, 1, 2) for value in cells):
+            return "state.cells 取值非法"
+        if state.get("toPlay") not in (1, 2):
+            return "state.toPlay 非法"
+        if type(state.get("moves")) is not int:
+            return "state.moves 非法"
+        flipped = state.get("flipped")
+        if flipped is not None and not isinstance(flipped, list):
+            return "state.flipped 非法"
+        return ""
 
     def apply(self, state: dict[str, Any], seat: Seat, move: str) -> MoveResult:
         if state.get("over"):

@@ -23,11 +23,6 @@ import tools as tools_module
 from tools import GameStateTool, game_list, game_new, game_resign, game_state
 
 
-class _Room:
-    def __init__(self, match) -> None:
-        self.match = match
-
-
 class _Rooms:
     """Minimal RoomManager stand-in exposing only what tools.py touches."""
 
@@ -36,6 +31,7 @@ class _Rooms:
         self.match_id = match_id
         self.created: list[dict] = []
         self.busy = False
+        self.cancelled: list[str] = []
 
     def find_by_actor(self, actor):
         if self.match is None:
@@ -49,7 +45,12 @@ class _Rooms:
     async def get_or_load(self, match_id):
         if self.match is None or self.match.id != str(match_id):
             return None
-        return _Room(self.match)
+        return _Room(
+            self.match, on_apply=self._set_match, on_cancel=self.cancelled
+        )
+
+    def _set_match(self, match) -> None:
+        self.match = match
 
     async def create(self, **kwargs):
         if self.busy:
@@ -57,20 +58,22 @@ class _Rooms:
         kind = kwargs["kind"]
         mode_options = dict(kwargs.get("mode_options") or {})
         opponent = str(kwargs.get("opponent") or "ai")
-        if mode_options.get("mode") == modes.MODE_BOT and mode_options.get(
-            "difficulty"
-        ) == modes.DIFF_EASY:
-            opponent = "bot"
-        elif mode_options:
-            opponent = "ai"
         if kind == "doudizhu":
-            drivers = modes.LINEUPS.get(
-                str(mode_options.get("lineup") or "nori_agent"),
-                ["human", "turn", "agent"],
-            )
+            # Mirror ``RoomManager.create``: the lineup decides every seat's
+            # driver, ``opponent`` is only used when no lineup is given.
+            lineup = str(mode_options.get("lineup") or "nori_agent")
+            drivers = modes.LINEUPS.get(lineup)
+            if drivers is None:
+                raise _err("bad_request", "不支持的斗地主阵容")
             kinds = ["human"] + [
                 "bot" if driver == "bot" else "ai" for driver in drivers[1:]
             ]
+        elif mode_options.get("mode") == modes.MODE_BOT and mode_options.get(
+            "difficulty"
+        ) == modes.DIFF_EASY:
+            kinds = ["human", "bot"]
+        elif mode_options:
+            kinds = ["human", "ai"]
         else:
             kinds = ["human", opponent]
         seats = [
@@ -103,13 +106,34 @@ class _Rooms:
             )
         )
         self.created.append(kwargs)
-        return _Room(self.match), 0, "a" * 32
+        return _Room(
+            self.match, on_apply=self._set_match, on_cancel=self.cancelled
+        ), 0, "a" * 32
 
     async def resign_ai(self, actor):
         result = apply_match_action(self.match, 1, {"type": "resign"}, 2)
         assert isinstance(result, MatchActionOk)
         self.match = result.match
         return self.match
+
+
+class _Room:
+    def __init__(self, match, on_apply=None, on_cancel=None) -> None:
+        self.match = match
+        self._on_apply = on_apply
+        self._on_cancel = on_cancel
+
+    async def apply(self, seat, action, **kwargs):
+        result = apply_match_action(self.match, seat, action, 2)
+        assert isinstance(result, MatchActionOk), getattr(result, "error", None)
+        self.match = result.match
+        if self._on_apply is not None:
+            self._on_apply(self.match)
+        return self.match
+
+    def cancel_drive_tasks(self) -> None:
+        if self._on_cancel is not None:
+            self._on_cancel.append(self.match.id)
 
 
 class _Message:
@@ -167,24 +191,29 @@ async def test_game_list():
 # ----------------------------------------------------------------------
 #  game_new
 # ----------------------------------------------------------------------
-async def test_game_new_private_returns_link_and_uses_session_actor():
+@pytest.mark.parametrize(
+    "sid, expect_link",
+    [
+        ("webchat:dm:u1", True),   # private: the entry link is shown
+        ("qq:gm:123", False),      # group: never leak the seat token
+    ],
+)
+async def test_game_new_shows_the_entry_link_only_in_private(sid, expect_link):
     rooms = _Rooms()
     plugin = _plugin(rooms, base="https://nori.example")
-    text = await game_new(plugin, _event(), kind="gomoku")
+    text = await game_new(plugin, _event(sid), kind="gomoku")
+
     assert "已开局" in text
-    assert rooms.created[0]["actor"] == "webchat:dm:u1"
-    assert (
-        "https://nori.example/page/plugin/kira-plugin-gamehub/hub/match.html" in text
-    )
-    assert "&t=" + "a" * 32 in text
-
-
-async def test_game_new_group_hides_link():
-    rooms = _Rooms()
-    plugin = _plugin(rooms, base="https://nori.example")
-    text = await game_new(plugin, _event("qq:gm:123"), kind="gomoku")
-    assert "对局 ID：m1" in text
-    assert "match.html" not in text
+    assert rooms.created[0]["actor"] == sid
+    if expect_link:
+        assert (
+            "https://nori.example/page/plugin/kira-plugin-gamehub/hub/match.html"
+            in text
+        )
+        assert "&t=" + "a" * 32 in text
+    else:
+        assert "对局 ID：m1" in text
+        assert "match.html" not in text
 
 
 async def test_game_new_returns_existing_match():
@@ -197,21 +226,30 @@ async def test_game_new_returns_existing_match():
     assert "已经有一局" in text
 
 
-async def test_game_new_rejects_unknown_game_and_bad_opponent():
-    plugin = _plugin(_Rooms())
-    assert "没有这个游戏" in await game_new(plugin, _event(), kind="nope")
-    assert "陪练" in await game_new(plugin, _event(), kind="gomoku", opponent="human")
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({"kind": "nope"}, "没有这个游戏"),
+        ({"kind": "gomoku", "opponent": "human"}, "陪练"),
+        ({"kind": "gomoku", "difficulty": "easy"}, "difficulty"),
+        # Doudizhu strength comes from ``lineup``; ``difficulty`` is not a knob.
+        ({"kind": "doudizhu", "difficulty": "easy"}, "lineup"),
+    ],
+)
+async def test_game_new_rejects_incompatible_arguments(kwargs, expected):
+    rooms = _Rooms()
+    text = await game_new(_plugin(rooms), _event(), **kwargs)
+    assert expected in text
+    assert rooms.created == []  # nothing was opened
 
 
-async def test_game_new_defaults_to_gomoku():
+async def test_game_new_defaults_and_mode_derived_options():
     rooms = _Rooms()
     text = await game_new(_plugin(rooms), _event())
     assert "已开局" in text
-    assert rooms.created[0]["kind"] == "gomoku"
+    assert rooms.created[0]["kind"] == "gomoku"  # default game
 
-
-async def test_game_new_derives_opponent_from_mode_argument():
-    """``mode=bot`` alone opens a practice (teammate) match."""
+    # ``mode=bot`` alone opens an easy practice (teammate) match.
     rooms = _Rooms()
     await game_new(_plugin(rooms), _event(), kind="gomoku", mode="bot")
     assert rooms.created[0]["mode_options"] == {
@@ -222,10 +260,90 @@ async def test_game_new_derives_opponent_from_mode_argument():
     assert rooms.match.seats[1].kind == "bot"
 
 
-async def test_game_new_difficulty_only_makes_sense_for_practice():
-    plugin = _plugin(_Rooms())
-    text = await game_new(plugin, _event(), kind="gomoku", difficulty="easy")
-    assert "difficulty" in text
+async def test_game_new_doudizhu_honours_the_requested_lineup():
+    rooms = _Rooms()
+    await game_new(
+        _plugin(rooms), _event(), kind="doudizhu", opponent="bot", lineup="bot_bot"
+    )
+    assert rooms.created[0]["mode_options"] == {"lineup": "bot_bot"}
+    assert [seat.kind for seat in rooms.match.seats] == ["human", "bot", "bot"]
+
+
+# ----------------------------------------------------------------------
+#  Doudizhu viewpoint (P1-1): own hand only, spectators get no hands
+# ----------------------------------------------------------------------
+def _doudizhu_hand(match, seat: int) -> str:
+    """The private hand text the module renders for ``seat`` (fresh copy)."""
+    from engine.games.doudizhu.cards import move_text
+
+    return move_text(list(match.state["cards"][seat]))
+
+
+async def test_doudizhu_own_seat_view_across_every_entry_point():
+    """Private-hand isolation holds on ``game_state`` and ``game_new``.
+
+    ``game_new``'s first answer and its "already running" re-answer render
+    the caller's own seat too — and group vs private changes only the link,
+    never the view.
+    """
+    rooms = _Rooms()
+    plugin = _plugin(rooms, base="https://nori.example")
+    opened = await game_new(plugin, _event("qq:gm:g1"), kind="doudizhu")
+    match = rooms.match
+    assert modes.mode_of(match) == modes.MODE_NORI  # nori lineup by default
+    own, nori = _doudizhu_hand(match, 0), _doudizhu_hand(match, 1)
+    assert own != nori
+
+    # game_new (first open) view.
+    assert own in opened and nori not in opened
+    assert "match.html" not in opened  # the entry link stays private-only
+
+    # game_new (existing match) re-answer.
+    again = await game_new(plugin, _event("qq:gm:g1"), kind="doudizhu")
+    assert "已经有一局" in again
+    assert own in again and nori not in again
+
+    # game_state view for the seated caller.
+    state = await game_state(plugin, _event("qq:gm:g1"))
+    assert "Your PRIVATE hand" in state
+    assert own in state and nori not in state
+
+
+async def test_doudizhu_outsider_gets_spectator_view_without_hands_or_tactics():
+    """An unseated caller (other session/group or a teammate lineup) only
+    gets the public summary: no hands, no plan/guidance panel."""
+    rooms = _Rooms()
+    plugin = _plugin(rooms)
+    await game_new(plugin, _event("qq:gm:g1"), kind="doudizhu")
+    # Internal tactics exist on the AI seat, but never reach an outsider.
+    rooms.match.seats[1].plan = {
+        "text": "先出小牌",
+        "source": "agent",
+        "created_move": 0,
+        "ttl_moves": 8,
+        "created_at": 1000,
+        "ttl_s": 60.0,
+        "seq": 1,
+    }
+
+    # A different session in another group knows the match id (printed in
+    # group chats) but has no seat.
+    text = await game_state(plugin, _event("qq:gm:elsewhere"), match_id="m1")
+
+    assert "Your PRIVATE hand" not in text
+    assert "Seats:" in text  # public board summary
+    assert "先出小牌" not in text and "当前游戏指导" not in text
+    for seat in range(3):
+        assert _doudizhu_hand(rooms.match, seat) not in text
+
+    # Same rule for a teammate lineup: no hidden-information fallback.
+    rooms = _Rooms()
+    plugin = _plugin(rooms)
+    await game_new(plugin, _event("qq:gm:g1"), kind="doudizhu", lineup="bot_bot")
+    assert modes.role_of(rooms.match) == modes.ROLE_TEAMMATE
+    text = await game_state(plugin, _event("qq:gm:elsewhere"), match_id="m1")
+    assert "Your PRIVATE hand" not in text
+    assert _doudizhu_hand(rooms.match, 0) not in text
 
 
 # ----------------------------------------------------------------------
@@ -240,21 +358,16 @@ async def test_game_state_and_resign():
     rooms = _Rooms()
     plugin = _plugin(rooms)
     await game_new(plugin, _event(), kind="gomoku")
+
     state = await game_state(plugin, _event())
     assert "Gomoku" in state
+    # The tool wrapper answers like the plain function.
+    assert "Gomoku" in await GameStateTool(plugin).execute(_event())
+
     result = await game_resign(plugin, _event())
     assert "你认输了" in result
     assert "玩家 获胜" in result
     assert rooms.match.resigned == 1
-
-
-async def test_game_state_by_match_id_uses_bound_seat():
-    rooms = _Rooms()
-    plugin = _plugin(rooms)
-    await game_new(plugin, _event(), kind="gomoku")
-    text = await game_state(plugin, _event("webchat:dm:someone-else"), match_id="m1")
-    # Seat 0 belongs to another actor: the caller still gets a spectator view.
-    assert "对局 m1" in text
 
 
 async def test_tools_require_session_identity():
@@ -265,31 +378,84 @@ async def test_tools_require_session_identity():
 
 
 # ----------------------------------------------------------------------
+#  By-id resign (P1-2): the match id alone is never an authorization
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "case, actor_seat, caller_sid, notice_route, expect_owner",
+    [
+        # The match's own session/actor seat may resign, and the room cleanup
+        # (cancel drive tasks) runs exactly like ``rooms.resign_ai``.
+        ("owner", ("qq:gm:g1", "qq:gm:g1"), "qq:gm:g1", None, True),
+        # A different session in another group: fail closed, match untouched.
+        ("outsider", ("qq:gm:g1", "qq:gm:g1"), "qq:gm:elsewhere", None, False),
+        # The configured notice route is a delivery channel, not ownership.
+        (
+            "route_not_ownership",
+            ("qq:gm:g1", "qq:gm:g1"),
+            "qq:gm:elsewhere",
+            "qq:gm:elsewhere",
+            False,
+        ),
+        # No seat attribution at all on a legacy row: deny, don't act.
+        ("unattributed", ("", ""), "qq:gm:g1", None, False),
+        # Page matches: the shared page session is seated, so it may resign.
+        ("page_session", ("admin", "gamehub:gm:room"), "gamehub:gm:room", None, True),
+    ],
+)
+async def test_resign_by_id_authorizes_only_a_seated_caller(
+    case, actor_seat, caller_sid, notice_route, expect_owner
+):
+    rooms = _Rooms()
+    plugin = _plugin(rooms)
+    if notice_route is not None:
+        plugin.notice_target_session_sync = lambda room: notice_route
+    await game_new(plugin, _event("gamehub:gm:room"), kind="gomoku")
+    rooms.match.seats[0].actor, rooms.match.seats[0].session_id = actor_seat
+
+    result = await game_resign(plugin, _event(caller_sid), match_id="m1")
+
+    if expect_owner:
+        assert "你认输了" in result, case
+        assert rooms.match.resigned == 1
+        assert rooms.cancelled == ["m1"]  # same cleanup discipline as resign_ai
+    else:
+        assert "认输失败" in result, case
+        assert rooms.match.resigned is None  # the match is untouched
+        assert rooms.cancelled == []
+
+
+async def test_resign_by_id_refuses_a_teammate_match_before_resigning():
+    """The seated caller is never allowed to resign a match the host only
+    coaches: the host has no seat to resign."""
+    rooms = _Rooms()
+    plugin = _plugin(rooms)
+    await game_new(plugin, _event("qq:gm:g1"), kind="gomoku", opponent="bot")
+
+    result = await game_resign(plugin, _event("qq:gm:g1"), match_id="m1")
+
+    assert "队友" in result
+    assert rooms.match.resigned is None
+
+
+# ----------------------------------------------------------------------
 #  Tool surface
 # ----------------------------------------------------------------------
-def test_module_exposes_four_chat_tools_without_move_play_or_plan():
-    names = ["game_list", "game_new", "game_state", "game_resign"]
-    for name in names:
-        assert callable(getattr(tools_module, name))
+def test_module_exposes_exactly_four_chat_tools():
+    """The global surface stays four read/lifecycle functions.
+
+    Moves ride the ``play_<match>`` tag and plans are data-only (deferred),
+    so no ``game_move`` / ``play`` / ``game_plan`` tool may reappear.
+    """
+    assert callable(tools_module.game_list)
+    names = [name for name in tools_module.__all__ if name.startswith("game_")]
+    assert names == ["game_list", "game_new", "game_resign", "game_state"]
+    for absent in ("game_move", "play", "game_plan"):
+        assert not hasattr(tools_module, absent), absent
+    # The tool class mirrors the function's contract.
     assert GameStateTool.name == "game_state"
-    assert "game_move" not in names
-    assert "play" not in names
-    assert "game_plan" not in names  # deferred; historic data stays readable
-
-
-def test_game_state_tool_schema_is_toolset_compatible():
     schema = GameStateTool.get_schema()
-    assert schema["name"] == "game_state"
     assert schema["parameters"] == {
         "type": "object",
         "properties": {},
         "additionalProperties": False,
     }
-
-
-async def test_game_state_tool_executes_like_the_function():
-    rooms = _Rooms()
-    plugin = _plugin(rooms)
-    await game_new(plugin, _event(), kind="gomoku")
-    tool = GameStateTool(plugin)
-    assert "Gomoku" in await tool.execute(_event())

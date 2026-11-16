@@ -8,7 +8,7 @@
  * 3) 按局 ui-config：fetchUiConfig 携带 ?match_id=（初始化/热更新同一入口），
  *    不同对局解析出不同 chat_session / read_only，不共用全局配置。
  *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -26,7 +26,7 @@ import {
   enterControl,
 } from "../shared/matches.js";
 import { HOST_PLACEHOLDER } from "../shared/mode.js";
-import { fetchUiConfig, chatSessionFromConfig, isChatReadOnly } from "../shared/chat.js";
+import { fetchUiConfig, isChatReadOnly, noticeTargetFromConfig } from "../shared/chat.js";
 
 /* ---------------- 1) 契约解析 ---------------- */
 
@@ -316,16 +316,16 @@ test("fetchUiConfig 携带 ?match_id：初始化与热更新同参数；不传�
   try {
     const c1 = await fetchUiConfig("m1");
     assert.equal(calls[0].url, "/api/plugin/kira-plugin-gamehub/ui-config?match_id=m1");
-    assert.equal(chatSessionFromConfig(c1), "sess-for-m1");
+    assert.equal(c1.chat_session, "sess-for-m1", "按局字段原样返回，不在前端二次解析");
     assert.equal(isChatReadOnly(c1), false);
 
     const c2 = await fetchUiConfig("m2");
-    assert.equal(chatSessionFromConfig(c2), "sess-for-m2", "不同局解析到不同会话（不共用全局配置）");
+    assert.equal(c2.chat_session, "sess-for-m2", "不同局拿到不同会话（不共用全局配置）");
     assert.equal(isChatReadOnly(c2), true, "非 web 目标局只读");
 
     const c0 = await fetchUiConfig();
     assert.equal(calls[calls.length - 1].url, "/api/plugin/kira-plugin-gamehub/ui-config", "大厅调用不带参数");
-    assert.equal(chatSessionFromConfig(c0), "room-fixed", "缺省回落固定会话（原行为不变）");
+    assert.equal(c0.page_session, "room-fixed", "缺省看 page_session（前端不再回落改写）");
 
     await fetchUiConfig("a b&c/d");
     assert.equal(
@@ -338,7 +338,7 @@ test("fetchUiConfig 携带 ?match_id：初始化与热更新同参数；不传�
   }
 });
 
-test("按局聊天三件套：ui-config?match_id 返回什么就用什么（chat_session 优先，page_session 仅回落）", async () => {
+test("按局 ui-config：诊断字段随本局返回，只读判定只认 chat_read_only", async () => {
   const prev = globalThis.fetch;
   globalThis.fetch = async () => ({
     ok: true,
@@ -350,15 +350,17 @@ test("按局聊天三件套：ui-config?match_id 返回什么就用什么（chat
         chat_user: "playerB",
         chat_read_only: false,
         notice_target_session_id: "qq-other-platform",
+        notice_target_error: "目标会话无效，已回落本页",
       },
     }),
   });
   try {
     const cfg = await fetchUiConfig("m-web-9");
-    assert.equal(chatSessionFromConfig(cfg), "web-target-of-this-match", "WebUI 操盘聊天局跟随本局 web 目标");
-    assert.notEqual(chatSessionFromConfig(cfg), "room-fixed", "page_session 不作聊天目标");
+    assert.equal(cfg.chat_session, "web-target-of-this-match", "WebUI 操盘聊天局跟随本局目标");
     assert.equal(isChatReadOnly(cfg), false, "web 目标可写");
-    assert.equal(chatSessionFromConfig(await fetchUiConfig("m-other")), "web-target-of-this-match");
+    const diag = noticeTargetFromConfig(cfg);
+    assert.equal(diag.session, "qq-other-platform", "目标诊断原样透出");
+    assert.ok(diag.error, "诊断错误可用于提示条");
   } finally {
     globalThis.fetch = prev;
   }

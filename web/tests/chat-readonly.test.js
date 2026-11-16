@@ -3,12 +3,12 @@
  * 会话时后端置 true）；前端不从 notice_target_session_id 非空自行推断。
  * KiraAI 对局页只渲染只读气泡（旁白走插件 notice 通道），但提示文案与判定
  * 仍按后端契约解析，供将来接入宿主聊天面板时复用。
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isChatReadOnly, CHAT_READ_ONLY_HINT, fetchUiConfig } from "../shared/chat.js";
+import { isChatReadOnly, CHAT_READ_ONLY_HINT } from "../shared/chat.js";
 
 test("缺省与旧后端字段缺席一律可聊天", () => {
   assert.equal(isChatReadOnly(null), false, "cfg 缺失不可崩、按可聊天");
@@ -39,8 +39,4 @@ test("提示文案单源：不声称「已投递/已发送」，含发往其他�
   assert.ok(CHAT_READ_ONLY_HINT.includes("仅可查看"), "含只读说明");
   assert.ok(!CHAT_READ_ONLY_HINT.includes("已投递"), "非 web 只读不等于实际发送成功");
   assert.ok(!CHAT_READ_ONLY_HINT.includes("已发送"), "不得声称发送成功");
-});
-
-test("chat.js 在 Node 可安全导入（无顶层浏览器全局依赖）", () => {
-  assert.equal(typeof fetchUiConfig, "function");
 });

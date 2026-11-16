@@ -200,6 +200,29 @@ async def test_say_is_truncated_and_persisted_with_the_move():
     assert runtime.lines == [("s1", "这是一句")]
 
 
+async def test_say_limit_zero_means_unlimited_and_invalid_falls_back():
+    """``max_say_len``: 0 = no cap (explicit choice); bad values → default."""
+    from tools_turn import DEFAULT_MAX_SAY_LEN
+
+    director = _Director()
+    runtime = _Runtime()
+    actions = [_Chain("这是一句很长的话"), _TagAction(play_tool_name("m-tag"), "K9")]
+    await submit_play_from_actions(
+        _plugin(director, max_say_len=0, runtime=runtime),
+        director, _Grant(), actions, "s1",
+    )
+    assert director.calls[0][3] == "这是一句很长的话"
+
+    director = _Director()
+    actions = [_Chain("x" * (DEFAULT_MAX_SAY_LEN + 50)),
+               _TagAction(play_tool_name("m-tag"), "K9")]
+    await submit_play_from_actions(
+        _plugin(director, max_say_len=None, runtime=_Runtime()),
+        director, _Grant(), actions, "s1",
+    )
+    assert len(director.calls[0][3]) == DEFAULT_MAX_SAY_LEN
+
+
 async def test_no_table_talk_means_no_say_and_no_window_line():
     director = _Director()
     runtime = _Runtime()

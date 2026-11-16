@@ -27,18 +27,6 @@
             "hint": "注入 game_agent 提示词的人设描述，保持简短；它决定语气而不是规则。"
           }
         }
-      },
-      "agent_avatar": {
-        "type": "string",
-        "name": "Agent Avatar Path",
-        "default": "",
-        "hint": "Optional local image used as the game agent avatar. Empty = the bundled default; the WebUI lobby can also upload a replacement.",
-        "locales": {
-          "zh": {
-            "name": "对弈者头像路径",
-            "hint": "可选：本地图片路径，作为 game_agent 头像。留空=使用插件内置默认头像；也可在 WebUI 大厅直接上传替换。"
-          }
-        }
       }
     }
   },
@@ -65,8 +53,8 @@
       },
       "spectator_public_url": {
         "type": "string", "name": "Public Spectator URL", "default": "",
-        "hint": "Optional HTTPS origin, e.g. https://watch.example.com. Empty uses the browser hostname and spectator port over HTTP.",
-        "locales": {"zh": {"name": "观战公开地址", "hint": "可填写独立 HTTPS 域名，例如 https://watch.example.com；留空使用浏览器主机名与观战端口（HTTP）。"}}
+        "hint": "Optional public origin, e.g. https://watch.example.com. Used for invite links and to whitelist the browser Origin when a TLS-terminating proxy rewrites Host. Empty uses the browser hostname and spectator port over HTTP.",
+        "locales": {"zh": {"name": "观战公开地址", "hint": "可填写独立公开域名，例如 https://watch.example.com；用于生成观战邀请链接，并在 TLS 反代改写 Host 时作为 Origin 白名单。留空使用浏览器主机名与观战端口（HTTP）。"}}
       }
     }
   },
@@ -97,11 +85,11 @@
         "source": "model",
         "model_type": "llm",
         "default": [],
-        "hint": "Ordered LLM failover list for the game agent. Empty = rule bot only. All models share one ai_timeout budget.",
+        "hint": "Ordered LLM failover list for the game agent. Empty = the host default LLM (the rule bot only takes over when the host has no default client either). All models share one ai_timeout budget.",
         "locales": {
           "zh": {
             "name": "决策模型",
-            "hint": "game_agent 使用的 LLM 顺序 failover 列表（从上到下依次尝试）。留空=只用规则 bot。所有模型共享同一个 ai_timeout 总预算。"
+            "hint": "game_agent 使用的 LLM 顺序 failover 列表（从上到下依次尝试）。留空=使用宿主默认模型（只有宿主也没有默认模型时才回落规则 bot）。所有模型共享同一个 ai_timeout 总预算。"
           }
         }
       },
@@ -471,11 +459,11 @@
         "type": "string",
         "name": "Notice Target Session",
         "default": "",
-        "hint": "Session id that receives the game agent's table talk and turn notices. Empty = the plugin's own session (gamehub:dm:admin).",
+        "hint": "Session id that receives the game agent's table talk and turn notices. Empty = the plugin's own session (gamehub:gm:room).",
         "locales": {
           "zh": {
             "name": "通知目标会话",
-            "hint": "接收对弈发言与行动通知的会话 ID。留空=使用插件自带的 gamehub:dm:admin 会话。"
+            "hint": "接收对弈发言与行动通知的会话 ID。留空=使用插件自带的 gamehub:gm:room 会话。"
           }
         }
       },

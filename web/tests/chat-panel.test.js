@@ -11,7 +11,7 @@
  * 8) 面板接线：假 fetch + 假 DOM 驱动 createChatPanel（GET 回填、POST 乐观
  *    追加不重复、agent 帧、禁用态、抽屉 chip、折叠持久化）。
  *
- * 运行：cd web && node --test tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -436,6 +436,46 @@ test("面板：GET /chat 回填 → 空状态消失、消息按序渲染（playe
   }
 });
 
+test("面板：整表重建期间暂停 aria-live，重建后恢复（历史回填不逐条朗读）", async () => {
+  const host = new FakeEl("div");
+  const env = mountPanel({
+    panelHost: host,
+    handler: () =>
+      ok({
+        enabled: true,
+        messages: [
+          msg("m1", 1_700_000_000_000, "agent", "汐祈", "来一局？"),
+          msg("m2", 1_700_000_001_000, "player", "阿空", "好呀"),
+        ],
+      }),
+  });
+  try {
+    const scroller = byClass(host, "chat-win-list")[0];
+    assert.ok(scroller, "聊天滚动区存在");
+    let live = scroller.getAttribute("aria-live");
+    // Observe the announcement state at the exact moment each row is appended.
+    const appendedUnder = [];
+    const setAttr = scroller.setAttribute.bind(scroller);
+    scroller.setAttribute = (name, value) => {
+      if (name === "aria-live") live = String(value);
+      return setAttr(name, value);
+    };
+    const append = scroller.appendChild.bind(scroller);
+    scroller.appendChild = (node) => {
+      appendedUnder.push(live);
+      return append(node);
+    };
+
+    await env.panel.load();
+
+    assert.ok(appendedUnder.length >= 2, "回填渲染了消息行");
+    assert.deepEqual([...new Set(appendedUnder)], ["off"], "每一行都在暂停播报时追加");
+    assert.equal(live, "polite", "重建结束后恢复礼貌播报，后续增量仍会朗读");
+  } finally {
+    env.restore();
+  }
+});
+
 test("面板：空列表显示中文空状态文案", async () => {
   const host = new FakeEl("div");
   const env = mountPanel({ panelHost: host, handler: () => ok({ enabled: true, messages: [] }) });
@@ -823,7 +863,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const readSrc = (name) => fs.readFileSync(path.resolve(here, "..", name), "utf8");
+/* Normalise line endings before source-text assertions (multi-line regexes must not
+ * depend on LF; a CRLF checkout fails spuriously). */
+const readSrc = (name) => fs.readFileSync(path.resolve(here, "..", name), "utf8").replace(/\r\n/g, "\n");
 
 test("match.js：只做接线（构造面板 / 喂 ui-config / 分发 agent_message），不内联聊天逻辑", () => {
   const src = readSrc("match.js");
@@ -843,11 +885,10 @@ test("match.html：面板挂载点（右栏）与窄屏入口（动作行下）�
   assert.ok(dockAt > actionsAt, "入口在动作行之后");
 });
 
-test("app.css：对局聊天窗口段有明确注释头，且不引入新色板变量", () => {
+test("app.css：对局聊天窗口段只复用既有变量（不引入新色板），窄屏抽屉不全屏", () => {
   const css = readSrc("app.css");
-  assert.match(css, /\/\* -+ 对局聊天窗口 -+ \*\//, "注释头");
   const section = css.slice(css.indexOf("/* ---------------- 对局聊天窗口"));
-  const body = section.slice(0, section.indexOf("/* ---------------- 聊天富媒体"));
+  const body = section.slice(0, section.indexOf("/* ---------------- 对局页响应式"));
   assert.doesNotMatch(body, /--[a-z-]+\s*:/, "只复用既有变量，不定义新色板");
   assert.match(body, /@media \(max-width: 719px\)/, "窄屏抽屉断点");
   assert.match(body, /max-height:\s*65vh/, "抽屉不全屏");

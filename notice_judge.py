@@ -12,7 +12,7 @@ Behaviour (the single source of truth for constants):
   ``speak=True`` with no network call, still subject to ``TableTalk``'s shared
   cooldown/dedup;
 - **Plan expiry**: a move that crosses the plan TTL boundary is a priority
-  trigger (opponent matches only);
+  trigger (opponent matches, turn-based games only);
 - **No network**: System1 was removed; ``judge`` tier is purely local. No
   score/probability/gray-zone logic remains.
 - **Event snapshot**: judge only on ``event["match"]`` / ``event["before_state"]``,
@@ -22,7 +22,9 @@ Behaviour (the single source of truth for constants):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,12 +34,12 @@ try:  # production: plugin package (``plugins.<plugin>.notice_judge``)
     from . import modes
     from .engine import games
     from .engine.match import status_of
-    from .plan import ai_seat_index, plan_remaining
+    from .plan import ai_seat_index
 except ImportError:  # standalone tests import modules as top-level
     import modes
     from engine import games
     from engine.match import status_of
-    from plan import ai_seat_index, plan_remaining
+    from plan import ai_seat_index
 
 try:  # production: KiraAI host logging (AGENTS.md)
     from core.plugin import logger
@@ -47,6 +49,11 @@ except ImportError:  # standalone tests outside the host: a plain stdlib logger
     logger = logging.getLogger(__name__)
 
 _MAX_PENDING = 4
+
+# Judgement-log rotation: one previous generation (`*.jsonl.1`) beyond the
+# size cap, so an always-on judge log cannot grow without bound (P2).
+_JSONL_MAX_BYTES = 2 * 1024 * 1024
+_JSONL_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -68,37 +75,6 @@ class Judgment:
 def _cfg(plugin: Any, name: str, default: Any) -> Any:
     value = getattr(plugin.settings, name, default)
     return default if value is None else value
-
-
-def _label_of(match: Any, seat: int) -> str:
-    try:
-        labels = list(games.get(match.kind).seat_labels(match.state) or [])
-    except Exception:
-        labels = []
-    return labels[seat] if 0 <= seat < len(labels) and labels[seat] else "棋手"
-
-
-def _module_chat_context(match: Any, seat: int, names: list[str]) -> str:
-    """Optional module snapshot (board/coords/immediate threats); "" on failure.
-
-    Reuses the public ``chat_context`` hook instead of hard-coding any game.
-    """
-    try:
-        module = games.get(match.kind)
-    except Exception:
-        return ""
-    hook = getattr(module, "chat_context", None)
-    if not callable(hook):
-        return ""
-    try:
-        try:
-            value = hook(match.state, seat, names)
-        except TypeError:
-            value = hook(match.state, seat)
-    except Exception:
-        logger.debug("notice judge snapshot failed, continuing without", exc_info=True)
-        return ""
-    return value.strip() if isinstance(value, str) else ""
 
 
 def _module_key_events(match: Any, seat: int, event: dict[str, Any]) -> dict[str, Any]:
@@ -125,106 +101,6 @@ def _module_key_events(match: Any, seat: int, event: dict[str, Any]) -> dict[str
         logger.debug("notice judge key_events failed", exc_info=True)
         return {}
     return dict(flags) if isinstance(flags, dict) else {}
-
-
-def _opponent_seat(match: Any, seat: int) -> int:
-    return next((i for i in range(len(match.seats)) if i != seat), 1 - seat)
-
-
-def _state_text(
-    match: Any,
-    *,
-    seat: int,
-    event: dict[str, Any],
-    last_talk_s: float | None,
-) -> str:
-    """Compact board text for logs/diagnostics (no tokens or full chat).
-
-    Chat context only uses the last 3 entries of ``match.chat`` so "what I just
-    said" does not fight this move; no cross-session history is read.
-    """
-    if getattr(match, "kind", "") == "doudizhu":
-        # The mover is not an observer; the judge must not read the hand.
-        return games.get(match.kind).describe(match.state, None, [s.name for s in match.seats])
-    status = status_of(match)
-    names = [s.name for s in match.seats]
-    mover = names[seat] if 0 <= seat < len(names) else "对手"
-    move = str(event.get("move") or "").strip() or "一手"
-    teammate = modes.role_of(match) == modes.ROLE_TEAMMATE
-    if teammate:
-        # Teammate view: we stand with the human; "our side" = human seat.
-        opponent = modes.human_seat_index(match)
-        if opponent is None or opponent == seat:
-            opponent = _opponent_seat(match, seat)
-        rival_seat = seat
-    else:
-        opponent = _opponent_seat(match, seat)
-        rival_seat = seat
-    lines = [
-        (
-            f"{games.get(match.kind).name['zh']} · 第 {len(match.log)} 手 · "
-            f"{mover} 刚落子 {move}。"
-        ),
-    ]
-    if teammate:
-        human_name = names[opponent] if 0 <= opponent < len(names) else "玩家"
-        lines.append(
-            f"你是 {human_name} 的队友（{human_name} 执"
-            f"{_label_of(match, opponent)}），对手 {mover} 执"
-            f"{_label_of(match, rival_seat)}；只帮腔出主意，不代为落子。"
-        )
-    else:
-        lines.append(
-            f"你执{_label_of(match, opponent)}，对手 {mover} 执{_label_of(match, seat)}。"
-        )
-    if status.outcome is not None:
-        lines.append(f"对局已结束：{status.result_text or status.outcome.text}。")
-    snapshot = _module_chat_context(match, seat, names)
-    if snapshot:
-        lines.append(snapshot)
-    recent = match.log[-6:]
-    if recent:
-        shown = [
-            f"{names[entry.seat] if entry.seat < len(names) else '棋手'} "
-            f"{'认输' if entry.move == 'resign' else entry.move}"
-            for entry in recent
-        ]
-        lines.append("最近棋：" + "、".join(shown))
-    chat = getattr(match, "chat", ()) or ()
-    if chat:
-        recent_chat = chat[-3:]
-        lines.append(
-            "最近对局聊天："
-            + " / ".join(
-                f"{names[c.seat] if c.seat < len(names) else '棋手'}："
-                f"{str(c.text or '')[:60]}"
-                for c in recent_chat
-            )
-        )
-    if teammate:
-        lines.append("你是场边队友视角，不设定打法。")
-    else:
-        plan_seat = ai_seat_index(match)
-        plan = match.seats[plan_seat].plan if plan_seat is not None else None
-        plan_text = ""
-        if isinstance(plan, dict):
-            plan_text = str(plan.get("text") or "").strip()
-        if plan_text:
-            tempo = "turn"
-            try:
-                tempo = str(games.get(match.kind).tempo or "turn")
-            except Exception:
-                logger.debug("tempo read failed, treating as turn-based", exc_info=True)
-            ttl = plan_remaining(
-                plan, tempo=tempo, move_count=len(match.log), now=int(time.time() * 1000)
-            )
-            state = "生效中" if ttl.get("active") else "已过期"
-            lines.append(f"你当前的打法（{state}）：{plan_text}")
-        else:
-            lines.append("你当前没有设定打法。")
-    if last_talk_s is not None:
-        lines.append(f"距你上次发言：{int(max(0.0, last_talk_s))} 秒。")
-    return "\n".join(lines)
 
 
 class NoticeJudge:
@@ -358,7 +234,10 @@ class NoticeJudge:
         match = event.get("match") or getattr(room, "match", None)
         if match is None:
             return Judgment(False, reason="no_match")
-        mode = str(_cfg(self._plugin, "notice_judge_mode", "off") or "key")
+        # Empty string means "unset" and must behave like the shipped default
+        # (off): `or "key"` here turned an explicitly cleared setting into the
+        # most talkative fast channel (fail-open, P2).
+        mode = str(_cfg(self._plugin, "notice_judge_mode", "off") or "off").strip()
         if getattr(self._plugin, "stopping", False):
             return Judgment(False, reason="stopping")
         if mode == "off":
@@ -371,9 +250,10 @@ class NoticeJudge:
         seat = modes.trigger_seat(match, event)
         if not (0 <= seat < len(match.seats)):
             return Judgment(False, reason="bad_seat")
+        # Teammate matches never reach the judge: TableTalk's on_event only
+        # forwards judge-tier moves for opponent matches, so the wanted
+        # trigger here is effectively "the human moved".
         if not modes.is_wanted_trigger(match, seat):
-            # Role-aware: opponent matches only judge human moves (AI replies
-            # silent); teammate matches only judge the opponent's reply.
             return Judgment(False, reason="ai_move")
 
         flags = _module_key_events(match, seat, event)
@@ -441,6 +321,15 @@ def _plan_expired(match: Any) -> bool:
 
 
 def _append_line(path: Path, line: str) -> None:
+    """Append one JSONL entry; rotate once past the size cap (bounded disk)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
+    with _JSONL_LOCK:
+        try:
+            if path.exists() and path.stat().st_size > _JSONL_MAX_BYTES:
+                rotated = path.with_name(path.name + ".1")
+                with contextlib.suppress(OSError):
+                    path.replace(rotated)  # drop the previous .1
+        except OSError:
+            pass  # stat/rotate failures must never block the write
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)

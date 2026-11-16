@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from engine.match import Match
+from engine.match import Match, NewMatchOptions, NewSeat, create_match
 from host.settings import Settings
 from host.store import MatchStore
 from room import GameRoom, RoomError, RoomManager
@@ -40,14 +40,28 @@ class FakeRepo:
 
     async def load(self, match_id: str) -> Match | None:
         snapshot = self.snapshots.get(match_id)
-        return Match.from_dict(snapshot.to_dict()) if snapshot is not None else None
+        if snapshot is None:
+            return None
+        try:
+            return Match.from_dict(snapshot.to_dict())
+        except (KeyError, TypeError, ValueError):
+            # Mirror the real store: a row that no longer parses is skipped,
+            # never surfaced as a half-built match.
+            return None
 
     async def load_active(self) -> list[Match]:
-        return [
-            Match.from_dict(snapshot.to_dict())
-            for match_id, snapshot in self.snapshots.items()
-            if self.statuses.get(match_id) == "active"
-        ]
+        rows: list[Match] = []
+        for _match_id, snapshot in self.snapshots.items():
+            if self.statuses.get(_match_id) != "active":
+                continue
+            try:
+                rows.append(Match.from_dict(snapshot.to_dict()))
+            except (KeyError, TypeError, ValueError):
+                # The real store skips corrupt rows instead of failing the
+                # whole batch (restore's own per-row guards stay the second
+                # line of defence).
+                continue
+        return rows
 
 
 class FakeWS:
@@ -965,3 +979,99 @@ async def test_room_works_with_match_store(tmp_path: Path) -> None:
         assert after.count() == 0
     finally:
         await store.close()
+
+
+# ----------------------------------------------------------------------
+#  P1-6 regression: GameRoom must carry the host bot name; D-2 unified
+#  delay parsing; D-4 canonical error texts + classification helpers.
+# ----------------------------------------------------------------------
+async def test_room_bot_name_available_on_non_ai_seat_error_paths() -> None:
+    """Non-ai-seat error branches read ``room.bot_name`` (P1-6).
+
+    Before the fix the attribute was missing, so ``set_plan`` raised
+    AttributeError instead of RoomError and ``apply_ai_move`` broke its
+    ``(None, error)`` contract.
+    """
+    manager = make_manager()
+    room, _seat, _token = await create_gomoku(manager)
+    assert room.bot_name == "诺里"
+
+    # set_plan on the human seat: RoomError("no_ai_seat"), persona named.
+    with pytest.raises(RoomError) as exc:
+        await room.set_plan(0, text="稳守反击", ttl_moves=2, ttl_s=60.0)
+    assert exc.value.code == "no_ai_seat"
+    assert "诺里" in exc.value.message
+
+    # apply_ai_move on the human seat: (None, message), never an exception.
+    match, error = await room.apply_ai_move(0, "H8")
+    assert match is None
+    assert error == "这不是诺里的座位"
+
+    # A directly built room falls back to the neutral host name.
+    bare = GameRoom(
+        create_match(
+            NewMatchOptions(
+                id="bare-room",
+                kind="gomoku",
+                seats=[NewSeat(kind="human", token="t"), NewSeat(kind="ai", token="")],
+                seed=1,
+                now=1000,
+            )
+        ),
+        repository=FakeRepo(),
+    )
+    assert bare.bot_name == "对手"
+
+
+async def test_set_bot_name_propagates_to_live_rooms() -> None:
+    manager = make_manager()
+    room, _seat, _token = await create_gomoku(manager)
+    manager.set_bot_name("汐祈")
+    assert manager.bot_name == "汐祈"
+    assert room.bot_name == "汐祈"
+    _match, error = await room.apply_ai_move(0, "H8")
+    assert error == "这不是汐祈的座位"
+
+
+def test_bot_delay_range_parse_single_source() -> None:
+    """D-2: one parser for the room layer and game_agent's fallback fill."""
+    from room import bot_delay_range_s
+
+    # Explicit 0/0 disables the pause (previously fell back to 1-2s forever).
+    assert bot_delay_range_s(Settings({"bot_move_delay_min_ms": 0, "bot_move_delay_max_ms": 0})) == (0.0, 0.0)
+    # Explicit window comes through in seconds.
+    assert bot_delay_range_s(Settings({"bot_move_delay_min_ms": 1000, "bot_move_delay_max_ms": 2000})) == (1.0, 2.0)
+    # Inverted intervals clamp to a fixed lo instead of an inverted draw.
+    assert bot_delay_range_s(Settings({"bot_move_delay_min_ms": 800, "bot_move_delay_max_ms": 300})) == (0.8, 0.8)
+    # Keys absent entirely (bare fake configs) keep the module default window
+    # (conftest pins that constant to zero, so compare symbolically).
+    class _Bare:
+        pass
+
+    import room as room_module
+
+    assert bot_delay_range_s(_Bare()) == room_module.DEFAULT_BOT_DELAY_S
+
+
+def test_move_error_classification_matches_room_texts() -> None:
+    """D-4: director/game_agent classify through the room's canonical helpers."""
+    from room import (
+        ERR_MATCH_OVER,
+        ERR_NO_SEAT,
+        ERR_NOT_DELEGATABLE,
+        ERR_STALE_POSITION,
+        is_gone_move_error,
+        is_stale_move_error,
+        not_ai_seat_error,
+        stale_turn_error,
+    )
+
+    for text in (ERR_MATCH_OVER, ERR_NO_SEAT, ERR_NOT_DELEGATABLE, not_ai_seat_error("诺里")):
+        assert is_gone_move_error(text), text
+        assert not is_stale_move_error(text), text
+    for text in (ERR_STALE_POSITION, stale_turn_error("你"), stale_turn_error("这个座位")):
+        assert is_stale_move_error(text), text
+        assert not is_gone_move_error(text), text
+    # A normal engine rejection is neither gone nor stale.
+    assert not is_gone_move_error("这里已经有子了")
+    assert not is_stale_move_error("这里已经有子了")

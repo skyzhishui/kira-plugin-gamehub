@@ -6,7 +6,9 @@ KiraAI extension points:
 - ``@register.page`` / ``@register.api`` for the lobby and match pages;
 - ``@register.tool`` for the four chat tools;
 - ``@on.llm_request`` for per-turn board context and request-scoped turn tools;
-- ``@on.im_message``-free notice-driven turns through ``ctx.publish_notice``.
+- notice-driven action turns through ``ctx.publish_notice`` (plus a low
+  priority ``@on.im_message`` router that only stops/buffers the shared game
+  group's own messages — it never answers chats).
 
 The runtime (rooms, table talk, judge, turn director) is assembled in
 ``host/runtime.py``; the shared ``gamehub:gm:room`` session is provisioned
@@ -28,8 +30,13 @@ PLUGIN_ID = "kira-plugin-gamehub"
 # Defaults mirrored from schema.json. Used only when the config form has not
 # been persisted yet, so initialization never crashes on a missing key.
 _DEFAULT_AGENT_NAME = "nori"
-_DEFAULT_AGENT_PERSONA = "调皮爱吐槽的猫娘，玩游戏时会认真+毒舌"
 _DEFAULT_AI_MODE = "agent"
+
+# The group router must run before any user chat handler, but the host
+# docstring forbids user plugins from using ``Priority.SYS_HIGH`` (100), so
+# this deliberately parks one step below the cap. Named constant + comment
+# instead of a bare magic int at the decorator (review P2).
+_GROUP_ROUTE_PRIORITY = 99
 
 _EMPTY_PARAMS: dict[str, Any] = {
     "type": "object",
@@ -109,7 +116,6 @@ class GamehubPlugin(BasePlugin):
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
         self._agent_name = _DEFAULT_AGENT_NAME
-        self._agent_persona = _DEFAULT_AGENT_PERSONA
         self._ai_mode = _DEFAULT_AI_MODE
         self._ai_models: list[str] = []
         self.settings = Settings(cfg)
@@ -144,9 +150,6 @@ class GamehubPlugin(BasePlugin):
 
         agent_name = identity.get("agent_name", cfg.get("agent_name", _DEFAULT_AGENT_NAME))
         self._agent_name = agent_name.strip() if isinstance(agent_name, str) and agent_name.strip() else _DEFAULT_AGENT_NAME
-
-        persona = identity.get("agent_persona", cfg.get("agent_persona", _DEFAULT_AGENT_PERSONA))
-        self._agent_persona = persona if isinstance(persona, str) else _DEFAULT_AGENT_PERSONA
 
         ai_mode = ai.get("ai_mode", cfg.get("ai_mode", _DEFAULT_AI_MODE))
         self._ai_mode = ai_mode if ai_mode in ("agent", "bot") else _DEFAULT_AI_MODE
@@ -239,6 +242,16 @@ class GamehubPlugin(BasePlugin):
                 logger.warning(f"{PLUGIN_ID}: runtime stop failed: {e}")
             self.runtime = None
         self._rooms = None
+        # Release the chat window's lazily opened private store (only exists
+        # when the runtime never started).
+        api = self._api
+        dispose = getattr(api, "dispose", None)
+        if callable(dispose):
+            try:
+                await dispose()
+            except Exception as e:  # noqa: BLE001 - teardown must not raise
+                logger.warning(f"{PLUGIN_ID}: api dispose failed: {e}")
+        self._api = None
 
         from .host.session import GAME_ADAPTER_NAME
 
@@ -305,7 +318,7 @@ class GamehubPlugin(BasePlugin):
     #  Per-turn injection
     # ------------------------------------------------------------------
 
-    @on.im_message(priority=99)
+    @on.im_message(priority=_GROUP_ROUTE_PRIORITY)
     async def route_game_group(self, event):
         from .host.group_chat import route_group_message
 
@@ -441,12 +454,16 @@ class GamehubPlugin(BasePlugin):
 
     @register.api(method="GET", path="/ping")
     async def ping(self):
+        """Health probe in the same envelope as every other REST endpoint."""
         return {
             "ok": True,
-            "plugin": PLUGIN_ID,
-            "ready": self._ready,
-            "adapter_ready": self._adapter_ready,
-            "agent_name": self._agent_name,
+            "data": {
+                "plugin": PLUGIN_ID,
+                "ready": self._ready,
+                "adapter_ready": self._adapter_ready,
+                "agent_name": self._agent_name,
+            },
+            "error": "",
         }
 
     # ------------------------------------------------------------------

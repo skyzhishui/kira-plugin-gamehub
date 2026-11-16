@@ -10,7 +10,7 @@
  *    会让按钮永久停在兜底名）；服务端 /games 必须直接下发 host_agent_name；
  * 3) index.html 的横幅占位只能是中性「AI」，不得写死身份词。
  *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";

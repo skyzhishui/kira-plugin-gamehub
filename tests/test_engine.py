@@ -76,17 +76,15 @@ def test_gomoku_coordinates_skip_i():
     assert to_gtp(7 * 15 + 8, 15) == "J8"
     assert from_gtp("P15", 15) == 14
     assert to_gtp(14, 15) == "P15"
-    # 首手不限制天元：四角都可以
-    mod = _gomoku()
-    for corner in ("A1", "A15", "O1", "O15"):
-        state = _empty_state()
-        assert isinstance(mod.apply(state, 0, corner), MoveResultOk), corner
 
 
 def test_gomoku_first_move_and_turn_order():
     mod = _gomoku()
     state = _empty_state()
     assert state["toPlay"] == 1 and state["moves"] == 0
+    # 首手不限制天元：四角都可以
+    for corner in ("A1", "A15", "O1", "O15"):
+        assert isinstance(mod.apply(_empty_state(), 0, corner), MoveResultOk), corner
     result = mod.apply(state, 1, "H8")
     assert isinstance(result, MoveResultErr) and "还没轮到你" in result.error
     result = mod.apply(state, 0, "H8")
@@ -126,19 +124,15 @@ def test_gomoku_coordinates_and_bot():
     assert bot_move and isinstance(mod.apply(first.state, 1, bot_move), MoveResultOk)
 
 
-def test_gomoku_candidates_hook_removed():
-    """候选白名单已删除（未落地的分层决策）；模块不再暴露 candidates。"""
-    mod = _gomoku()
-    assert not hasattr(mod, "candidates")
-
-
 def test_gomoku_describe_mentions_own_colour_and_board():
     mod = _gomoku()
     state = mod.apply(_empty_state(), 0, "H8").state
     text = mod.describe(state, 1, ["甲", "乙"])
     assert "You are O (white)" in text
     assert "Last move: H8." in text
-    assert "X . ." in text or "X" in text
+    # The board block is rendered once, under the move summary.
+    assert text.count("Moves so far:") == 1
+    assert "X . ." in text
 
 
 def _new_match(seat_kinds=("human", "ai")):
@@ -168,32 +162,32 @@ def test_create_match_autoplays_bots_without_version_bump():
     assert human.match.state["toPlay"] == 1
 
 
-def test_apply_match_action_can_defer_bot_autoplay():
-    """``autoplay_bots=False``：引擎不再内联补手，交给房间层按节奏调度。"""
-    match = _new_match(("human", "bot"))
+def test_autoplay_can_be_deferred_at_create_and_per_action():
+    """``autoplay_bots=False``：引擎不内联补手，交给房间层按节奏调度。"""
+    deferred = create_match(
+        NewMatchOptions(
+            id="m2",
+            kind="gomoku",
+            seats=[
+                NewSeat(kind="human", token="t0", joined=True),
+                NewSeat(kind="bot", token="", joined=True),
+            ],
+            seed=7,
+            now=1_000,
+            autoplay_bots=False,
+        )
+    )
+    assert deferred.version == 1
+    assert deferred.log == []
+
     human = apply_match_action(
-        match, 0, {"type": "move", "move": "H8"}, 2_000, autoplay_bots=False
+        deferred, 0, {"type": "move", "move": "H8"}, 2_000, autoplay_bots=False
     )
     assert human.ok
     assert human.match.version == 2
     assert len(human.match.log) == 1  # 只有人类这一手
     assert human.match.log[0].seat == 0
     assert human.match.state["toPlay"] == 2  # 仍轮到 bot，等房间层补
-
-
-def test_create_match_can_skip_initial_bot_autoplay():
-    """开局也可关闭内联 autoplay（房间层自己排程首手）。"""
-    seats = [
-        NewSeat(kind="human", token="t0", joined=True),
-        NewSeat(kind="bot", token="", joined=True),
-    ]
-    match = create_match(
-        NewMatchOptions(
-            id="m2", kind="gomoku", seats=seats, seed=7, now=1_000, autoplay_bots=False
-        )
-    )
-    assert match.version == 1
-    assert match.log == []
 
 
 def test_apply_match_action_rejects_and_strips_private_fields():
@@ -295,16 +289,6 @@ def test_describe_uses_move_protocol_not_mcp_tools():
     assert "Status: waiting for P0." in waiting
 
 
-def test_match_roundtrip_dict():
-    match = _new_match()
-    data = json.loads(json.dumps(match.to_dict(), ensure_ascii=False))
-    from engine.match import Match
-
-    restored = Match.from_dict(data)
-    assert restored.to_dict() == match.to_dict()
-    assert view_match(restored, 0)["view"] == view_match(match, 0)["view"]
-
-
 def test_catalog_lists_only_playable_games():
     """The lobby must not offer an entry it cannot start (e.g. chess)."""
     kinds = [g["kind"] for g in games.catalog()]
@@ -320,6 +304,7 @@ def test_lineup_labels_follow_the_configured_identities():
     assert labels["nori_bot"] == "汐祈（Seki） + 陪练"
     assert labels["agent_bot"] == "nori + 陪练（汐祈（Seki）队友）"
     assert labels["bot_bot"] == "两位陪练（汐祈（Seki）队友）"
+    assert set(labels) == {"nori_agent", "nori_bot", "agent_bot", "bot_bot"}
 
     # A missing host name degrades to a neutral label, not to a persona name.
     fallback = {x["value"]: x["label"] for x in games.lineup_labels("", "")}

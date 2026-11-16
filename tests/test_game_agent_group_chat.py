@@ -382,7 +382,10 @@ async def test_spectator_route_does_not_double_buffer_or_trigger(env):
     assert flushed == []
 
 
-async def test_host_delegated_bot_and_turn_moves_are_not_forwarded(env, monkeypatch):
+async def test_only_legal_agent_says_are_forwarded(env, monkeypatch):
+    """Everything that is not a *legal, public agent say* stays private:
+    host/delegated/bot/turn moves, failed/stale/silent moves, and start
+    events never reach the group channel, history or WS fan-out."""
     runtime = env.runtime()
     env.patch_publish(monkeypatch)
     env.patch_ws(monkeypatch)
@@ -411,16 +414,9 @@ async def test_host_delegated_bot_and_turn_moves_are_not_forwarded(env, monkeypa
             {"type": "move", "seat": 0, "say": "不该公开", "match": match},
         )
 
-    assert env.publishes == []
-    assert env.store.lines == []
-    assert env.frames == []
-
-
-async def test_failed_or_stale_or_silent_moves_are_not_forwarded(env, monkeypatch):
+    # A real agent room: illegal/stale/silent moves never notify or forward.
     room = await _agent_room()
     runtime = env.runtime()
-    env.patch_publish(monkeypatch)
-    env.patch_ws(monkeypatch)
     events: list[dict[str, Any]] = []
 
     async def capture(_room: Any, event: dict[str, Any]) -> None:
@@ -444,7 +440,7 @@ async def test_failed_or_stale_or_silent_moves_are_not_forwarded(env, monkeypatc
     await _drain(room)
     assert len(events) == 1
 
-    # A move without a public say is not mirrored into the group.
+    # A move without a public say and a start event are not mirrored either.
     await runtime._dispatch_event(
         SimpleNamespace(match=room.match),
         {"type": "move", "seat": 1, "say": "", "match": room.match},
@@ -453,7 +449,10 @@ async def test_failed_or_stale_or_silent_moves_are_not_forwarded(env, monkeypatc
         SimpleNamespace(match=room.match),
         {"type": "start", "seat": 1, "say": "开局台词", "match": room.match},
     )
+
     assert env.publishes == []
+    assert env.store.lines == []
+    assert env.frames == []
 
 
 async def test_duplicate_event_publishes_once(env, monkeypatch):

@@ -19,8 +19,9 @@ which are the *opponent* seat in teammate matches. Historic plan data stays
 readable (``plan.py`` helpers are still used for display only).
 
 ``game_move`` / ``play`` are not global tools: human moves go through the
-page/WS, and the notice-turn ``play`` is a request-scoped ``BaseTool`` built
-by ``tools_turn.py`` (bound to one seat/grant, never registered globally).
+page/WS, and the notice-turn move is a request-scoped root control tag
+(``play_<match>``, built by ``tools_turn.py``, bound to one seat/grant, never
+registered globally).
 
 Conventions carried over from nori:
 
@@ -28,6 +29,13 @@ Conventions carried over from nori:
   directly;
 - seats are resolved by the session id (``actor``), one active match per
   actor;
+- **viewer perspective**: a plain chat session only ever sees its own seat
+  (in doudizhu that is its own private hand); a session without a seat gets
+  the spectator view (no hands, no plan/guidance). The grant-bound turn view
+  is the one exception — it shows the seat the director authorized;
+- **resign authorization**: ``game_resign(match_id=...)`` requires the caller
+  to occupy a seat of that match; the (public) match id alone never
+  authorizes an action, and an unowned match fails closed;
 - **notice-turn safety**: a synthetic notice message (``is_notice``) or a
   bound ``gamehub_turn`` context disables ``game_new`` / ``game_resign`` and
   answers ``game_state`` explicitly instead of doing an actor lookup that
@@ -74,20 +82,22 @@ try:  # production: plugin package (``<plugin>.tools``)
     from .engine import describe_match, games, status_of, view_match
     from .engine.match import SOURCE_CHAT
     from .modes import ROLE_TEAMMATE, bound_seat, role_of
+    from .naming import host_agent_name
     from .plan import (
         ai_seat_index,
         normalize_plan_text,
         plan_move_count,
         plan_summary,
     )
-    from .targets import session_type_of
+    from .targets import is_private_session
 except ImportError:  # standalone tests import this module as top-level
     import modes
     from engine import describe_match, games, status_of, view_match
     from engine.match import SOURCE_CHAT
     from modes import ROLE_TEAMMATE, bound_seat, role_of
+    from naming import host_agent_name
     from plan import ai_seat_index, normalize_plan_text, plan_move_count, plan_summary
-    from targets import session_type_of
+    from targets import is_private_session
 
 # Synthetic trigger of notice messages (talk / notice_judge / turn tools share
 # this spelling). Kept for parity with nori even though KiraAI notices are
@@ -103,13 +113,28 @@ PLUGIN_ID = "kira-plugin-gamehub"
 MATCH_PAGE_PATH = f"page/plugin/{PLUGIN_ID}/hub/match.html"
 
 GAME_STATE_DESCRIPTION = (
-    "查看当前对局的完整局面：完整盘面/棋盘、完整规则、已发生落子与最近走子、"
-    "轮到谁、你的执色与可用走法，以及当前打法（plan）与剩余 TTL。"
-    "用户问「现在什么局面」「轮到谁了」时使用；回答具体落点、"
-    "复盘或任何棋子坐标前，先调用 game_state 读取当前完整局面，"
-    "不要凭聊天历史或最近几手猜测盘面。返回的是当前对局状态，"
-    "具体坐标规则与可用走法以结果中的游戏说明为准。"
-    "结果中的走子协议以 play 工具为准，不使用旧的文本 MOVE 行。"
+    "查看当前对局的局面：完整盘面/棋盘、完整规则、已发生落子与最近走子、"
+    "轮到谁、你的执色与可用走法；若座位上有打法（plan）还会给出摘要与剩余 TTL。"
+    "普通聊天回合里用户问「现在什么局面」「轮到谁了」时使用；回答具体落点、"
+    "复盘或任何棋子坐标前，先调用本工具读取当前局面，"
+    "不要凭聊天历史或最近几手猜测盘面。没有座位的观战视图只给公开摘要，不含手牌。"
+    "行动通知回合本工具不可用（盘面已随本轮注入块给出），"
+    "请使用本回合绑定的 state_<对局ID> 视图。"
+    "落子不在本工具里：行动回合须在回复末尾输出 play_<对局ID> 根控制标签，"
+    "不使用旧的文本 MOVE 行；具体坐标规则与可用走法以结果中的游戏说明为准。"
+)
+
+# Bound turn view (``state_<match_id>``): a read-only snapshot scoped to the
+# grant that created this turn. Deliberately separate from
+# ``GAME_STATE_DESCRIPTION``: the bound path has no plan/TTL section, is not
+# ``game_state`` (which is rejected during notice turns) and cannot retarget a
+# match, so the global description would misdescribe it.
+BOUND_STATE_DESCRIPTION = (
+    "查看本轮行动所绑定对局的最新局面（只读）：盘面/棋盘、你的执色、"
+    "已发生落子与最近走子、轮到谁、当前可用的走法。视图固定为本回合授权的座位，"
+    "不能切换对局或座位。落子请在本轮回复末尾输出 play_<对局ID> 根控制标签"
+    "（动作写在标签正文，不在本工具里提交）；规则、格式与示例见本轮 "
+    "gamehub_context 注入块。"
 )
 
 _EMPTY_PARAMS: dict[str, Any] = {
@@ -127,28 +152,9 @@ def _now() -> int:
     return int(time.time() * 1000)
 
 
-def _is_private_session(session_id: str) -> bool:
-    """Private-chat test reuses the single ``targets`` convention."""
-    return session_type_of(session_id) == "private"
-
-
 def _bot_name(plugin: Any) -> str:
-    """Host agent display name; neutral fallback, never hard-coded."""
-    ctx = getattr(plugin, "ctx", None)
-    bot_config = getattr(ctx, "bot_config", None)
-    bot = getattr(bot_config, "bot", None)
-    settings = getattr(plugin, "settings", None)
-    for candidate in (
-        getattr(plugin, "host_agent_name", ""),
-        getattr(bot, "nickname", ""),
-        getattr(plugin, "bot_nickname", ""),
-        getattr(plugin, "_agent_name", ""),
-        getattr(settings, "agent_name", ""),
-    ):
-        text = str(candidate or "").strip()
-        if text:
-            return text
-    return "对手"
+    """Host agent display name; neutral fallback, never hard-coded persona."""
+    return host_agent_name(plugin, "她")
 
 
 def _opponent_name(match: Any) -> str:
@@ -167,16 +173,24 @@ def _agent_configured_name(plugin: Any) -> str:
 
 
 def _view_text(match: Any, seat: int | None) -> str:
-    """Board view for a tool result, without the retired ``MOVE:`` lines."""
+    """Board view for a tool result (the engine never emits ``MOVE:`` lines)."""
     if seat is None:
         return _spectator_text(match)
-    text = describe_match(match, seat)
-    return "\n".join(line for line in text.splitlines() if "MOVE:" not in line)
+    return describe_match(match, seat)
 
 
-def _seat_of_actor(match: Any, actor: str) -> int | None:
+def _seat_of_caller(match: Any, caller: str) -> int | None:
+    """Seat attributed to the caller by actor **or** session id.
+
+    Chat matches store both as the session id; page matches store the WebUI
+    actor plus the shared page session, so the page session is still seated.
+    """
+    if not caller:
+        return None
     for index, seat in enumerate(match.seats):
-        if seat.actor and seat.actor == actor:
+        if getattr(seat, "actor", "") == caller:
+            return index
+        if getattr(seat, "session_id", "") == caller:
             return index
     return None
 
@@ -349,27 +363,34 @@ def _entry_text(plugin: Any, match: Any, seat: int) -> str:
     return f"对局 ID：{match.id}\n页面：{base}/{MATCH_PAGE_PATH}?id={match.id}&t={token}"
 
 
-def _session_seat(match: Any, actor: str, session_id: str) -> int | None:
-    """Seat the caller sees in a normal (non-notice) turn.
+def _viewer_seat(match: Any, actor: str) -> int | None:
+    """Seat whose view the caller may see (one rule for every tool entry point).
 
-    Doudizhu: with the bot playing, never expose the human opponent's private
-    hand through the user's actor; teammate matches: the bot's stance is the
-    human side even when the actor has no seat.
+    The caller's **own seat** is the only seat a plain chat session may read:
+    in doudizhu that is its own private hand. An unseated caller gets the
+    spectator view, which carries no hands at all — the host AI's private
+    cards must never reach an arbitrary group member through their session.
+    The grant-bound turn tools keep the authorized perspective separately
+    (``_bound_state_text`` uses the grant's seat).
+
+    Teammate (practice) matches keep standing with the human side for an
+    unseated caller in games without hidden information; doudizhu has no such
+    fallback because every hand is private.
     """
-    seat = _seat_of_actor(match, actor)
-    if match.kind == "doudizhu":
-        seat = (
-            modes.nori_seat_index(match)
-            if modes.mode_of(match) == modes.MODE_NORI
-            else (seat if _is_private_session(session_id) else None)
-        )
-    if seat is None and role_of(match) == ROLE_TEAMMATE and match.kind != "doudizhu":
-        seat = _human_seat_of(match)
-    return seat
+    seat = _seat_of_caller(match, actor)
+    if seat is not None:
+        return seat
+    if match.kind != "doudizhu" and role_of(match) == ROLE_TEAMMATE:
+        return _human_seat_of(match)
+    return None
 
 
 def _state_text(plugin: Any, match: Any, seat: int | None) -> str:
     """Full state answer: view + plan summary + module strategy guidance."""
+    if seat is None:
+        # Spectator: the board view without hands, and no internal tactics —
+        # plan/guidance are for the acting side, never for an outside caller.
+        return _spectator_text(match)
     parts = [_view_text(match, seat)]
     plan_lines = _plan_lines(match, role=role_of(match))
     if plan_lines:
@@ -460,38 +481,35 @@ async def game_new(
         )
     difficulty = str(difficulty or "").strip().lower()
     if difficulty not in ("", "easy", "advanced"):
-        return "difficulty 只能是 easy 或 advanced（仅对手选陪练或当前agent时有效）。"
+        return "difficulty 只能是 easy 或 advanced（仅 opponent=bot 时有效）。"
     if opponent not in ("ai", "bot"):
         return f"对手只能是{_bot_name(plugin)}本人或陪练。"
-    if opponent == "ai" and difficulty:
-        return "difficulty 只在对手选择陪练或当前agent时有意义。"
     if games.maybe_get(kind) is None:
         return f"没有这个游戏：{kind}。可以用 game_list 查看。"
+    if kind == "doudizhu" and difficulty:
+        # Doudizhu difficulty is derived from the lineup (agent/bot seats);
+        # a difficulty knob would silently contradict the chosen lineup.
+        return (
+            "斗地主不用 difficulty：对手强度由 lineup 决定"
+            "（nori_agent / nori_bot / agent_bot / bot_bot）。"
+        )
+    if opponent == "ai" and difficulty:
+        return "difficulty 只在 opponent=bot（陪练）时有意义。"
 
     existing = rooms.find_by_actor(actor)
     if existing is not None:
-        seat = _seat_of_actor(existing.match, actor)
+        seat = _seat_of_caller(existing.match, actor)
         if seat is None:
             return (
                 f"你已有一局未结束（{existing.match.id}），但当前会话不在该局座位上；"
                 "可用 game_state 查看。"
             )
-        visible_seat = seat
-        if existing.match.kind == "doudizhu":
-            nori_seat = modes.nori_seat_index(existing.match)
-            if nori_seat is not None:
-                visible_seat = nori_seat
         text = "你已经有一局未结束了，先下完或认输吧。\n" + _view_text(
-            existing.match, visible_seat
+            existing.match, _viewer_seat(existing.match, actor)
         )
-        if _is_private_session(session_id):
+        if is_private_session(session_id):
             text += "\n" + _entry_text(plugin, existing.match, seat)
         return text
-
-    default_name = ""
-    getter = getattr(plugin, "name_for_actor", None)
-    if callable(getter):
-        default_name = str(getter(actor) or "").strip()
 
     if opponent == "bot" and difficulty == "advanced":
         mode_options: dict[str, Any] = {"mode": "bot", "difficulty": "advanced"}
@@ -507,11 +525,15 @@ async def game_new(
         level = str(kwargs.get("level") or "intermediate")
         mode_options["level"] = level
     if kind == "doudizhu":
-        mode_options = {"lineup": str(kwargs.get("lineup") or "nori_agent")}
+        # The lineup is the single source of truth for the three seats; an
+        # explicit ``opponent=bot`` request maps to the all-bot table instead
+        # of being silently dropped by the lineup default.
+        lineup = str(kwargs.get("lineup") or "").strip()
+        if not lineup:
+            lineup = "bot_bot" if opponent == "bot" else "nori_agent"
+        mode_options = {"lineup": lineup}
     if mode_options.get("difficulty") == "advanced" or kind == "doudizhu":
-        getter = getattr(plugin, "agent_player_name", None)
-        if callable(getter):
-            opponent_display_name = str(getter() or "").strip()
+        opponent_display_name = _agent_configured_name(plugin)
 
     try:
         room, seat, _token = await rooms.create(
@@ -519,7 +541,7 @@ async def game_new(
             actor=actor,
             session_id=session_id,
             opponent=opponent,
-            name=str(kwargs.get("name") or "").strip() or default_name or None,
+            name=str(kwargs.get("name") or "").strip() or None,
             source=SOURCE_CHAT,
             now=_now(),
             mode_options=mode_options,
@@ -545,20 +567,15 @@ async def game_new(
         seat_label = ""
     if seat_label:
         lines.append(f"你执{seat_label}。")
-    if _is_private_session(session_id):
+    if is_private_session(session_id):
         lines.append(_entry_text(plugin, room.match, seat))
     else:
         lines.append(f"对局 ID：{room.match.id}（群聊里不发行棋链接）")
     lines.append("")
 
-    visible_seat = seat
-    if kind == "doudizhu":
-        visible_seat = (
-            modes.nori_seat_index(room.match)
-            if modes.mode_of(room.match) == modes.MODE_NORI
-            else (seat if _is_private_session(session_id) else None)
-        )
-    lines.append(_view_text(room.match, visible_seat))
+    # The opening view is the caller's own seat (their own hand in doudizhu);
+    # ``seat`` was just assigned to this actor by ``rooms.create``.
+    lines.append(_view_text(room.match, _viewer_seat(room.match, actor)))
     guidance = _plan_guidance(room.match, ai_seat_index(room.match))
     if guidance:
         lines.append("")
@@ -569,13 +586,13 @@ async def game_new(
 async def game_state(
     plugin: Any, event: Any, match_id: str | None = None, **kwargs: Any
 ) -> str:
-    """Full state of the current match (or of ``match_id`` when given)."""
+    """State of the current match (or of ``match_id``) from the caller's seat."""
     bound = _bound_from_event(event)
     if bound is not None:
         return await _bound_state_text(plugin, bound)
     if _is_notice_turn(event):
         return _NOTICE_TURN_GAME_STATE_REPLY
-    actor, session_id = _resolve(event)
+    actor, _session_id = _resolve(event)
     rooms = plugin.rooms
 
     target = str(match_id or "").strip()
@@ -584,20 +601,40 @@ async def game_state(
         room = await loader(target) if callable(loader) else None
         if room is None:
             return "找不到这局对局（可能已结束或不存在）。"
-        seat = _session_seat(room.match, actor, session_id)
+        seat = _viewer_seat(room.match, actor)
         return _state_text(plugin, room.match, seat)
 
     room = rooms.find_by_actor(actor)
     if room is None:
         return "你现在没有进行中的对局。可以用 game_new 开一局。"
-    seat = _session_seat(room.match, actor, session_id)
+    seat = _viewer_seat(room.match, actor)
     return _state_text(plugin, room.match, seat)
 
 
 _NOTICE_TURN_GAME_STATE_REPLY = (
     "当前是行动通知回合：本回合的对局上下文已通过 gamehub_context 注入块给出，"
-    "game_state 暂不可用（通知回合不做 actor 反查）。"
+    "本回合绑定的 state_<对局ID> 视图可用；game_state 暂不可用（通知回合不做 actor 反查）。"
 )
+
+
+def _resign_denied(plugin: Any, reason: str) -> str:
+    """Fail-closed refusal for a resign the caller cannot authorize."""
+    return f"认输失败：{reason}（{_bot_name(plugin)}只会认输自己的座位）。"
+
+
+def _can_resign_by_id(room: Any, actor: str) -> bool:
+    """Whether ``actor`` may make the host AI resign *this* match.
+
+    A match id is public (it is printed verbatim in group chats), so the id
+    alone is never an authorization. The caller must be attributed to a seat
+    of the match — by actor (chat) or by session id (the WebUI page session
+    owns its matches through the shared page session). Everything else —
+    outsiders, a match with no attribution, a missing owner — fails closed.
+    The configured notice target is deliberately *not* consulted: it is a
+    delivery route, not an ownership record, and would let an unrelated chat
+    resign any match.
+    """
+    return _seat_of_caller(room.match, actor) is not None
 
 
 async def game_resign(
@@ -616,18 +653,29 @@ async def game_resign(
             room = await loader(target) if callable(loader) else None
             if room is None:
                 return "找不到这局对局（可能已结束或不存在）。"
+            if not _can_resign_by_id(room, actor):
+                return _resign_denied(plugin, "当前会话不是这局对局的归属方")
             if role_of(room.match) == ROLE_TEAMMATE:
                 return (
                     f"当前对局里没有{_bot_name(plugin)}的座位"
                     f"（她是你的队友，不占座位），不能由{_bot_name(plugin)}认输。"
                 )
             seat = modes.nori_seat_index(room.match)
-            if seat is None:
+            if (
+                seat is None
+                or not 0 <= seat < len(room.match.seats)
+                or room.match.seats[seat].kind != "ai"
+            ):
                 return (
                     f"当前对局里没有{_bot_name(plugin)}的座位"
                     "（对手是规则陪练或真人），不能由她认输。"
                 )
             match = await room.apply(seat, {"type": "resign"})
+            # Same cleanup discipline as ``rooms.resign_ai``: a resigned match
+            # must not keep a drive/bot task in flight.
+            cancel = getattr(room, "cancel_drive_tasks", None)
+            if callable(cancel):
+                cancel()
         else:
             match = await rooms.resign_ai(actor)
     except Exception as exc:  # noqa: BLE001 - errors are answered, not raised
@@ -678,6 +726,7 @@ class GameStateTool(BaseTool):
 
 
 __all__ = [
+    "BOUND_STATE_DESCRIPTION",
     "BaseTool",
     "GAME_STATE_DESCRIPTION",
     "GameStateTool",

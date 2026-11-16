@@ -41,10 +41,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,19 +54,22 @@ from typing import Any
 
 try:  # production: plugin package (``plugins.<plugin>.game_agent``)
     from . import modes
-    from .agent_history import AgentHistory
+    from .agent_history import AgentHistory, normalize_tool_calls
     from .engine import games
-    from .engine.match import agent_view_text
-    from .engine.types import GameModule
+    from .engine.match import agent_view_text, bot_move
     from .host import llm as host_llm
     from .plan import normalize_plan_text, plan_remaining
+    from .room import (
+        is_stale_move_error,
+        sample_bot_delay_s,
+    )
 except ImportError:  # standalone tests import modules as top-level
     import modes
-    from agent_history import AgentHistory
+    from agent_history import AgentHistory, normalize_tool_calls
     from engine import games
-    from engine.match import agent_view_text
-    from engine.types import GameModule
+    from engine.match import agent_view_text, bot_move
     from plan import normalize_plan_text, plan_remaining
+    from room import is_stale_move_error, sample_bot_delay_s
 
     try:
         from host import llm as host_llm
@@ -78,23 +83,24 @@ except ImportError:  # standalone tests outside the host: a plain stdlib logger
 
     logger = logging.getLogger(__name__)
 
-# 配置缺省（settings.py 声明；这里用 getattr 兼容运行）。
+# Config defaults (declared in settings.py; getattr keeps runtime tolerant).
 DEFAULT_ROUNDS = 5
 DEFAULT_CALLS_PER_ROUND = 1
 DEFAULT_HISTORY_ROUNDS = 10
-DEFAULT_AGENT_NAME = "nori"
-DEFAULT_AGENT_PERSONA = "调皮爱吐槽的猫娘，玩游戏时会认真+毒舌"
-
-# Rule-bot pacing fallback (seconds): used when the plugin config carries no
-# explicit ``bot_move_delay_min_ms`` / ``bot_move_delay_max_ms`` range. The room
-# layer uses the same 1-2s window for practice seats, so the rule bot never
-# answers instantly no matter which seat it fills.
-BOT_DELAY_S = (1.0, 2.0)
+# Same number as tools_turn's max_say_len fallback; the semantics of 0 stay
+# per consumer (this module treats 0 as unset → 280, tools_turn treats 0 as
+# no truncation — unifying them belongs to the tools lane).
+DEFAULT_MAX_SAY_LEN = 280
+DEFAULT_AI_TIMEOUT_S = 60.0
 
 # ``host.llm.NoDefaultModel`` when the host adapter is importable; the message
 # match keeps the same behaviour for a fake/adapter-less host in tests.
 _NO_DEFAULT_MODEL_EXC = getattr(host_llm, "NoDefaultModel", None) if host_llm else None
 _NO_DEFAULT_MODEL_TEXT = "no default LLM client"
+
+# Decision-log rotation: one previous generation beyond the size cap (P2).
+_JSONL_MAX_BYTES = 2 * 1024 * 1024
+_JSONL_LOCK = threading.Lock()
 
 
 def _is_no_default_model(exc: BaseException) -> bool:
@@ -214,22 +220,11 @@ TEXT_ONLY_REMINDER = (
     "请在同一次回复里调用 play，短话可以和工具调用写在一起。"
 )
 
-# 这些错误表示「本手已经不属于当前回合」，继续纠错/换模型/补 bot 都无意义。
-_STALE_ERROR_MARKERS = (
-    "局面已经变化",
-    "现在还没轮到你",
-    "这手已经过期",
-    "对局已经结束",
-    "没有这个座位",
-)
-
-
+# The room layer's canonical stale/gone classification
+# (room.is_stale_move_error) replaces this module's own substring list; a
+# thin wrapper keeps the old internal call sites readable.
 def _is_stale_error(error: str) -> bool:
-    text = str(error or "")
-    if any(marker in text for marker in _STALE_ERROR_MARKERS):
-        return True
-    # 座位归属错误（不同模式文案可能引用不同显示名，不写死具体人设名）。
-    return "这不是" in text and "座位" in text
+    return is_stale_move_error(error)
 
 
 @dataclass
@@ -248,18 +243,18 @@ class _RunState:
 
 @dataclass
 class _Snapshot:
-    """LLM 调用前的锁内快照（锁外只读使用）。"""
+    """Pre-LLM snapshot taken under the lock (read-only outside it).
+
+    Only fields that are actually read survive; version/plan_text/seat_label
+    and friends were filled but never consumed and were dropped in the
+    review cleanup (the decision log consumes plan_seq/board_hash/seat).
+    """
 
     match: Any
     active: bool
     move_count: int
-    version: int
-    plan: dict[str, Any] | None = None
-    plan_text: str = ""
     plan_seq: int = 0
-    plan_review: bool = False
     board_hash: str = ""
-    seat_label: str = ""
     seat: int = 0
 
 
@@ -305,13 +300,6 @@ def _active_plan(match: Any, seat: int) -> tuple[dict[str, Any] | None, str, int
     except (TypeError, ValueError):
         seq = 0
     return plan, text, seq, bool(plan.get("review"))
-
-
-def _seat_labels(match: Any) -> list[str]:
-    try:
-        return list(games.get(match.kind).seat_labels(match.state) or [])
-    except KeyError:
-        return []
 
 
 def _seat_name(match: Any, seat: int) -> str:
@@ -405,38 +393,15 @@ def _history_rounds(cfg: Any) -> int:
 def _normalize_tool_calls(
     raw: Any, round_idx: int
 ) -> list[dict[str, Any]]:
-    """把流末 tool_calls 归一为 OpenAI 标准声明，保留完整 id/args。"""
-    if not isinstance(raw, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict):
-            continue
-        function = item.get("function")
-        if not isinstance(function, dict):
-            function = {}
-        name = str(function.get("name") or "")
-        arguments = function.get("arguments")
-        if arguments is None:
-            arguments = ""
-        elif not isinstance(arguments, str):
-            try:
-                arguments = json.dumps(arguments, ensure_ascii=False)
-            except (TypeError, ValueError):
-                arguments = str(arguments)
-        call_id = str(item.get("id") or "") or f"call_{round_idx}_{index}"
-        if not name:
-            # 空工具名也归一为合法占位名，执行层会给出可读的未知工具错误，
-            # 同时避免把空 name 的 assistant 消息回传给提供方。
-            name = "unknown_tool"
-        out.append(
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {"name": name, "arguments": str(arguments)},
-            }
-        )
-    return out
+    """Normalize the stream tail's tool_calls into OpenAI declarations
+    (single implementation in agent_history).
+
+    Shared with history sanitization via ``agent_history.normalize_tool_calls``;
+    this side synthesizes ``call_<round>_<index>`` for missing ids so the
+    executor can report unknown tools readably and an assistant message with
+    an empty name is never replayed to the provider.
+    """
+    return normalize_tool_calls(raw, id_factory=lambda index: f"call_{round_idx}_{index}")
 
 
 def _clip_tool_calls(
@@ -482,7 +447,16 @@ class GameAgent:
         self._prune_inactive_history(room)
         cfg = self._plugin.settings
         started = time.monotonic()
-        deadline = started + float(cfg.ai_timeout)
+        # ai_timeout is the only critical config read without a fallback: a
+        # hand-set null/broken value falls back to the default budget instead
+        # of crashing the whole play() entry with a TypeError (P2).
+        try:
+            timeout_s = float(cfg.ai_timeout)
+        except (TypeError, ValueError, AttributeError):
+            timeout_s = DEFAULT_AI_TIMEOUT_S
+        if not timeout_s > 0:
+            timeout_s = DEFAULT_AI_TIMEOUT_S
+        deadline = started + timeout_s
         snap = await self._snapshot(room, seat)
         if not snap.active:
             return
@@ -815,9 +789,9 @@ class GameAgent:
                             getattr(
                                 getattr(self._plugin, "settings", None),
                                 "max_say_len",
-                                280,
+                                DEFAULT_MAX_SAY_LEN,
                             )
-                            or 280
+                            or DEFAULT_MAX_SAY_LEN
                         ),
                     )
                     match, error = await room.apply_ai_move(
@@ -874,10 +848,12 @@ class GameAgent:
             logger.warning("game_agent 历史写入失败: %s seat %s", match_id, seat, exc_info=True)
 
     def _prune_inactive_history(self, room: Any) -> None:
-        """回收不在 active_rooms 的历史；拿不到管理器时静默跳过。
+        """Recycle history for matches no longer in active_rooms; skip
+        silently when no manager is reachable.
 
-        ``plugin.rooms`` 在插件 setup 前读取会抛 RuntimeError，测试假插件
-        也可能没有该属性——都按「无可回收信息」处理，不阻断走子。
+        KiraAI's ``plugin.rooms`` is a property (returns None before start),
+        and test-fake plugins may lack the attribute — both count as
+        "nothing to recycle" and never block the move.
         """
         try:
             manager = getattr(self._plugin, "rooms", None)
@@ -932,20 +908,24 @@ class GameAgent:
         return view, match, True
 
     async def _module_media(self, match: Any, seat: int) -> Any | None:
-        """可选视觉扩展点：本宿主对局无图片输入，恒返回 ``None``。
+        """Optional vision extension point: no image input in this host, so
+        always ``None``.
 
-        保留钩子位置（原 nori 会调用模块 ``agent_media``），将来接回图片
-        输入时只需在这里返回 media 对象并让 ``host.llm`` 支持多模态。
+        Note the call site hard-codes ``media=None`` into ``host.llm`` (the
+        host request body does not support image input today), so returning
+        a non-None value here would have no effect right now; re-enabling
+        images means changing both the call site and ``host.llm``.
         """
         return None
 
     async def _latest_user_message(
         self, current_view: str, media: Any | None
     ) -> dict[str, Any]:
-        """把本手最新局面组装成 history 之后的 user 消息。
+        """Assemble the latest-position user message placed after history.
 
-        媒体已下线：``media`` 非空时也只发送文本局面，绝不把图片 URL 当
-        纯文本混进 prompt。
+        Media is retired: the ``media`` parameter is kept for signature
+        compatibility only and its content is ignored — an image URL is
+        never mixed into the prompt as plain text.
         """
         return {"role": "user", "content": current_view}
 
@@ -1070,19 +1050,9 @@ class GameAgent:
                 started=started,
             )
             return
-        module = games.get(latest["match"].kind)
-        if type(module).bot is GameModule.bot:
-            await self._log(
-                snap,
-                source="none",
-                move="",
-                model=model,
-                fallback="no_bot",
-                retries=retries,
-                started=started,
-            )
-            return
-        move = module.bot(latest["match"].state, seat)
+        # The engine's canonical move entry (keeps level-based difficulty
+        # perturbation); no-bot and empty move share the no_bot fallback.
+        move = bot_move(latest["match"], seat)
         if not move:
             await self._log(
                 snap,
@@ -1178,17 +1148,13 @@ class GameAgent:
             await asyncio.sleep(remaining)
 
     def _bot_delay_s(self) -> float:
-        """规则 bot 出手前的拟人化延迟（秒），与房间层同口径。
+        """Human-like delay (seconds) before the rule-bot fill.
 
-        读插件配置 ``bot_move_delay_min_ms`` / ``bot_move_delay_max_ms``；
-        缺席或非法时退回 ``BOT_DELAY_S``（1-2 秒）。
+        Shares the room layer's parser (``room.sample_bot_delay_s``): an
+        explicit ``0/0`` disables the pause, ``hi<lo`` clamps to a fixed lo;
+        a config object without the keys falls back to 1-2s.
         """
-        cfg = self._plugin.settings
-        lo = max(0, int(getattr(cfg, "bot_move_delay_min_ms", 0) or 0))
-        hi = int(getattr(cfg, "bot_move_delay_max_ms", 0) or 0)
-        if lo <= 0 and hi <= 0:
-            return random.uniform(*BOT_DELAY_S)
-        return random.uniform(lo, max(lo, hi)) / 1000.0
+        return sample_bot_delay_s(self._plugin.settings)
 
     async def _wait_bot_pace(self, started: float) -> None:
         """规则 bot 兜底手：补足到拟人化延迟（已等够则不再额外等待）。"""
@@ -1199,19 +1165,13 @@ class GameAgent:
     async def _snapshot(self, room: Any, seat: int) -> _Snapshot:
         data = await room.ai_snapshot(seat)
         match = data["match"]
-        plan, text, seq, review = _active_plan(match, seat)
-        labels = _seat_labels(match)
+        _plan, _text, seq, _review = _active_plan(match, seat)
         return _Snapshot(
             match=match,
             active=bool(data["active"]),
             move_count=int(data["move_count"]),
-            version=int(data["version"]),
-            plan=plan,
-            plan_text=text,
             plan_seq=seq,
-            plan_review=review,
             board_hash=_board_hash(match.state),
-            seat_label=labels[seat] if 0 <= seat < len(labels) else "",
             seat=seat,
         )
 
@@ -1271,6 +1231,20 @@ class GameAgent:
 
 
 def _append_line(path: Path, line: str) -> None:
+    """Append one JSONL entry; rotate once past the size cap (bounded disk).
+
+    The lock serializes concurrent decision tasks (each awaiting
+    ``asyncio.to_thread``): without it two threads can race the stat/rotate
+    step and interleave a rotation mid-append.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
+    with _JSONL_LOCK:
+        try:
+            if path.exists() and path.stat().st_size > _JSONL_MAX_BYTES:
+                rotated = path.with_name(path.name + ".1")
+                with contextlib.suppress(OSError):
+                    path.replace(rotated)  # drop the previous .1
+        except OSError:
+            pass  # stat/rotate failures must never block the write
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)

@@ -3,8 +3,9 @@
 The ported nori modules read configuration through ``plugin.settings.<name>``.
 KiraAI stores plugin config as nested section dicts, so this module flattens
 those sections into an attribute namespace and fills every missing key with
-the nori default. Dead nori/System1-only keys were removed; anything left
-here is read somewhere in the plugin.
+the nori default. Dead nori/System1-only keys were removed; every remaining
+key is read somewhere in the plugin (the avatar upload path lives in
+``host/avatar.py``, keyed by the uploaded file — not by a config field).
 """
 
 from __future__ import annotations
@@ -22,15 +23,12 @@ DEFAULT_TABLE_TALK_PROMPT = """[System: 你现在正和 {opponent} 下{game}，�
 不用「本局/播报/解说/观众」这类旁白话术。
 {lane_hint}]"""
 
-# Defaults mirror nori_plugin_gamehub/config.py (GamehubConfig). System1 fields
-# stay for compatibility with the ported talk/judge code but are never used.
+# Defaults mirror the shipped schema.json; every key is consumed by the
+# plugin (talk tiers / judge mode / spectator / pacing / decision budget).
 DEFAULTS: dict[str, Any] = {
     # identity (KiraAI addition)
     "agent_name": "nori",
     "agent_persona": "调皮爱吐槽的猫娘，玩游戏时会认真+毒舌",
-    # optional local override for the game_agent avatar (upload lives in the
-    # plugin data dir; this field points at an extra local file)
-    "agent_avatar": "",
     # model & decision
     "ai_mode": "agent",
     "ai_models": [],

@@ -27,6 +27,9 @@
 
 import { normalizeMode, driverOf, getHostAgentName } from "./mode.js";
 
+/** Kind -> Chinese display name. The lobby (cards/title) and the match page share one
+ * copy so the previously triplicated literals cannot drift; a server-provided
+ * game_name wins when present (see normalizeActiveMatch). */
 export const GAME_NAMES = { gomoku: "五子棋", reversi: "黑白棋", doudizhu: "斗地主", chess: "国际象棋" };
 
 const SEAT_NAMES = ["黑方", "白方"];
@@ -77,8 +80,6 @@ export function normalizeActiveMatch(raw) {
   // 与后端 modes.normalize_mode_options 的推断一致。
   const fallbackDriver = practice ? driverOf(raw) : "";
   const lineup = txt(mo && mo.lineup).toLowerCase();
-  const noriRole = txt(mo && mo.nori_role).toLowerCase();
-  const coach = noriRole === "coach" || (practice && !lineup);
   const shownPlayers = players.map((p) => {
     if (p.human || p.named) return p;
     const driver = p.driver || fallbackDriver;
@@ -93,9 +94,7 @@ export function normalizeActiveMatch(raw) {
     gameName: txt(raw.game_name) || GAME_NAMES[kind] || kind || "对局",
     mode,
     practice,
-    coach,
     lineup,
-    noriRole: noriRole === "player" || noriRole === "coach" ? noriRole : "",
     players: shownPlayers,
     source: normalizeSource(raw.source),
     status: normalizeStatus(raw.status),
@@ -186,7 +185,7 @@ const NOTICE_STATUS_TEXT = {
   unavailable: "不可用",
 };
 
-export function noticeStatusText(status) {
+function noticeStatusText(status) {
   return NOTICE_STATUS_TEXT[status] || status;
 }
 

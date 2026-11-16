@@ -1,14 +1,17 @@
-/* agent-avatar.test.js — 对局页头像归属（纯逻辑，node:test 零依赖）。
+/* agent-avatar.test.js — match-page avatar URL and identity (pure logic, zero deps).
  *
- * 覆盖：
- * 1) 头像资源地址：插件自己的公共素材 ./assets/agent-avatar.png（KiraAI 不再
- *    引用外部插件页路由，也不出现文件系统路径）；该文件必须真实存在，且是
- *    web/assets/ 下唯一允许的角色图；
- * 2) 归属：只有「陪练局 + agent 驱动（进阶）」的非人类座位配进阶对手头像；
- *    简单规则 bot、人类座位、人设本人局一律不配；
- * 3) driver 容错：规范字段优先，旧对局缺 driver 时按难度回填（advanced=agent）。
+ * Covers:
+ * 1) The avatar asset URL is the plugin's own ./assets/agent-avatar.png (KiraAI no
+ *    longer references an external plugin-page route or filesystem paths); the file
+ *    must exist and is the only character image allowed under web/assets/;
+ * 2) Avatar URL resolution: only the default asset or the plugin's own agent-avatar
+ *    endpoint is accepted, dirty values fall back;
+ * 3) Driver tolerance: canonical fields win; legacy matches without driver fall back
+ *    to difficulty (advanced=agent).
+ * Which seat gets which avatar is decided by the seatIdentity branches in match.js
+ * (page side); here only the URL and driver resolution are locked down.
  *
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -22,7 +25,6 @@ import {
   getAgentAvatar,
   getHostAgentName,
   getPersonaName,
-  isAgentOpponent,
   personaNameText,
   personaText,
   resolveAgentAvatar,
@@ -69,36 +71,6 @@ test("界面共享状态：setAgentAvatar 归一化，getAgentAvatar 返回当�
   assert.equal(setAgentAvatar(undefined), "./assets/agent-avatar.png", "字段缺席回落默认");
 });
 
-test("归属：进阶陪练的对手（agent 驱动）才配进阶头像", () => {
-  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "搭档" }), true);
-  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "蕾依" }), true, "名字不参与判定，按模式/驱动");
-});
-
-test("简单规则 bot 绝不冒用进阶头像", () => {
-  assert.equal(isAgentOpponent(PRACTICE_EASY, { kind: "bot", name: "陪练" }), false);
-  assert.equal(isAgentOpponent(PRACTICE_EASY, { kind: "ai", name: "搭档" }), false, "驱动是 bot 即不配");
-  assert.equal(isAgentOpponent({ mode_options: { mode: "bot", difficulty: "easy" } }, { kind: "bot" }), false);
-});
-
-test("人设本人局 / 人类座位 / 缺数据一律不配进阶头像", () => {
-  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "汐祈（Seki）" }), false);
-  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "human", name: "阿空" }), false);
-  assert.equal(isAgentOpponent(null, { kind: "ai" }), false);
-  assert.equal(isAgentOpponent(PRACTICE_ADV, null), false);
-  assert.equal(isAgentOpponent({}, { kind: "ai" }), false, "旧对局无模式信息按人设本人局回填");
-});
-
-test("头像归属口径：只有 game_agent 座位（agent 驱动）用 agent-avatar；宿主主 agent 座位不用", () => {
-  // 宿主主 agent 的座位（turn 驱动 / nori 模式）不是 game_agent：不配头像。
-  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "汐祈（Seki）" }), false);
-  // 只有 agent 驱动的座位才配。
-  assert.equal(isAgentOpponent(PRACTICE_ADV, { kind: "ai", name: "蕾依" }), true);
-  // 名字/人设名不参与判定：宿主名不会让 turn 座位“变成”game_agent 座位。
-  setHostAgentName("汐祈（Seki）");
-  assert.equal(isAgentOpponent({ mode_options: { mode: "nori", driver: "turn" } }, { kind: "ai", name: "汐祈（Seki）" }), false);
-  setHostAgentName("");
-});
-
 test("人设名可配置：留空或 nori 渲染配置标识 nori（不做中文本地化），其它取值原样渲染", () => {
   assert.equal(personaNameText(""), "nori");
   assert.equal(personaNameText(null), "nori");
@@ -138,13 +110,10 @@ test("driverOf：mode 缺失但座位构成/驱动已写入的旧载荷，按后
   // 前端 modeOf 现按同一规则回填，driverOf 不再因 mode 空串直接放弃。
   const legacyAdvanced = { seats: [{ kind: "human" }, { kind: "bot" }], mode_options: { driver: "agent" } };
   assert.equal(driverOf(legacyAdvanced), "agent");
-  assert.equal(isAgentOpponent(legacyAdvanced, { kind: "ai", name: "搭档" }), true);
   // 纯 legacy bot 座位局（无任何选项行）：陪练语义补齐，缺驱动保守按规则 bot
   const legacyBot = { seats: [{ kind: "human" }, { kind: "bot" }] };
   assert.equal(driverOf(legacyBot), "bot");
-  assert.equal(isAgentOpponent(legacyBot, { kind: "bot" }), false, "规则 bot 不配进阶头像");
-  // ai 座位局按人设本人局口径：无陪练语义，不配进阶头像
+  // An ai-seat match reads as host-agent-appears mode: no practice semantics
   const legacyNori = { seats: [{ kind: "human" }, { kind: "ai" }] };
   assert.equal(driverOf(legacyNori), "");
-  assert.equal(isAgentOpponent(legacyNori, { kind: "ai", name: "蕾依" }), false);
 });

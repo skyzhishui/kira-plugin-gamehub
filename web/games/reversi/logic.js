@@ -15,11 +15,12 @@
  * 索引 = y * size + x，y=0 为最上一排；列 A-H 左→右，行号自下往上 1 起。
  */
 
-/** 与后端 engine/coords.py 的 COLUMNS 一致：跳过 I。8×8 只用到 A-H。 */
+/** Same alphabet as the backend engine/coords.py (starts at A, skips I; the backend
+ * has 19 columns A..T while this extends to Z as a superset). 8x8 only uses A-H. */
 export const COLUMNS = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
 export const SIZE = 8;
-export const STONE_NAMES = { 1: "黑", 2: "白" };
-export const STONE_WORDS = { 1: "黑方", 2: "白方" };
+const STONE_NAMES = { 1: "黑", 2: "白" };
+const STONE_WORDS = { 1: "黑方", 2: "白方" };
 
 export function normalizeSize(value) {
   const n = Math.floor(Number(value));
@@ -28,7 +29,7 @@ export function normalizeSize(value) {
 }
 
 /** 列字母（0 → A；8×8 只到 H）。 */
-export function columnName(x) {
+function columnName(x) {
   return COLUMNS[x] || "?";
 }
 

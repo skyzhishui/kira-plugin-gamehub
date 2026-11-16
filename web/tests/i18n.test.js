@@ -2,7 +2,7 @@
  *
  * 覆盖：宿主语言判定（默认 zh / language=en 为 en）、已知错误码双语映射、
  * 未知码回退 err.message、空错误回退通用文案。
- * 运行：node --test web/tests/
+ * Run: cd web && node --test
  */
 import test from "node:test";
 import assert from "node:assert/strict";

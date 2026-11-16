@@ -12,8 +12,8 @@
 
 /* ---------------- 牌面 ---------------- */
 
-export const SUIT_SYMBOLS = { S: "♠", H: "♥", C: "♣", D: "♦" };
-export const SUIT_NAMES = { S: "黑桃", H: "红桃", C: "梅花", D: "方块" };
+const SUIT_SYMBOLS = { S: "♠", H: "♥", C: "♣", D: "♦" };
+const SUIT_NAMES = { S: "黑桃", H: "红桃", C: "梅花", D: "方块" };
 const SUIT_ORDER = { S: 0, H: 1, C: 2, D: 3 };
 const RANK_ORDER = { 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, J: 11, Q: 12, K: 13, A: 14, 2: 15, BJ: 16, RJ: 17 };
 const RANK_TEXT = { BJ: "小王", RJ: "大王" };
