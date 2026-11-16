@@ -23,6 +23,33 @@ def _schema() -> dict:
     return json.loads((_PLUGIN_ROOT / "schema.json").read_text(encoding="utf-8"))
 
 
+def test_game_agent_reasoning_effort_schema_matches_defaults():
+    """The effort selector offers every level the host forwards to providers."""
+    from host.settings import DEFAULTS
+
+    field = _schema()["section_ai"]["fields"]["game_agent_reasoning_effort"]
+    assert field["default"] == "none"
+    assert field["options"] == ["none", "low", "medium", "high"]
+    assert DEFAULTS["game_agent_reasoning_effort"] == field["default"]
+    assert "must support" in field["hint"]
+    assert field["locales"]["zh"]["name"] == "对弈思考强度"
+
+
+def test_notice_main_model_schema_matches_defaults():
+    """The notice-turn model is a single LLM dropdown; empty = host default."""
+    from host.settings import DEFAULTS
+
+    field = _schema()["section_ai"]["fields"]["notice_main_model"]
+    assert field["type"] == "model_select"
+    assert field["model_type"] == "llm"
+    assert field["default"] == ""
+    assert DEFAULTS["notice_main_model"] == field["default"]
+    assert "host default LLM" in field["hint"]
+    zh = field["locales"]["zh"]
+    assert zh["name"] == "通知回合模型"
+    assert "留空=核心主 LLM" in zh["hint"]
+
+
 def test_ai_models_hint_matches_the_llm_fallback():
     """P1-11: empty ``ai_models`` means the host default LLM, not bot-only."""
     hint = _schema()["section_ai"]["fields"]["ai_models"]

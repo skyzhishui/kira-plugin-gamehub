@@ -480,6 +480,7 @@ class GameAgent:
         retries = 0
         last_reason = "no_model"
         used_model = models[0]
+        reasoning_effort = getattr(cfg, "game_agent_reasoning_effort", "none")
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -495,7 +496,14 @@ class GameAgent:
                     used_model = model
                     try:
                         outcome = await asyncio.wait_for(
-                            self._run_model(room, seat, snap, model, started),
+                            self._run_model(
+                                room,
+                                seat,
+                                snap,
+                                model,
+                                started,
+                                reasoning_effort,
+                            ),
                             timeout=remaining,
                         )
                     except asyncio.TimeoutError:
@@ -579,6 +587,7 @@ class GameAgent:
         snap: _Snapshot,
         model: str,
         started: float,
+        reasoning_effort: str,
     ) -> _RunState:
         state = _RunState(model=model)
         if host_llm is None or getattr(self._plugin, "ctx", None) is None:
@@ -637,6 +646,7 @@ class GameAgent:
                     extra_messages=extra_messages,
                     stream=True,
                     model_list=[model],
+                    reasoning_effort=reasoning_effort,
                 ):
                     if isinstance(event, str):
                         if event:

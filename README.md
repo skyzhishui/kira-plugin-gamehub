@@ -61,6 +61,14 @@ The most relevant ones:
 - `agent_name` / `agent_persona` — who the game agent is.
 - `ai_models` — ordered LLM failover list (`provider:model_id`); empty = the
   host default LLM.
+- `notice_main_model` — LLM for the host agent's gamehub notice-driven action
+  turns (`provider:model_id`); empty = the host default LLM. Only batches made
+  entirely of this plugin's registered turn notices are routed, so normal chat
+  and other plugins' notices keep their own model. Separate from `ai_models`
+  (that list drives `game_agent` seats, not the host agent).
+- `game_agent_reasoning_effort` — `none` (default) / `low` / `medium` / `high`;
+  forwarded to the selected model, which must support that level (GLM requires
+  at least `low`). Only affects game_agent, not the main AI's chat replies.
 - `ai_mode` — `agent` (LLM) or `bot` (rules only).
 - `notice_target_session_id` — where table talk and turn notices are delivered.
 

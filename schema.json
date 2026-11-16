@@ -93,6 +93,37 @@
           }
         }
       },
+      "game_agent_reasoning_effort": {
+        "type": "string",
+        "name": "Game Agent Reasoning Effort",
+        "default": "none",
+        "options": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ],
+        "hint": "Reasoning effort for game_agent calls: none (default), low, medium, or high. The selected model must support the level; GLM requires at least low. Does not affect the main AI's chat replies.",
+        "locales": {
+          "zh": {
+            "name": "对弈思考强度",
+            "hint": "game_agent 调用模型时传入的 reasoning_effort：none（默认）、low、medium、high。所选模型必须支持该档位；GLM 最低需选 low。不影响主 AI 的聊天回复。"
+          }
+        }
+      },
+      "notice_main_model": {
+        "type": "model_select",
+        "name": "Notice Turn Model",
+        "model_type": "llm",
+        "default": "",
+        "hint": "LLM for the main AI's gamehub notice-driven action turns. Empty = the host default LLM (current behaviour). Only batches made entirely of this plugin's registered turn notices are routed; normal chat, other plugins' notices and start/end notices keep their own model. Unlike ai_models (game_agent seats), this is the host agent's own turn.",
+        "locales": {
+          "zh": {
+            "name": "通知回合模型",
+            "hint": "主 AI 响应 gamehub 对局通知触发的行动回合所使用的 LLM。留空=核心主 LLM（行为与现状一致）。只作用于整批都由本插件已登记的通知组成的批次；正常聊天、其他插件的通知以及开局/终局通知仍走原选模。与 ai_models（game_agent 座位模型）互不影响，这里选的是宿主 AI 本人的回合。"
+          }
+        }
+      },
       "ai_max_concurrency": {
         "type": "integer",
         "name": "Max Concurrency",

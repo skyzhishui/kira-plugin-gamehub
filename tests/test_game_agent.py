@@ -196,6 +196,7 @@ class FakeRouter:
         extra_messages: Any = None,
         stream: bool = True,
         model_list: Any = None,
+        reasoning_effort: str = "none",
     ):
         if self.no_default and not any(str(m).strip() for m in (model_list or [])):
             # Mirrors host.llm._clients_for when no default client exists.
@@ -209,6 +210,7 @@ class FakeRouter:
                 "extra_messages": list(extra_messages or []),
                 "model_list": list(model_list or []),
                 "stream": stream,
+                "reasoning_effort": reasoning_effort,
             }
         )
         step = self.script.pop(0) if self.script else {"type": "text", "text": ""}
@@ -2120,16 +2122,20 @@ class _FakeLLMClient:
         self.response = response
         self.chat_error = chat_error
         self.requests: list[Any] = []
+        # Provider kwargs forwarded by host.llm (e.g. reasoning_effort).
+        self.request_kwargs: list[dict[str, Any]] = []
 
-    async def chat_stream(self, request):
+    async def chat_stream(self, request, **kwargs):
         self.requests.append(request)
+        self.request_kwargs.append(dict(kwargs))
         if self.stream_error is not None:
             raise self.stream_error
         for chunk in self.chunks:
             yield chunk
 
-    async def chat(self, request):
+    async def chat(self, request, **kwargs):
         self.requests.append(request)
+        self.request_kwargs.append(dict(kwargs))
         if self.chat_error is not None:
             raise self.chat_error
         return self.response
@@ -2324,6 +2330,68 @@ async def test_host_llm_skips_unknown_models_and_ignores_media() -> None:
 
     assert events[0] == {"type": "text", "delta": "x"}
     assert len(good.requests) == 1
+
+
+# ----------------------------------------------------------------------
+#  reasoning_effort plumbing (game_agent -> host.llm -> provider)
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high"])
+async def test_host_llm_forwards_reasoning_effort_to_stream_client(effort) -> None:
+    client = _FakeLLMClient([_chunk(text="x", final=True, finish="stop")])
+    plugin = SimpleNamespace(ctx=_fake_ctx({"p:m": client}))
+
+    await _collect(
+        _REAL_RUN(
+            plugin,
+            system_prompt="SYS",
+            user_prompt="INIT",
+            model_list=["p:m"],
+            reasoning_effort=effort,
+        )
+    )
+
+    assert client.request_kwargs == [{"reasoning_effort": effort}]
+
+
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high"])
+async def test_host_llm_forwards_reasoning_effort_to_chat_fallback(effort) -> None:
+    response = SimpleNamespace(text_response="ok", reasoning_content="", tool_calls=[])
+    client = _FakeLLMClient(stream_error=RuntimeError("no stream"), response=response)
+    plugin = SimpleNamespace(ctx=_fake_ctx({"p:m": client}))
+
+    events = await _collect(
+        _REAL_RUN(
+            plugin,
+            system_prompt="SYS",
+            user_prompt="INIT",
+            model_list=["p:m"],
+            reasoning_effort=effort,
+        )
+    )
+
+    assert events[0] == {"type": "text", "delta": "ok"}
+    # The same effort must survive the streaming -> chat fallback.
+    assert [kw["reasoning_effort"] for kw in client.request_kwargs] == [effort, effort]
+
+
+async def test_game_agent_passes_default_reasoning_effort_none(tmp_path) -> None:
+    router = FakeRouter([{"type": "tool", "move": "J9"}])
+    _, agent, _manager, room = await _setup(tmp_path, router, _cfg())
+
+    await agent.run(room, 1)
+
+    assert router.calls[0]["reasoning_effort"] == "none"
+
+
+async def test_game_agent_passes_configured_reasoning_effort(tmp_path) -> None:
+    router = FakeRouter([{"type": "tool", "move": "J9"}])
+    _, agent, _manager, room = await _setup(
+        tmp_path, router, _cfg(game_agent_reasoning_effort="high")
+    )
+
+    await agent.run(room, 1)
+
+    assert router.calls[0]["reasoning_effort"] == "high"
 
 
 # ----------------------------------------------------------------------
