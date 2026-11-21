@@ -407,7 +407,7 @@ async def test_mixed_match_batch_is_not_mirrored(world):
         for room in (a, b):
             rows = await world.store.chat_recent(20, match_id=room.match.id)
             assert all(r["role"] != "agent" for r in rows)
-        assert all(f.get("role") != "agent" for f in ws_a.frames + ws_b.frames)
+        assert all(f.get("type") != "agent_message" for f in ws_a.frames + ws_b.frames)
     finally:
         _unsubscribe(a.match.id, ws_a)
         _unsubscribe(b.match.id, ws_b)
