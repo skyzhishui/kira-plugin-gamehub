@@ -459,8 +459,7 @@ class GamehubPlugin(BasePlugin):
         runtime = self.runtime
         if runtime is None:
             return
-        text = runtime._chain_text(action)
-        await runtime.record_agent_line(GAME_SID, text, match_id=match_id)
+        await runtime.record_window_reply(action, match_id=match_id)
 
     @on.step_result(priority=Priority.LOW)
     async def note_turn_progress(self, event, step_result=None, *args, **kwargs):

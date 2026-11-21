@@ -84,9 +84,9 @@ trigger itself:
 - Room-scoped triggers into the shared session carry their match in
   `KiraIMMessage.extra["match_id"]`:
   - player lines from `GamehubApi.chat_send` (`host/group_chat.publish_chat`,
-    `extra.gamehub_role = "player"`). Omitting `match_id` selects the current
-    active page match; without one the request is rejected. Finished rooms
-    remain writable by explicit id;
+    `extra.gamehub_role = "player"`). The request must include `match_id`;
+    the server never guesses the room from another active page match.
+    Finished rooms remain writable by explicit id;
   - notices for a match (`host/notices.send_notice(..., match_id=...)` builds the
     event with `host/group_chat.build_notice_event`, so the match rides in
     `extra`). Notices for other sessions keep the stock `ctx.publish_notice`

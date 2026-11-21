@@ -718,13 +718,9 @@ class GamehubApi:
         from .group_chat import publish_chat
 
         match_id = str((body or {}).get("match_id") or "").strip()
-        if match_id:
-            await self._room(match_id)
-        else:
-            room = self._find_page_room()
-            if room is None:
-                raise _fail("请指定对局后再发送消息", 400, code="match_required")
-            match_id = str(room.match.id)
+        if not match_id:
+            raise _fail("请指定对局后再发送消息", 400, code="match_required")
+        await self._room(match_id)
         try:
             await publish_chat(self._plugin, PAGE_ACTOR, sender, text, role="player", match_id=match_id)
         except Exception as exc:

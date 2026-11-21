@@ -381,6 +381,10 @@ class GamehubRuntime:
             **({"id": scoped["id"], "ts": scoped["ts"]} if scoped else {}),
         })
 
+    async def record_window_reply(self, chain: Any, *, match_id: str) -> None:
+        """Mirror the text of an attributed delivery from the game session."""
+        await self.record_agent_line(GAME_SID, self._chain_text(chain), match_id=match_id)
+
     @staticmethod
     def _chain_text(chain: Any) -> str:
         elements = getattr(chain, "message_list", None)

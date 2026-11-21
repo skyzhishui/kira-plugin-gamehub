@@ -1081,11 +1081,12 @@ async def test_games_payload_carries_the_host_name(tmp_path):
 async def test_chat_send_publishes_and_records_the_player_line(tmp_path, monkeypatch):
     plugin = make_plugin(tmp_path)
     api = GamehubApi(plugin)
+    match_id = (await data_of(api.create_match({"kind": "gomoku"})))["match"]["id"]
     missing = await error_of(api.chat_send({"text": "在吗"}), 400)
     assert missing.code == "match_required"
-    match_id = (await data_of(api.create_match({"kind": "gomoku"})))["match"]["id"]
+    assert not getattr(plugin.ctx, "chat_published", [])
 
-    sent = await data_of(api.chat_send({"text": "这把我该怎么走？"}))
+    sent = await data_of(api.chat_send({"text": "这把我该怎么走？", "match_id": match_id}))
     message = sent["message"]
     assert message["role"] == "player"
     assert message["text"] == "这把我该怎么走？"
@@ -1110,12 +1111,12 @@ async def test_chat_send_validates_paces_and_caps_length(tmp_path):
     (await error_of(api.chat_send({"text": "字" * 501}), 400)).code == "text_too_long"
 
     # The 500-char boundary is accepted at full length (no silent trim).
-    await data_of(api.create_match({"kind": "gomoku"}))
-    boundary = await data_of(api.chat_send({"text": "字" * 500}))
+    match_id = (await data_of(api.create_match({"kind": "gomoku"})))["match"]["id"]
+    boundary = await data_of(api.chat_send({"text": "字" * 500, "match_id": match_id}))
     assert len(boundary["message"]["text"]) == 500
 
     # Pacing: the next line inside the window is rate-limited.
-    paced = await error_of(api.chat_send({"text": "又来了"}), 429)
+    paced = await error_of(api.chat_send({"text": "又来了", "match_id": match_id}), 429)
     assert paced.code == "rate_limited"
     assert not plugin.ctx.published or len(plugin.ctx.published) == 1
 
@@ -1131,14 +1132,14 @@ async def test_chat_disabled_and_undeliverable(tmp_path, monkeypatch):
     assert history["enabled"] is False
 
     plugin.settings.page_chat_enabled = True
-    await data_of(api.create_match({"kind": "gomoku"}))
+    match_id = (await data_of(api.create_match({"kind": "gomoku"})))["match"]["id"]
     import host.group_chat as chat_module
 
     async def failing_send(*args, **kwargs):
         raise RuntimeError("unavailable")
 
     monkeypatch.setattr(chat_module, "publish_chat", failing_send)
-    unreachable = await error_of(api.chat_send({"text": "喂"}), 503)
+    unreachable = await error_of(api.chat_send({"text": "喂", "match_id": match_id}), 503)
     assert unreachable.code == "not_ready"
 
 
