@@ -133,7 +133,9 @@ _SNAPSHOT_UNAVAILABLE = (
 )
 
 
-def build_game_state_context(plugin: Any, session_id: str) -> str:
+def build_game_state_context(
+    plugin: Any, session_id: str, match_id: str | None = None
+) -> str:
     """Build the board context block for a session; "" when nothing matches.
 
     Pure reads (no await); called by ``host/prompt.py`` on every request. The
@@ -142,11 +144,20 @@ def build_game_state_context(plugin: Any, session_id: str) -> str:
     match holding a live turn grant whose viewer seat and action requirements
     it also carries. Short-lived stage events (start/end) are appended so an
     ended match stays visible without any active room.
+
+    ``match_id`` (shared game session) scopes the whole block to that match:
+    only its room, its grant and its own stage events. An empty scope yields
+    no board and no events — never a session-wide fallback that could show a
+    sibling match. ``None`` keeps the session-wide behaviour for external
+    targets.
     """
     sid = str(session_id or "").strip()
     if not sid:
         return ""
-    grant = _active_grant(plugin, sid)
+    if match_id is not None and not str(match_id or "").strip():
+        return ""
+    scope = None if match_id is None else str(match_id).strip()
+    grant = _active_grant(plugin, sid, scope)
     grant_match_id = str(getattr(grant, "match_id", "") or "")
     matched: list[Any] = []
     for room in _active_rooms(plugin):
@@ -155,6 +166,8 @@ def build_game_state_context(plugin: Any, session_id: str) -> str:
                 continue
             match = getattr(room, "match", None)
             if match is None:
+                continue
+            if scope is not None and str(getattr(match, "id", "") or "") != scope:
                 continue
             # Role-aware: opponent matches need an AI seat; teammate matches
             # (bot-only S3/S4) stand with the human and are injected too.
@@ -169,7 +182,7 @@ def build_game_state_context(plugin: Any, session_id: str) -> str:
         except Exception:
             logger.debug("gamehub context: skipping broken room", exc_info=True)
 
-    events = _stage_events_section(plugin, sid)
+    events = _stage_events_section(plugin, sid, scope)
     if not matched:
         return events
 
@@ -267,12 +280,23 @@ def _grant_for_match(grant: Any, grant_match_id: str, match: Any) -> Any:
     return grant
 
 
-def _active_grant(plugin: Any, sid: str) -> Any:
+def _active_grant(plugin: Any, sid: str, match_id: str | None = None) -> Any:
     """The live turn grant announced to ``sid`` (viewer-seat authority).
 
-    Tolerates test plugins without a director: any failure reads as no grant.
+    ``match_id`` (shared session) selects that match's grant only, through the
+    director's match-scoped lookup. Tolerates test plugins without a director:
+    any failure reads as no grant.
     """
     director = getattr(plugin, "_director", None)
+    if match_id is not None:
+        scoped = getattr(director, "active_grant_for_match", None)
+        if not callable(scoped):
+            return None
+        try:
+            return scoped(sid, match_id)
+        except Exception:
+            logger.debug("gamehub context: active_grant_for_match failed", exc_info=True)
+            return None
     getter = getattr(director, "active_grant_for", None)
     if not callable(getter):
         return None
@@ -335,11 +359,12 @@ def note_stage_event(
         logger.debug("gamehub context: stage event record failed", exc_info=True)
 
 
-def _stage_events_section(plugin: Any, sid: str) -> str:
+def _stage_events_section(plugin: Any, sid: str, match_id: str | None = None) -> str:
     """Fresh events for ``sid`` — one line per (match, version), oldest first.
 
-    Read-only (write-side cleanup keeps the map bounded); "" when nothing is
-    fresh for this session.
+    ``match_id`` keeps only that match's events (shared session); ``None``
+    keeps every match on the session. Read-only (write-side cleanup keeps the
+    map bounded); "" when nothing is fresh for this session.
     """
     store = getattr(plugin, "_gamehub_stage_events", None)
     if not isinstance(store, dict):
@@ -349,8 +374,10 @@ def _stage_events_section(plugin: Any, sid: str) -> str:
         entries = sorted(
             (
                 (stamp, text)
-                for (key_sid, _match, _version), (stamp, text) in store.items()
-                if key_sid == sid and now - stamp < _STAGE_TTL_S
+                for (key_sid, key_match, _version), (stamp, text) in store.items()
+                if key_sid == sid
+                and (match_id is None or key_match == match_id)
+                and now - stamp < _STAGE_TTL_S
             ),
             key=lambda item: item[0],
         )

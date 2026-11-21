@@ -86,7 +86,7 @@ class _Runtime:
     def __init__(self) -> None:
         self.lines: list[tuple[str, str]] = []
 
-    async def record_agent_line(self, sid: str, text: str) -> None:
+    async def record_agent_line(self, sid: str, text: str, *, match_id: str = "") -> None:
         self.lines.append((sid, text))
 
 

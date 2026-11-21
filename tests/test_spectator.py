@@ -149,9 +149,12 @@ async def test_group_route_buffers_spectators_and_flushes_only_on_trigger(
 
     buffer = Buffer()
     flushed = []
-    async def flush(sid):
-        flushed.append(list(buffer.items))
-        buffer.items.clear()
+    async def flush(sid, filter_fn=None):
+        # Mirror the host: only events matching ``filter_fn`` drain.
+        keep = filter_fn or (lambda item: True)
+        drained = [item for item in buffer.items if keep(item)]
+        buffer.items[:] = [item for item in buffer.items if not keep(item)]
+        flushed.append(drained)
     plugin = SimpleNamespace(ctx=SimpleNamespace(get_buffer=lambda sid: buffer, flush_session_messages=flush))
     event = SimpleNamespace(
         session=GAME_SID, extra={"gamehub_role": role},
@@ -247,10 +250,12 @@ async def test_every_player_message_is_a_strong_signal_without_mention_or_notice
     buffer = Buffer()
     batches = []
 
-    async def flush(sid):
+    async def flush(sid, filter_fn=None):
         assert sid == GAME_SID
-        batches.append(list(buffer.items))
-        buffer.items.clear()
+        keep = filter_fn or (lambda item: True)
+        drained = [item for item in buffer.items if keep(item)]
+        buffer.items[:] = [item for item in buffer.items if not keep(item)]
+        batches.append(drained)
 
     plugin = SimpleNamespace(ctx=SimpleNamespace(
         get_buffer=lambda sid: buffer, flush_session_messages=flush,

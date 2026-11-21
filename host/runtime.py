@@ -337,47 +337,49 @@ class GamehubRuntime:
     # ------------------------------------------------------------------
 
     async def _on_outbound(self, sid: str, chain: Any) -> None:
-        """Forward one agent reply from the internal session to match pages."""
-        text = self._chain_text(chain)
-        await self.record_agent_line(sid, text)
+        """Adapter sink for the internal session: no window write here.
 
-    async def record_agent_line(self, sid: str, text: str) -> None:
-        """Write one agent line to the window read model + WS, no message pipeline.
+        The adapter cannot tell which match a reply belongs to, so the window
+        write is attributed by the ``ON_MESSAGE_SENT`` hook (see
+        ``main.record_window_reply``), which knows the trigger batch. The sink
+        stays installed as the adapter bridge and only logs at debug level.
+        """
+        logger.debug("gamehub: outbound reply on %s is attributed by its hook", sid)
 
-        The stop-on-move path (``AFTER_XML_PARSE`` event.stop) skips normal
-        reply delivery, so a move turn's table talk would never reach the
-        page chat window through ``_on_outbound``. This is the same write
-        without the pipeline: one sqlite row (id/ts keyed, so the page can
-        never duplicate it against a reconnect backfill) plus the
-        ``agent_message`` WS frame the window already ingests.
+    async def record_agent_line(self, sid: str, text: str, *, match_id: str = "") -> None:
+        """Write one agent line to a match's window read model + WS.
+
+        ``match_id`` is required: a line with no origin match is never written,
+        so an unscoped reply cannot reach another room's window. Lines from any
+        session other than ``GAME_SID`` are never mirrored into this page.
+
+        The frame carries the stored line's id/ts when available: the page keys
+        WS rows and reconnect backfills by the same id, so a refresh after a
+        reconnect can never duplicate a reply. Persistence failure is cosmetic;
+        the WS broadcast still goes out.
         """
         text = str(text or "").strip()
-        if not text:
+        target = str(match_id or "").strip()
+        if not text or sid != GAME_SID:
             return
-        if sid != GAME_SID:
+        if not target:
+            logger.debug("gamehub: agent line has no origin match (sid=%s); not mirrored", sid)
             return
-        # Record the reply for the match-page chat window read model (the
-        # player line is recorded by the POST /chat endpoint; this is the
-        # agent side). Cosmetic on failure: the WS broadcast still goes out.
-        # The frame carries the stored line's id/ts when available: the page
-        # keys WS rows and reconnect backfills by the same id, so a refresh
-        # after a reconnect can never duplicate a reply.
-        for room in self.rooms.active_rooms() if self.rooms is not None else []:
-            scoped = None
-            if self.store is not None:
-                try:
-                    scoped = await self.store.chat_append(
-                        "agent", self.plugin.host_agent_name or "AI", text,
-                        match_id=room.match.id,
-                    )
-                except Exception:
-                    logger.debug("gamehub: chat record failed", exc_info=True)
-            await ws_hub.broadcast(room.match.id, {
-                "type": "agent_message",
-                "sid": sid,
-                "text": text,
-                **({"id": scoped["id"], "ts": scoped["ts"]} if scoped else {}),
-            })
+        scoped = None
+        if self.store is not None:
+            try:
+                scoped = await self.store.chat_append(
+                    "agent", self.plugin.host_agent_name or "AI", text,
+                    match_id=target,
+                )
+            except Exception:
+                logger.debug("gamehub: chat record failed", exc_info=True)
+        await ws_hub.broadcast(target, {
+            "type": "agent_message",
+            "sid": sid,
+            "text": text,
+            **({"id": scoped["id"], "ts": scoped["ts"]} if scoped else {}),
+        })
 
     @staticmethod
     def _chain_text(chain: Any) -> str:

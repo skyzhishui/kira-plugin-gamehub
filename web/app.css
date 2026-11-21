@@ -1745,6 +1745,16 @@ a.go:hover::after { transform: translateX(2px); }
   border-radius: 12px;
 }
 
+/* Non-blocking external_not_mirrored hint: the AI's proactive lines go to another
+ * session, which is informational only and never blocks input. The info colour
+ * keeps it distinct from the warning-coloured target diagnostic; layout is the
+ * same as the base rule above. */
+.stage > .chat-status.is-info { color: var(--ink-soft); }
+.stage > .chat-status.is-info::before {
+  background: var(--sky);
+  box-shadow: 0 0 6px rgba(93, 185, 245, 0.45);
+}
+
 /* 只读聊天提示条（chat_read_only：非 web 目标）：替换输入区原位展示 */
 .chat-readonly {
   flex: none;

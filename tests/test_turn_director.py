@@ -104,7 +104,7 @@ def _patch_notices(monkeypatch: pytest.MonkeyPatch):
     """Route ``director.send_notice`` through the harness recorder."""
     state: dict[str, Any] = {}
 
-    async def fake_send(plugin: Any, sid: str, text: str) -> bool:
+    async def fake_send(plugin: Any, sid: str, text: str, **kwargs) -> bool:
         recorder = getattr(plugin, "_recorder", None)
         if recorder is None:
             state.setdefault("plain", []).append((str(sid), str(text)))
@@ -1042,7 +1042,7 @@ async def test_failed_notice_delivery_still_fills_with_the_watchdog():
     # First delivery fails: the model never saw the notice.
     original = director_module.send_notice
 
-    async def failing(plugin, sid, text):
+    async def failing(plugin, sid, text, **kwargs):
         return False
 
     director_module.send_notice = failing
@@ -1334,7 +1334,7 @@ async def test_note_tag_rejected_only_counts_delivered_notices():
 
     original = director_module.send_notice
 
-    async def failing(plugin, sid, text):
+    async def failing(plugin, sid, text, **kwargs):
         return False
 
     director_module.send_notice = failing
@@ -1385,7 +1385,7 @@ async def test_finish_cancels_an_in_flight_notice_task():
     original = director_module.send_notice
     release = asyncio.Event()
 
-    async def slow_send(plugin, sid, text):
+    async def slow_send(plugin, sid, text, **kwargs):
         await release.wait()  # park mid-delivery
         return True
 

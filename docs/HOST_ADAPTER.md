@@ -25,7 +25,7 @@ kira-plugin-gamehub/
 │   ├── bridge.py           # outbound sink + match WS hub
 │   ├── session.py          # dedicated game session + adapter provisioning
 │   ├── store.py            # private SQLite persistence (aiosqlite)
-│   ├── notices.py          # publish_notice wrapper
+│   ├── notices.py          # notice publishing (match-scoped for the game session)
 │   ├── prompt.py           # @on.llm_request board-context injection
 │   ├── avatar.py           # game_agent avatar (bundled default + upload)
 │   ├── llm.py              # LLMRequest/tool_set adapter for game_agent
@@ -59,9 +59,14 @@ A dedicated session keeps game notices out of the user's real WebChat session.
 - Adapter registration resolves the calling module through the call stack, so it
   must stay in `main.py` (never in `host/`).
 - `terminate()` unregisters the adapter and stops it.
-- The adapter's `IMCapability.send_direct_message(user_id, chain)` forwards to
-  `host.bridge.emit_outbound(sid, chain)`; `receive_message` is unused (the plugin
-  injects inbound notices via `publish_notice`).
+- The adapter's `IMCapability.send_direct_message(user_id, chain)` /
+  `send_group_message` forwards to `host.bridge.emit_outbound(sid, chain)`;
+  `receive_message` is unused (the plugin injects inbound notices via
+  `send_notice`).
+- The outbound sink (`GamehubRuntime._on_outbound`) is kept as the adapter
+  bridge but **never writes a chat-window line**. The adapter cannot tell which
+  match a reply belongs to. Window attribution happens in the
+  `ON_MESSAGE_SENT` hook instead (see "Reply attribution" below).
 - `host/bridge.py`:
   ```python
   def set_outbound_sink(fn): ...
@@ -70,15 +75,85 @@ A dedicated session keeps game notices out of the user's real WebChat session.
   ws_hub = MatchWSHub()
   ```
 
+## Reply attribution and the match chat window
+
+The shared `gamehub:gm:room` session serves every match, so a reply cannot be
+attributed by session id or by "the active room". Attribution is carried by the
+trigger itself:
+
+- Room-scoped triggers into the shared session carry their match in
+  `KiraIMMessage.extra["match_id"]`:
+  - player lines from `GamehubApi.chat_send` (`host/group_chat.publish_chat`,
+    `extra.gamehub_role = "player"`). Omitting `match_id` selects the current
+    active page match; without one the request is rejected. Finished rooms
+    remain writable by explicit id;
+  - notices for a match (`host/notices.send_notice(..., match_id=...)` builds the
+    event with `host/group_chat.build_notice_event`, so the match rides in
+    `extra`). Notices for other sessions keep the stock `ctx.publish_notice`
+    path unchanged.
+- `POST /notice-test` accepts an optional `match_id` to diagnose that room's
+  effective target. Without an id it uses the active page match, if any. A
+  diagnostic with no room does not write to a match window.
+- Spectator context lines (`publish_agent_say`, `gamehub_role = "spectator"`)
+  never trigger a reply and never pick a target.
+- Routing (`host/group_chat.route_group_message`): the trigger flushes through
+  `ctx.flush_session_messages(GAME_SID, filter_fn=...)` with one owner per
+  batch:
+  - a scoped trigger drains only events with its own `match_id` (player lines,
+    notices, and that room's spectator context). Unscoped events never ride into
+    a match's batch, and other rooms' lines stay buffered;
+  - an unscoped trigger (a diagnostic or legacy notice) drains only unscoped
+    events. It never takes a scoped player or notice line of any room.
+- Match scope per hook (`host/prompt.py::hook_scope`, computed once from the
+  batch that triggered the hook):
+  - on `GAME_SID`, the scope is `trigger_match_id(batch)`. It must name one
+    match, and only that match's live grant is exposed, may submit, has its
+    run marks and silence clock updated, and contributes its board and stage
+    events to the request. An unscoped or mixed batch resolves to nothing: no
+    grant, no tools, no board, and no lifecycle updates for any match;
+  - on any other session (external notice targets, chat-origin seats), the
+    scope is `None` and the pre-existing session-wide lookups are kept
+    unchanged (`director.active_grant_for(sid)`, `tools_for(sid)`, session run
+    marks). Those notices carry no `match_id`, and the external turn play path
+    depends on it.
+  - **Known limitation (external sessions, not isolated):** when several
+    grants share one external notice target, the session-wide paths still pick
+    the first live grant (`tools_for` offers one grant's surface, and
+    `active_grant_for` returns the first match). Only that grant can be
+    nudged, and session run marks are shared. This pre-dates the GAME_SID
+    change and is intentionally not altered here; fixing it needs an explicit
+    per-notice match design for external targets.
+  - Only the game session carries a match id on its notices. External notices
+    are published through the stock `ctx.publish_notice` and do not convey a
+    `match_id`.
+- Delivery (`main.py::record_window_reply`, `@on.message_sent`): the hook runs
+  after each delivered text reply with `(batch_event, action, result)`.
+  `host/group_chat.trigger_match_id(batch)` returns the match only when every
+  trigger in the batch is scoped to the same match. Otherwise nothing is
+  written. A failed delivery (`result.ok` false) is never mirrored.
+- Explicit attribution: the turn-tag terminal move calls
+  `runtime.record_agent_line(sid, say, match_id=grant.match_id)` directly,
+  because the reply tail is skipped after `event.stop()`.
+- `runtime.record_agent_line(sid, text, *, match_id)` writes one
+  `role="agent"` row plus one `agent_message` WS frame to that match only. It
+  refuses an empty match id and any session other than `GAME_SID`. No
+  sole-room fallback, no broadcast to every active room, and no global
+  sid→match map exists.
+
 ## Notices
 
 ```python
 # host/notices.py
-async def send_notice(plugin, sid: str, text: str) -> bool
+async def send_notice(plugin, sid: str, text: str, *, match_id: str = "") -> bool
 ```
-Resolves the session and calls
-`ctx.publish_notice(session, MessageChain([Text(text)]), is_mentioned=True)`.
-A notice triggers the Game Hub group router → flush → full IM pipeline.
+Resolves the session and publishes a mentioned system notice. For the shared
+game session with a `match_id`, the event is built by
+`host/group_chat.build_notice_event` and carries `extra["match_id"]`, so the
+reply it triggers is attributed to that match (see "Reply attribution").
+Every other case calls
+`ctx.publish_notice(session, MessageChain([Text(text)]), is_mentioned=True)`
+unchanged. A notice triggers the Game Hub group router → per-match flush → full
+IM pipeline. Callers that know the match (`director`, `talk`) pass `match_id`.
 
 ### Notice body contract (short public event + context pointer)
 
@@ -113,8 +188,11 @@ speech guidance — all of that rides the ephemeral block (persist=False).
   `context.note_stage_event` before publishing — a flat bounded map with
   TTL eviction (no second state machine) — so the end-of-match context
   stays injectable even when the room has left the active set (no
-  `active_rooms` dependency) and sibling matches sharing a session never
-  mix. Short-term retry state (`TurnGrant.last_rejection`, the misplaced
+  `active_rooms` dependency). On `GAME_SID` the stage events, board and grant
+  of a request are filtered to the batch's match, so sibling matches never
+  mix there. On external sessions several matches sharing one target are not
+  isolated (see the known limitation under "Reply attribution"). Short-term
+  retry state (`TurnGrant.last_rejection`, the misplaced
   tag marker) is grant-scoped: per match by construction, cleared on a
   successful submission, bounded by the grant retention/prune.
 - Table talk / companion notices (`talk.py`): with the shipped-default
@@ -198,8 +276,8 @@ review/copy the old `gamehub:dm:admin` tool permission settings as appropriate;
 the old private-session history is retained, not deleted or silently migrated.
 
 The AI context is intentionally shared across matches. Spectator REST history is
-filtered by match id and never exposes previous matches' chat. AI group replies
-are visible in currently active room windows. Guests are trusted invitees, and
+filtered by match id and never exposes previous matches' chat. AI replies are
+written only to the window of the match they answer (see "Reply attribution"). Guests are trusted invitees, and
 invitation links can be forwarded; this is not an account or anti-Sybil system.
 
 ## Persistence
@@ -224,10 +302,13 @@ KiraAI has no `ctx.session_tools`; grants are request-scoped:
 - `tools_turn.py` (plugin root) defines the tag/tool pair whose `name` is
   `play_<match_id>` (root control tag, the move channel) / `state_<match_id>`
   (native read tool).
-- `director.py::TurnDirector.tools_for(sid)` returns the tool instances that must
-  be visible for the current request (empty when it is not the AI's turn).
-- `main.py`'s `@on.llm_request` handler calls
-  `req.tool_set.add(*director.tools_for(event.sid))` and registers
+- `director.py::TurnDirector.tools_for(sid, match_id=None)` returns the tool
+  instances that must be visible for the current request (empty when it is not
+  the AI's turn). With `match_id` (GAME_SID) only that match's grant is
+  considered, with no session fallback; without it the external session-wide
+  behaviour applies, including the external multi-grant limitation above.
+- `host/prompt.py::inject_into_request` computes the scope once per request and
+  calls `req.tool_set.add(*tools)` and registers
   `PlayTurnTag` on the per-request `tag_set`; the host re-derives
   `request.tools` from `request.tool_set` afterwards, so the tools reach the model.
 - Revocation = not adding them on the next request. The watchdog (90 s) still
