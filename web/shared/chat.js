@@ -31,9 +31,37 @@ export function saveIdentity({ name } = {}) {
 /** 固定中文提示（单源，测试断言用） */
 export const CHAT_READ_ONLY_HINT = "陪玩发言发往其他渠道，此处仅可查看";
 
+/** Fixed hint: this match's proactive AI lines are not mirrored here, while the
+ * page conversation keeps working (non-blocking). */
+export const CHAT_EXTERNAL_NOTICE_HINT =
+  "AI 的桌边发言会发到另一个会话，不在这里显示。你仍可在本页与 AI 聊天。";
+
 /** /ui-config → 游戏聊天是否只读。只认 chat_read_only === true。 */
 export function isChatReadOnly(cfg) {
   return !!(cfg && typeof cfg === "object" && cfg.chat_read_only === true);
+}
+
+/** /ui-config → whether this match's proactive AI lines go to another session
+ * (chat-origin match or an overridden notice target). Hint-only: it never
+ * feeds the writable decision, because player lines always publish into the
+ * page session. */
+export function isExternalNotMirrored(cfg) {
+  return !!(cfg && typeof cfg === "object" && cfg.external_not_mirrored === true);
+}
+
+/**
+ * Text for #chat-status: the target diagnostic error and the not-mirrored hint
+ * share one status line. Read-only yields an empty string so the dedicated
+ * #chat-readonly bar keeps that message; a lone error is shown verbatim. The
+ * "you can still talk here" wording is dropped when the page chat is disabled.
+ */
+export function chatStatusText({ readOnly = false, error = "", externalNotMirrored = false, chatEnabled = true } = {}) {
+  if (readOnly) return "";
+  const showExternal = externalNotMirrored === true && chatEnabled !== false;
+  const err = String(error == null ? "" : error).trim();
+  if (!err) return showExternal ? CHAT_EXTERNAL_NOTICE_HINT : "";
+  // Only normalise the separator when both sentences share the line.
+  return showExternal ? `${err.replace(/[。.！!?？；;]+$/u, "")}。${CHAT_EXTERNAL_NOTICE_HINT}` : err;
 }
 
 /** notice 目标诊断字段（notice_target_session_id / notice_target_platform /
@@ -48,7 +76,9 @@ export function noticeTargetFromConfig(cfg) {
     effectiveSession: t("effective_notice_target_session_id"),
     platform: t("notice_target_platform"),
     status: t("notice_target_status"),
-    error: t("notice_target_error"),
+    error: cfg.effective_notice_target_error == null
+      ? t("notice_target_error")
+      : t("effective_notice_target_error"),
   };
 }
 

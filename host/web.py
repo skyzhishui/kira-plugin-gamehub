@@ -366,6 +366,10 @@ class GamehubApi:
             "chat_enabled": bool(getattr(settings, "page_chat_enabled", True)),
             "chat_session": GAME_SID,
             "chat_user": PAGE_ACTOR,
+            # Never derived from the notice target: player lines are always
+            # published into ``GAME_SID``, so the page window stays writable
+            # even when the AI's proactive lines go elsewhere (non-blocking
+            # ``external_not_mirrored`` notice instead of a read-only state).
             "chat_read_only": False,
             "bubble_hold_s": float(getattr(settings, "page_bubble_hold_s", 3.0)),
             "talk_mode": talk_mode,
@@ -395,9 +399,13 @@ class GamehubApi:
             if room is not None:
                 options = dict(modes.options_of(room.match))
                 current = self._view(room, _seat_of_actor(room.match, PAGE_ACTOR))
+            effective = await self._effective_notice_target(room)
             return envelope(
                 {
                     **base,
+                    "effective_notice_target_session_id": effective["session_id"],
+                    "effective_notice_target_status": effective["status"],
+                    "effective_notice_target_error": effective["error"],
                     "match_id": "",
                     "current": current,
                     "match": current,
@@ -406,7 +414,7 @@ class GamehubApi:
                     "source": None,
                     "match_over": False,
                     "context_injectable": True,
-                    "external_not_mirrored": False,
+                    "external_not_mirrored": effective["external"],
                 }
             )
 
@@ -423,10 +431,14 @@ class GamehubApi:
                 logger.debug("gamehub: per-match talk tier lookup failed", exc_info=True)
         origin = self._match_origin(match)
         view = self._view(room, _seat_of_actor(match, PAGE_ACTOR))
+        effective = await self._effective_notice_target(room)
         return envelope(
             {
                 **base,
                 "talk_mode": talk_mode,
+                "effective_notice_target_session_id": effective["session_id"],
+                "effective_notice_target_status": effective["status"],
+                "effective_notice_target_error": effective["error"],
                 "match_id": match.id,
                 "current": view,
                 "match": view,
@@ -436,7 +448,7 @@ class GamehubApi:
                 "source": dict(origin),
                 "match_over": over,
                 "context_injectable": not over,
-                "external_not_mirrored": False,
+                "external_not_mirrored": effective["external"],
             }
         )
 
@@ -469,21 +481,17 @@ class GamehubApi:
         """
         return avatar_url(self._plugin)
 
-    async def _notice_target(self) -> tuple[str, str, str]:
-        """``(session_id, status, error)`` for the effective notice target.
+    async def _probe_session(self, sid: str) -> tuple[str, str]:
+        """``(status, error)`` for a session id; ``("", "")`` when usable.
 
-        Status is ``default`` (dedicated game session), ``override`` (plugin
-        ``notice_target_session_id``), ``invalid`` (override/session unusable)
-        or ``unknown`` (host context unavailable).
+        ``unknown`` means the host context is unavailable, ``invalid`` means the
+        session cannot be resolved.
         """
-        settings = self._settings
-        override = str(getattr(settings, "notice_target_session_id", "") or "").strip()
-        sid = override or GAME_SID
         ctx = getattr(self._plugin, "ctx", None)
         session_mgr = getattr(ctx, "session_mgr", None)
         resolver = getattr(session_mgr, "resolve_session", None)
         if not callable(resolver):
-            return sid, "unknown", "session manager unavailable"
+            return "unknown", "session manager unavailable"
         try:
             # ``SessionManager.resolve_session`` is async; awaiting the call is
             # mandatory (a bare call leaks a coroutine and reports every target
@@ -492,10 +500,60 @@ class GamehubApi:
             if inspect.isawaitable(session):
                 session = await session
             if session is None:
-                return sid, "invalid", f"会话不存在：{sid}"
+                return "invalid", f"会话不存在：{sid}"
+            adapter_name = getattr(session, "adapter_name", "")
+            get_adapter = getattr(getattr(ctx, "adapter_mgr", None), "get_adapter", None)
+            if adapter_name and callable(get_adapter) and get_adapter(adapter_name) is None:
+                return "invalid", f"通知目标的适配器不可用：{adapter_name}"
         except Exception as exc:  # noqa: BLE001 - diagnostics only
-            return sid, "invalid", f"会话解析失败：{exc}"
+            return "invalid", f"会话解析失败：{exc}"
+        return "", ""
+
+    async def _notice_target(self) -> tuple[str, str, str]:
+        """Configured ``(session_id, status, error)`` for the notice target.
+
+        Status is ``default`` (dedicated game session), ``override`` (plugin
+        ``notice_target_session_id``), ``invalid`` (override/session unusable)
+        or ``unknown`` (host context unavailable).
+        """
+        override = str(getattr(self._settings, "notice_target_session_id", "") or "").strip()
+        sid = override or GAME_SID
+        bad, error = await self._probe_session(sid)
+        if bad:
+            return sid, bad, error
         return sid, "override" if override else "default", ""
+
+    async def _effective_notice_target(self, room: Any | None) -> dict[str, Any]:
+        """Effective notice target for one match (or the page-level default).
+
+        ``room is None`` (no match context) reports the configured target. With
+        a room, the destination comes from the runtime sync resolver, so the
+        diagnostic matches where proactive lines actually go. ``external`` is
+        true only when the target is usable and is not the page session, so an
+        invalid/unknown target never promises an external send.
+        """
+        if room is None:
+            sid, status, error = await self._notice_target()
+        else:
+            sid = self._effective_notice_session(room)
+            override = str(getattr(self._settings, "notice_target_session_id", "") or "").strip()
+            bad, error = await self._probe_session(sid)
+            if bad:
+                status = bad
+            elif sid == GAME_SID:
+                status, error = "default", ""
+            elif sid == override:
+                status, error = "override", ""
+            else:
+                status, error = "chat", ""
+        usable = status not in ("invalid", "unknown")
+        return {
+            "session_id": sid,
+            "platform": platform_of_session_id(sid),
+            "status": status,
+            "error": error,
+            "external": bool(usable and sid != GAME_SID),
+        }
 
     def _match_origin(self, match: Any) -> dict[str, str]:
         """Chat-origin matches reply into their session; page matches use gamehub."""
@@ -514,19 +572,71 @@ class GamehubApi:
                 return {"kind": SOURCE_CHAT, "session_id": str(seat.session_id)}
         return {"kind": SOURCE_WEBUI, "session_id": ""}
 
-    async def notice_test(self) -> dict[str, Any]:
-        """Publish one synthetic notice into the effective notice target."""
-        sid, status, error = await self._notice_target()
+    def _effective_notice_session(self, room: Any | None) -> str:
+        """Session that receives this match's proactive AI lines.
+
+        ``room is None`` gives the configured destination (override or
+        ``GAME_SID``). With a room, the runtime's synchronous resolver
+        (``notice_target_session_sync``) is authoritative; when it is missing
+        or yields nothing, fall back to the local origin rule: chat-origin
+        matches answer in their own chat session, others use the configured
+        override or ``GAME_SID``.
+        """
+        override = str(
+            getattr(self._settings, "notice_target_session_id", "") or ""
+        ).strip()
+        if room is None:
+            return override or GAME_SID
+        helper = getattr(self._plugin, "notice_target_session_sync", None)
+        if callable(helper):
+            try:
+                value = helper(room)
+            except Exception:  # noqa: BLE001 - fall back to the local rule
+                logger.debug("gamehub: notice_target_session_sync failed", exc_info=True)
+                value = None
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        origin = self._match_origin(getattr(room, "match", None))
+        if str(origin.get("kind") or "") == SOURCE_CHAT:
+            source = str(origin.get("session_id") or "").strip()
+            if source:
+                return source
+        return override or GAME_SID
+
+    async def notice_test(self, body: Any = None) -> dict[str, Any]:
+        """Publish one synthetic notice into the effective notice target.
+
+        Optional body ``{"match_id": "..."}`` names the match whose effective
+        target is diagnosed (validated: unknown ids are 404). Without it, the
+        current page match (``PAGE_ACTOR``) is used when one is active; with
+        no room at all the notice is intentionally unscoped (no match guess).
+        The notice is attributed to a match only when its effective target is
+        the shared game session.
+        """
+        body = body if isinstance(body, dict) else {}
+        match_id = str(body.get("match_id") or "").strip()
+        room = None
+        if match_id:
+            room = await self._room(match_id)
+        else:
+            room = self._find_page_room()
+        target = await self._effective_notice_target(room)
+        status, error = target["status"], target["error"]
         if status in ("invalid", "unknown"):
             raise _fail(f"通知目标不可用：{error or status}", 503, code="not_ready")
-        sent = await send_notice(self._plugin, sid, NOTICE_TEST_TEXT)
+        sid = target["session_id"]
+        scoped_match = room.match.id if room is not None and sid == GAME_SID else ""
+        sent = await send_notice(
+            self._plugin, sid, NOTICE_TEST_TEXT, match_id=scoped_match
+        )
         if not sent:
             raise _fail("notice 投递失败（会话或适配器不可用）", 503, code="not_ready")
         return envelope(
             {
                 "session_id": sid,
-                "platform": platform_of_session_id(sid),
+                "platform": target["platform"],
                 "notice_target_status": status,
+                "match_id": scoped_match,
                 "dispatched": True,
             }
         )
@@ -590,10 +700,8 @@ class GamehubApi:
     async def chat_send(self, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """Publish one player line into the game session and record it.
 
-        The line rides the same notice channel as the turn notices, so the
-        host model answers it in persona with the live board context injected;
-        its reply reaches the page through the existing outbound bridge
-        (``agent_message`` WS frame) and is recorded by the runtime.
+        The host answers in the shared game session; the delivery hook writes
+        the reply to this match, even after the match ends.
         """
         if not self._chat_enabled():
             raise _fail("对局聊天未开放", 403, code="chat_disabled")
@@ -609,9 +717,10 @@ class GamehubApi:
         sender = self._display_name()
         from .group_chat import publish_chat
 
-        match_id = str((body or {}).get("match_id") or "")
-        if match_id:
-            await self._room(match_id)
+        match_id = str((body or {}).get("match_id") or "").strip()
+        if not match_id:
+            raise _fail("请指定对局后再发送消息", 400, code="match_required")
+        await self._room(match_id)
         try:
             await publish_chat(self._plugin, PAGE_ACTOR, sender, text, role="player", match_id=match_id)
         except Exception as exc:
@@ -620,8 +729,7 @@ class GamehubApi:
 
         store = await self.chat_store()
         message = await store.chat_append("player", sender, text, match_id=match_id, uid=PAGE_ACTOR)
-        if match_id:
-            await ws_hub.broadcast(match_id, {"type": "chat_message", **message})
+        await ws_hub.broadcast(match_id, {"type": "chat_message", **message})
         return envelope({"message": message, "enabled": True})
 
     async def set_avatar(self, body: Any = None) -> dict[str, Any]:

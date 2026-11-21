@@ -337,7 +337,7 @@ class GamehubPlugin(BasePlugin):
     @on.llm_request(priority=Priority.MEDIUM)
     async def inject_game_context(self, event, request, tag_set=None):
         """Inject the board block and request-scoped turn tools."""
-        from .host.prompt import inject_into_request
+        from .host.prompt import hook_scope, inject_into_request
 
         inject_into_request(self, event, request, tag_set)
         # F3: the run is now open for this session; until its first response
@@ -347,7 +347,11 @@ class GamehubPlugin(BasePlugin):
             director = self._director
             marker = getattr(director, "note_llm_request", None)
             if callable(marker):
-                marker(sid)
+                scope = hook_scope(event)
+                if scope is None:
+                    marker(sid)
+                else:
+                    marker(sid, match_id=scope)
 
     @on.llm_response(priority=Priority.LOW)
     async def note_turn_llm_response(self, event, response=None, *args, **kwargs):
@@ -366,17 +370,26 @@ class GamehubPlugin(BasePlugin):
         submission resolves the grant. ``note_response`` also clears the
         previous step's misplaced-tag marker here.
         """
+        from .host.prompt import hook_scope
+
         director = self._director
         sid = str(getattr(event, "sid", "") or "")
         if not sid:
             return
+        scope = hook_scope(event)
         responder = getattr(director, "note_response", None)
         if callable(responder):
-            responder(sid)
+            if scope is None:
+                responder(sid)
+            else:
+                responder(sid, match_id=scope)
             return
         note = getattr(director, "note_progress", None)
         if callable(note):
-            note(sid)
+            if scope is None:
+                note(sid)
+            else:
+                note(sid, match_id=scope)
 
     @on.after_xml_parse(priority=Priority.LOW)
     async def submit_turn_play_tag(self, event, actions=None, *args, **kwargs):
@@ -399,7 +412,19 @@ class GamehubPlugin(BasePlugin):
         director = getattr(self, "_director", None)
         if director is None or getattr(director, "_stopping", False):
             return
-        grant = director.active_grant_for(sid)
+        from .host.group_chat import GAME_SID, trigger_match_id
+
+        # On the shared game session only the grant of the batch's own match
+        # may submit: a post-game reply of match A must not land B's move.
+        # External sessions keep the session lookup (their notices carry no
+        # match_id).
+        if sid == GAME_SID:
+            match_id = trigger_match_id(event)
+            if not match_id:
+                return
+            grant = director.active_grant_for_match(sid, match_id)
+        else:
+            grant = director.active_grant_for(sid)
         if grant is None:
             return
         from .tools_turn import submit_play_from_actions
@@ -411,6 +436,31 @@ class GamehubPlugin(BasePlugin):
         # rejection.
         await submit_play_from_actions(self, director, grant, actions, sid, event=event)
 
+    @on.message_sent(priority=Priority.LOW)
+    async def record_window_reply(self, event, action=None, result=None, *args, **kwargs):
+        """Mirror one delivered host reply into its match's chat window.
+
+        ``ON_MESSAGE_SENT`` fires after each text delivery with the trigger
+        batch, so the reply's match comes from the trigger itself (explicit
+        ``extra["match_id"]``), never from ambient or sole-room state. A batch
+        whose triggers are unscoped, or span two matches, writes nothing.
+        """
+        from .host.group_chat import trigger_match_id
+        from .host.session import GAME_SID
+
+        if str(getattr(event, "sid", "") or "") != GAME_SID:
+            return
+        if result is not None and not bool(getattr(result, "ok", True)):
+            return  # a failed delivery never reached the room, so no window line
+        match_id = trigger_match_id(event)
+        if not match_id:
+            logger.debug("gamehub: reply has no origin match; not mirrored")
+            return
+        runtime = self.runtime
+        if runtime is None:
+            return
+        await runtime.record_window_reply(action, match_id=match_id)
+
     @on.step_result(priority=Priority.LOW)
     async def note_turn_progress(self, event, step_result=None, *args, **kwargs):
         """Tell the turn director the host is still working on the notice turn.
@@ -419,13 +469,19 @@ class GamehubPlugin(BasePlugin):
         turn watchdog, which then overwrites the host's move with a rule-bot
         move. The hook is a cheap no-op when no grant is live for the session.
         """
+        from .host.prompt import hook_scope
+
         director = self._director
         note = getattr(director, "note_progress", None)
         if not callable(note):
             return
         sid = str(getattr(event, "sid", "") or "")
         if sid:
-            note(sid)
+            scope = hook_scope(event)
+            if scope is None:
+                note(sid)
+            else:
+                note(sid, match_id=scope)
 
     @on.tool_result(priority=Priority.LOW)
     async def note_turn_tool_progress(self, event, *args, **kwargs):
@@ -435,16 +491,25 @@ class GamehubPlugin(BasePlugin):
         and the tool-activity timestamp that stands a pending corrective
         nudge down (a mid multi-step turn is not "only talking").
         """
+        from .host.prompt import hook_scope
+
         director = self._director
         sid = str(getattr(event, "sid", "") or "")
         if not sid:
             return
+        scope = hook_scope(event)
         note = getattr(director, "note_progress", None)
-        if callable(note):
-            note(sid)
         tool_note = getattr(director, "note_tool_progress", None)
-        if callable(tool_note):
-            tool_note(sid)
+        if scope is None:
+            if callable(note):
+                note(sid)
+            if callable(tool_note):
+                tool_note(sid)
+        else:
+            if callable(note):
+                note(sid, match_id=scope)
+            if callable(tool_note):
+                tool_note(sid, match_id=scope)
 
     # ------------------------------------------------------------------
     #  WebUI
@@ -528,8 +593,8 @@ class GamehubPlugin(BasePlugin):
         return await self._call(self.api.ui_config(match_id))
 
     @register.api(method="POST", path="/notice-test")
-    async def api_notice_test(self):
-        return await self._call(self.api.notice_test())
+    async def api_notice_test(self, body: dict[str, Any] | None = None):
+        return await self._call(self.api.notice_test(body))
 
     @register.api(method="GET", path="/games")
     async def api_games(self):

@@ -291,6 +291,83 @@ async def test_ui_config_notice_target_override(tmp_path):
     assert config["notice_target_error"]
 
 
+async def test_ui_config_external_not_mirrored_tracks_the_match_notice_target(tmp_path):
+    """``external_not_mirrored`` mirrors where *this match's* AI lines go.
+
+    Only an informational flag: it must never turn the chat read-only, because
+    player lines always land in ``gamehub:gm:room``.
+    """
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+
+    # Page-owned match: proactive AI lines stay in the page session.
+    created = await data_of(api.create_match({"kind": "gomoku"}))
+    match_id = created["match"]["id"]
+    config = await data_of(api.ui_config(match_id))
+    assert config["external_not_mirrored"] is False
+    assert config["chat_read_only"] is False
+
+    # Lobby (no page match yet) inherits the same default.
+    assert (await data_of(api.ui_config()))["external_not_mirrored"] is False
+
+    # A chat-origin match answers in its own chat session.
+    chat_room, _seat, _token = await plugin.rooms.create(
+        kind="gomoku",
+        actor="webchat:dm:friend",
+        session_id="webchat:dm:friend",
+        name="朋友",
+        source="chat",
+    )
+    chat_config = await data_of(api.ui_config(chat_room.match.id))
+    assert chat_config["source"] == {"kind": "chat", "session_id": "webchat:dm:friend"}
+    assert chat_config["external_not_mirrored"] is True
+    assert chat_config["chat_read_only"] is False, "非镜像提示不得降级为只读"
+    assert chat_config["chat_session"] == "gamehub:gm:room"
+
+    # GAME_SID itself is never "external", even when recorded as seat source.
+    same_room, _seat, _token = await plugin.rooms.create(
+        kind="gomoku",
+        actor="admin2",
+        session_id="gamehub:gm:room",
+        name="另一位",
+        source="chat",
+    )
+    same_config = await data_of(api.ui_config(same_room.match.id))
+    assert same_config["external_not_mirrored"] is False
+    assert same_config["chat_read_only"] is False
+
+
+async def test_ui_config_external_not_mirrored_follows_the_notice_override(tmp_path):
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+    created = await data_of(api.create_match({"kind": "gomoku"}))
+    match_id = created["match"]["id"]
+
+    # An override pointing elsewhere moves the AI's proactive lines away.
+    plugin.settings.notice_target_session_id = "webchat:dm:me"
+    config = await data_of(api.ui_config(match_id))
+    assert config["external_not_mirrored"] is True
+    assert config["notice_target_status"] == "override"
+    assert config["chat_read_only"] is False
+
+    # An override pointing back at the page session is not external.
+    plugin.settings.notice_target_session_id = "gamehub:gm:room"
+    config = await data_of(api.ui_config(match_id))
+    assert config["external_not_mirrored"] is False
+    assert config["notice_target_status"] == "override"
+    assert config["chat_read_only"] is False
+
+    # An unusable override keeps its diagnostic error visible, and must not
+    # promise an external send (the destination is not actually reachable).
+    plugin.settings.notice_target_session_id = "webchat:dm:me"
+    plugin.ctx.session_ok = False
+    config = await data_of(api.ui_config(match_id))
+    assert config["notice_target_status"] == "invalid"
+    assert config["notice_target_error"]
+    assert config["external_not_mirrored"] is False
+    assert config["chat_read_only"] is False
+
+
 async def test_notice_target_awaits_both_sync_and_async_resolvers(tmp_path):
     """``SessionManager.resolve_session`` may be sync or async: awaiting must
     work for both, and a resolver returning None is reported as invalid."""
@@ -354,6 +431,96 @@ async def test_notice_test_publishes_into_game_session(tmp_path):
 
     plugin.ctx.session_ok = False
     await error_of(api.notice_test(), 503)
+
+
+async def test_ui_config_effective_target_uses_runtime_sync_resolver(tmp_path):
+    """The per-match effective target follows the runtime's sync resolver."""
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+    created = await data_of(api.create_match({"kind": "gomoku"}))
+    match_id = created["match"]["id"]
+
+    plugin.notice_target_session_sync = lambda room: "webchat:dm:resolved"
+    config = await data_of(api.ui_config(match_id))
+    assert config["effective_notice_target_session_id"] == "webchat:dm:resolved"
+    assert config["effective_notice_target_status"] == "chat"
+    assert config["external_not_mirrored"] is True
+    # The configured diagnostic is preserved alongside the effective one.
+    assert config["notice_target_session_id"] == "gamehub:gm:room"
+    assert config["notice_target_status"] == "default"
+
+    # A resolver returning nothing falls back to the configured target.
+    plugin.notice_target_session_sync = lambda room: None
+    config = await data_of(api.ui_config(match_id))
+    assert config["effective_notice_target_session_id"] == "gamehub:gm:room"
+    assert config["external_not_mirrored"] is False
+
+
+async def test_ui_config_invalid_effective_target_never_promises_external(tmp_path):
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+    created = await data_of(api.create_match({"kind": "gomoku"}))
+    match_id = created["match"]["id"]
+
+    plugin.settings.notice_target_session_id = "webchat:dm:gone"
+    plugin.ctx.session_ok = False
+    config = await data_of(api.ui_config(match_id))
+    assert config["effective_notice_target_session_id"] == "webchat:dm:gone"
+    assert config["effective_notice_target_status"] == "invalid"
+    assert config["effective_notice_target_error"]
+    assert config["external_not_mirrored"] is False
+    lobby = await data_of(api.ui_config())
+    assert lobby["external_not_mirrored"] is False
+    assert lobby["effective_notice_target_status"] == "invalid"
+
+    # An unstored SID may resolve even when its adapter is not registered.
+    plugin.ctx.session_mgr.resolve_session = lambda sid: SimpleNamespace(adapter_name="webchat")
+    plugin.ctx.adapter_mgr = SimpleNamespace(get_adapter=lambda name: None)
+    config = await data_of(api.ui_config(match_id))
+    assert config["effective_notice_target_status"] == "invalid"
+    assert "适配器不可用" in config["effective_notice_target_error"]
+    assert config["external_not_mirrored"] is False
+
+
+async def test_notice_test_match_scope(tmp_path, monkeypatch):
+    plugin = make_plugin(tmp_path)
+    api = GamehubApi(plugin)
+    scoped_calls: list[tuple[str, str]] = []
+
+    async def fake_game_notice(plugin_, body, session, match_id):
+        scoped_calls.append((session.sid, match_id))
+
+    monkeypatch.setattr("host.notices._publish_game_notice", fake_game_notice)
+
+    # No page match: intentionally unscoped (no guess).
+    result = await data_of(api.notice_test())
+    assert result["match_id"] == ""
+    assert scoped_calls == []
+
+    created = await data_of(api.create_match({"kind": "gomoku"}))
+    match_id = created["match"]["id"]
+
+    # Omitted id + active page match + GAME_SID target: scoped to it.
+    result = await data_of(api.notice_test())
+    assert result["match_id"] == match_id
+    assert scoped_calls == [("gamehub:gm:room", match_id)]
+
+    # Explicit validated id is honoured the same way.
+    result = await data_of(api.notice_test({"match_id": match_id}))
+    assert result["match_id"] == match_id
+
+    # Unknown explicit id is rejected.
+    await error_of(api.notice_test({"match_id": "nope"}), 404)
+
+    # Non-game effective target: published unscoped via the stock path.
+    plugin.notice_target_session_sync = lambda room: "webchat:dm:resolved"
+    plugin.ctx.session_ok = True
+    result = await data_of(api.notice_test({"match_id": match_id}))
+    assert result["session_id"] == "webchat:dm:resolved"
+    assert result["match_id"] == ""
+    assert len(scoped_calls) == 2, "non-game target must not take the scoped path"
+    assert len(plugin.ctx.published) >= 1
+    assert plugin.ctx.published[-1][0].sid == "webchat:dm:resolved"
 
 
 # ----------------------------------------------------------------------
@@ -914,8 +1081,12 @@ async def test_games_payload_carries_the_host_name(tmp_path):
 async def test_chat_send_publishes_and_records_the_player_line(tmp_path, monkeypatch):
     plugin = make_plugin(tmp_path)
     api = GamehubApi(plugin)
+    match_id = (await data_of(api.create_match({"kind": "gomoku"})))["match"]["id"]
+    missing = await error_of(api.chat_send({"text": "在吗"}), 400)
+    assert missing.code == "match_required"
+    assert not getattr(plugin.ctx, "chat_published", [])
 
-    sent = await data_of(api.chat_send({"text": "这把我该怎么走？"}))
+    sent = await data_of(api.chat_send({"text": "这把我该怎么走？", "match_id": match_id}))
     message = sent["message"]
     assert message["role"] == "player"
     assert message["text"] == "这把我该怎么走？"
@@ -923,9 +1094,9 @@ async def test_chat_send_publishes_and_records_the_player_line(tmp_path, monkeyp
     # The line rides the notice channel into the dedicated game session, in
     # the player's voice — not a [System:] notice the model would answer as
     # an operator.
-    assert plugin.ctx.chat_published[-1] == ("admin", "Human", "这把我该怎么走？", "player", "")
+    assert plugin.ctx.chat_published[-1] == ("admin", "Human", "这把我该怎么走？", "player", match_id)
 
-    history = await data_of(api.chat_history())
+    history = await data_of(api.chat_history(match_id=match_id))
     assert history["enabled"] is True
     assert [m["text"] for m in history["messages"]] == ["这把我该怎么走？"]
     assert history["messages"][0]["role"] == "player"
@@ -940,11 +1111,12 @@ async def test_chat_send_validates_paces_and_caps_length(tmp_path):
     (await error_of(api.chat_send({"text": "字" * 501}), 400)).code == "text_too_long"
 
     # The 500-char boundary is accepted at full length (no silent trim).
-    boundary = await data_of(api.chat_send({"text": "字" * 500}))
+    match_id = (await data_of(api.create_match({"kind": "gomoku"})))["match"]["id"]
+    boundary = await data_of(api.chat_send({"text": "字" * 500, "match_id": match_id}))
     assert len(boundary["message"]["text"]) == 500
 
     # Pacing: the next line inside the window is rate-limited.
-    paced = await error_of(api.chat_send({"text": "又来了"}), 429)
+    paced = await error_of(api.chat_send({"text": "又来了", "match_id": match_id}), 429)
     assert paced.code == "rate_limited"
     assert not plugin.ctx.published or len(plugin.ctx.published) == 1
 
@@ -960,13 +1132,14 @@ async def test_chat_disabled_and_undeliverable(tmp_path, monkeypatch):
     assert history["enabled"] is False
 
     plugin.settings.page_chat_enabled = True
+    match_id = (await data_of(api.create_match({"kind": "gomoku"})))["match"]["id"]
     import host.group_chat as chat_module
 
     async def failing_send(*args, **kwargs):
         raise RuntimeError("unavailable")
 
     monkeypatch.setattr(chat_module, "publish_chat", failing_send)
-    unreachable = await error_of(api.chat_send({"text": "喂"}), 503)
+    unreachable = await error_of(api.chat_send({"text": "喂", "match_id": match_id}), 503)
     assert unreachable.code == "not_ready"
 
 

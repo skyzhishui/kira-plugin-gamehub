@@ -191,7 +191,7 @@ def test_gate_skips_absent_director() -> None:
 # ----------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _patch_notices(monkeypatch: pytest.MonkeyPatch):
-    async def fake_send(plugin: Any, sid: str, text: str) -> bool:
+    async def fake_send(plugin: Any, sid: str, text: str, **kwargs) -> bool:
         recorder = getattr(plugin, "_recorder", None)
         if recorder is None:
             return True
@@ -266,7 +266,7 @@ async def test_failed_turn_notice_is_not_registered() -> None:
 
     original = director_module.send_notice
 
-    async def failing(plugin, sid, text):
+    async def failing(plugin, sid, text, **kwargs):
         return False
 
     director_module.send_notice = failing
@@ -311,7 +311,7 @@ async def test_tag_rejection_registers_only_on_delivery() -> None:
 
     original = director_module.send_notice
 
-    async def failing(plugin, sid, text):
+    async def failing(plugin, sid, text, **kwargs):
         return False
 
     director_module.send_notice = failing

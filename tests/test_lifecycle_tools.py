@@ -27,7 +27,7 @@ from test_turn_director import DELEGATED, NORI, _create, _harness, _wait
 def _patch_notices(monkeypatch: pytest.MonkeyPatch):
     """Publish notices into the per-plugin recorder instead of the host."""
 
-    async def fake_send(plugin, sid: str, text: str) -> bool:
+    async def fake_send(plugin, sid: str, text: str, **kwargs) -> bool:
         recorder = getattr(plugin, "_recorder", None)
         if recorder is None:
             return True

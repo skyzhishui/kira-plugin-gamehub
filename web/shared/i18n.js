@@ -20,6 +20,7 @@ export const ERROR_TEXT = {
   not_found: { zh: "对局不存在", en: "Match not found." },
   not_ready: { zh: "对局服务暂不可用", en: "Game service is not ready." },
   rate_limited: { zh: "发送太频繁，稍后再试", en: "Too many messages; slow down." },
+  match_required: { zh: "请指定对局后再发送消息", en: "Select a match before sending a message." },
   text_empty: { zh: "先说点什么再发送", en: "Type something before sending." },
   text_too_long: { zh: "消息太长，最多 500 字", en: "Message is too long (500 chars max)." },
   actor_busy: { zh: "你已有一局未结束的对局", en: "You already have an unfinished match." },

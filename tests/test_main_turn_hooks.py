@@ -102,6 +102,7 @@ def _ensure_core_plugin_importable() -> Any:
             llm_response=lambda **kw: _identity_decorator(),
             after_xml_parse=lambda **kw: _identity_decorator(),
             step_result=lambda **kw: _identity_decorator(),
+            message_sent=lambda **kw: _identity_decorator(),
             tool_result=lambda **kw: _identity_decorator(),
         ),
         "register": types.SimpleNamespace(
@@ -195,6 +196,13 @@ class _HookDirector:
         # missing-grant case is actually exercised.
         return self.grant if sid == "s1" else None
 
+    def active_grant_for_match(self, sid: str, match_id: str):
+        # Mirror the real match-scoped lookup: only this match's grant, and
+        # only on its own session.
+        if sid != "s1" or match_id != self.grant.match_id:
+            return None
+        return self.grant
+
     def note_tool_progress(self, sid) -> None:
         self.notes.append(sid)
 
@@ -209,9 +217,18 @@ class _HookDirector:
 
 
 class _Event:
-    def __init__(self, sid: str = "s1") -> None:
+    """A reply batch on the shared session, triggered by its grant's match.
+
+    ``messages`` carries a notice scoped to ``match_id``: the play tag is only
+    honoured for a batch that is attributable to one match.
+    """
+
+    def __init__(self, sid: str = "s1", match_id: str = "abcd1234") -> None:
         self.sid = sid
         self.stopped = False
+        self.messages = [
+            types.SimpleNamespace(is_notice=True, extra={"match_id": match_id}),
+        ]
 
     def stop(self) -> None:
         self.stopped = True
@@ -471,3 +488,293 @@ async def test_marker_freshness_window_still_applies():
     await MAIN.GamehubPlugin.submit_turn_play_tag(plugin, event, actions=[])
     assert director.rejected == []
     assert director.notes == []
+
+
+async def test_post_game_batch_of_ended_match_never_submits_live_sibling_grant(monkeypatch) -> None:
+    """A's post-game reply on the shared session must not land B's move.
+
+    B holds the live grant on session ``s1``; the batch is A's (match
+    ``aaaa0000``, which has no grant). The hook must not fall back to a
+    session-only lookup, so the submission path is never reached.
+    """
+    from host.group_chat import GAME_SID
+
+    live_b = _Grant(match_id="bbbb1111")
+    director = _ScopedDirector(live_b, session=GAME_SID)
+    plugin = _plugin(director)
+    event = _Event(sid=GAME_SID, match_id="aaaa0000")
+
+    async def must_not_submit(*args, **kwargs):
+        raise AssertionError("A's batch submitted B's grant")
+
+    aliased = _aliased_tools_turn()
+    monkeypatch.setattr(aliased, "submit_play_from_actions", must_not_submit)
+    await MAIN.GamehubPlugin.submit_turn_play_tag(
+        plugin, event, actions=[types.SimpleNamespace()],
+    )
+    assert director.submits == []
+    assert event.stopped is False
+
+
+# ----------------------------------------------------------------------
+#  Contract: strict match scope only on GAME_SID; external sids keep the
+#  session lookup; the batch filter never mixes owners.
+# ----------------------------------------------------------------------
+
+
+class _ScopedDirector(_HookDirector):
+    """Director double whose session lookup is not limited to ``s1``."""
+
+    def __init__(self, grant: _Grant, session: str) -> None:
+        super().__init__(grant)
+        self.session = session
+
+    def active_grant_for(self, sid: str):
+        return self.grant if sid == self.session else None
+
+    def active_grant_for_match(self, sid: str, match_id: str):
+        if sid != self.session or match_id != self.grant.match_id:
+            return None
+        return self.grant
+
+
+async def test_external_session_play_tag_keeps_session_lookup(monkeypatch) -> None:
+    """An external notice target has no match_id; its grant must still submit."""
+    from host.group_chat import GAME_SID  # noqa: F401 - import check
+
+    grant = _Grant(match_id="ext00001")
+    director = _ScopedDirector(grant, session="webchat:dm:admin")
+    plugin = _plugin(director)
+    event = _Event(sid="webchat:dm:admin")
+    event.messages = [types.SimpleNamespace(is_notice=True, extra={})]  # unscoped
+
+    seen: list[str] = []
+
+    async def record_submit(plugin_, director_, grant_, actions, sid, event=None):
+        seen.append(grant_.match_id)
+        return True
+
+    aliased = _aliased_tools_turn()
+    monkeypatch.setattr(aliased, "submit_play_from_actions", record_submit)
+    await MAIN.GamehubPlugin.submit_turn_play_tag(
+        plugin, event, actions=[types.SimpleNamespace()],
+    )
+    assert seen == ["ext00001"], "external sid must keep the session-scoped grant"
+
+
+async def test_game_session_unscoped_batch_never_submits(monkeypatch) -> None:
+    """On GAME_SID an unscoped batch cannot pick a grant (strict scope)."""
+    from host.group_chat import GAME_SID
+
+    grant = _Grant(match_id="bbbb1111")
+    director = _ScopedDirector(grant, session=GAME_SID)
+    plugin = _plugin(director)
+    event = _Event(sid=GAME_SID)
+    event.messages = [types.SimpleNamespace(is_notice=True, extra={})]
+
+    async def must_not_submit(*args, **kwargs):
+        raise AssertionError("unscoped GAME_SID batch submitted a grant")
+
+    aliased = _aliased_tools_turn()
+    monkeypatch.setattr(aliased, "submit_play_from_actions", must_not_submit)
+    await MAIN.GamehubPlugin.submit_turn_play_tag(
+        plugin, event, actions=[types.SimpleNamespace()],
+    )
+    assert director.submits == []
+
+
+def _load_prompt_module() -> Any:
+    """``host.prompt`` with a minimal ``core.prompt_manager`` fallback.
+
+    The real host module pulls in Pillow via the persona stack; when that is
+    unavailable (standalone venv) only the ``Prompt`` symbol is stubbed, and
+    the real module is used whenever it imports.
+    """
+    try:
+        import core.prompt_manager  # noqa: F401 - real host module when present
+    except Exception:
+        stub = types.ModuleType("core.prompt_manager")
+
+        class Prompt:  # noqa: D401 - structural stand-in for the host dataclass
+            def __init__(self, content: str = "", name: str = "", source: str = "", persist: bool = True) -> None:
+                self.content, self.name, self.source, self.persist = content, name, source, persist
+
+        stub.Prompt = Prompt  # type: ignore[attr-defined]
+        sys.modules["core.prompt_manager"] = stub
+    return importlib.import_module(f"{PACKAGE}.host.prompt")
+
+
+def test_prompt_grant_scope_is_strict_only_on_game_session() -> None:
+    """host/prompt uses the same contract as the hook (one source of truth)."""
+    from host.group_chat import GAME_SID  # noqa: F401 - the shared session id
+    prompt_module = _load_prompt_module()
+
+    grant = _Grant(match_id="ext00002")
+    external = _ScopedDirector(grant, session="webchat:dm:admin")
+    unscoped = _Event(sid="webchat:dm:admin")
+    unscoped.messages = [types.SimpleNamespace(is_notice=True, extra={})]
+    assert prompt_module._batch_grant(external, unscoped, "webchat:dm:admin") is grant
+
+    game = _ScopedDirector(grant, session=GAME_SID)
+    unscoped_game = _Event(sid=GAME_SID)
+    unscoped_game.messages = [types.SimpleNamespace(is_notice=True, extra={})]
+    assert prompt_module._batch_grant(game, unscoped_game, GAME_SID) is None
+
+
+def test_same_room_filter_never_mixes_owners() -> None:
+    """Scoped batches drain only their room; unscoped batches only unscoped."""
+    from host.group_chat import _same_room_filter
+
+    def item(match: str, role: str = "player"):
+        return types.SimpleNamespace(extra={"match_id": match, "gamehub_role": role})
+
+    a_player = item("aaaa")
+    a_spectator = item("aaaa", "spectator")
+    b_player = item("bbbb")
+    unscoped_notice = item("", "notice")
+    unscoped_spectator = item("", "spectator")
+
+    scoped_a = _same_room_filter("aaaa")
+    assert scoped_a(a_player) and scoped_a(a_spectator)
+    assert not scoped_a(b_player)
+    assert not scoped_a(unscoped_notice), "unscoped trigger must not ride into A"
+    assert not scoped_a(unscoped_spectator)
+
+    unscoped = _same_room_filter("")
+    assert unscoped(unscoped_notice) and unscoped(unscoped_spectator)
+    assert not unscoped(a_player), "unscoped trigger must not drain A's player line"
+    assert not unscoped(b_player)
+
+
+# ----------------------------------------------------------------------
+#  Shared GAME_SID: an ended match A's post-game batch must not touch the
+#  live sibling B (prompt, tools, lifecycle clock).
+# ----------------------------------------------------------------------
+
+
+class _SharedRequest:
+    """Minimal request surface: a tool set and the ephemeral prompt list."""
+
+    def __init__(self) -> None:
+        self.tool_set = _SharedToolSet()
+        self.user_prompt: list[Any] = []
+
+
+class _SharedToolSet:
+    def __init__(self) -> None:
+        self.names: list[str] = []
+
+    def add(self, *tools: Any) -> None:
+        self.names.extend(str(getattr(tool, "name", "")) for tool in tools)
+
+
+class _SharedTagSet:
+    def __init__(self) -> None:
+        self.tags: list[Any] = []
+
+    def register(self, tag: Any) -> None:
+        self.tags.append(tag)
+
+
+async def test_ended_match_post_game_batch_leaves_live_sibling_untouched(monkeypatch) -> None:
+    """A ended (post-game batch on GAME_SID) while B is live on the same session.
+
+    Asserts the regression surface end-to-end through the real director
+    lifecycle and the real prompt injection: A's request must carry no B
+    state tool, no B play tag, no B board, and A's hook signals must not
+    refresh B's silence clock, mark B's run in flight, or arm B's nudge.
+    """
+    from host.group_chat import GAME_SID
+    from director import TurnGrant, TurnDirector, ST_ACTIVE
+    from tools_turn import state_tool_name
+
+    prompt_module = _load_prompt_module()
+
+    class _Room:
+        def __init__(self, match_id: str) -> None:
+            self.status = "active"
+            self.match = types.SimpleNamespace(id=match_id, kind="gomoku", seats=[])
+
+    from engine import NewMatchOptions, NewSeat, create_match
+    import context as game_context
+
+    live_b = create_match(
+        NewMatchOptions(
+            id="bbbb1111", kind="gomoku",
+            seats=[
+                NewSeat(kind="human", token="t0", name="Alice", joined=True),
+                NewSeat(kind="ai", token="", name="nori"),
+            ],
+            seed=1, now=1000, mode_options={"mode": "nori", "driver": "turn"},
+        )
+    )
+    plugin = _plugin(_HookDirector(_Grant()))
+    plugin._rooms = types.SimpleNamespace(
+        active_rooms=lambda: [types.SimpleNamespace(status="active", match=live_b)]
+    )
+    plugin.notice_target_session_sync = lambda _room: GAME_SID
+    plugin._director = TurnDirector(plugin)
+    director = plugin._director
+    # Ended A left a start/over stage event on the shared session.
+    game_context.note_stage_event(
+        plugin, GAME_SID, "aaaa0000", 3, "对局结束 · 五子棋：黑方胜；A 的对局。",
+    )
+    now = time.monotonic()
+    grant_b = TurnGrant(
+        match_id="bbbb1111", seat=1, key="kb", session_id=GAME_SID,
+        shared_session=True, deadline=now + 90.0, notice_sent=True,
+        notice_sent_at=now - 5.0, state=ST_ACTIVE,
+    )
+    director._grants["bbbb1111"] = grant_b
+    director._llm_req[GAME_SID] = now - 1.0  # not used for B's own scope
+
+    # The prompt must expose B's surface only to B's own batch.
+    b_batch = _Event(sid=GAME_SID, match_id="bbbb1111")
+    assert director.tools_for(GAME_SID, match_id="bbbb1111") != []
+    a_batch = _Event(sid=GAME_SID, match_id="aaaa0000")
+    request_a = _SharedRequest()
+    tags_a = _SharedTagSet()
+    prompt_module.inject_into_request(plugin, a_batch, request_a, tags_a)
+    assert state_tool_name("bbbb1111") not in request_a.tool_set.names
+    assert tags_a.tags == [], "A's batch must not register B's play tag"
+    block_a = next(
+        (p.content for p in request_a.user_prompt if p.name == "gamehub_context"),
+        "",
+    )
+    assert "bbbb1111" not in block_a, "A's batch must not show B's board"
+    assert "对局结束 · 五子棋" in block_a, "A keeps its own ended-match event"
+    assert "A 的对局" in block_a
+
+    # A's lifecycle signals (run start, response, progress) are scoped to A
+    # and must leave B's clock and run marks untouched.
+    before_deadline = grant_b.deadline
+    before_progress = grant_b.last_progress
+    director.note_llm_request(GAME_SID, match_id="aaaa0000")
+    director.note_progress(GAME_SID, match_id="aaaa0000")
+    director.note_tool_progress(GAME_SID, match_id="aaaa0000")
+    director.note_response(GAME_SID, match_id="aaaa0000")
+    assert grant_b.deadline == before_deadline
+    assert grant_b.last_progress == before_progress
+    assert grant_b.last_tool_progress == 0.0
+    assert grant_b.text_task is None and grant_b.text_nudges == 0
+    assert director._llm_req.get(GAME_SID) == now - 1.0, "B's session mark untouched"
+    assert f"{GAME_SID}\x00aaaa0000" in director._llm_req
+
+    # Unattributable A batch on the shared session: touches nothing at all.
+    director.note_progress(GAME_SID, match_id="")
+    director.note_response(GAME_SID, match_id="")
+    assert grant_b.deadline == before_deadline
+    assert grant_b.last_progress == before_progress
+
+    # B's own batch still works (no regression for the live match).
+    request_b = _SharedRequest()
+    tags_b = _SharedTagSet()
+    prompt_module.inject_into_request(plugin, b_batch, request_b, tags_b)
+    assert state_tool_name("bbbb1111") in request_b.tool_set.names
+    assert [getattr(t, "name", "") for t in tags_b.tags] == ["play_bbbb1111"]
+    block_b = next(
+        (p.content for p in request_b.user_prompt if p.name == "gamehub_context"),
+        "",
+    )
+    assert "bbbb1111" in block_b, "B's own batch shows B's board"
+    await director.stop()

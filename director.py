@@ -59,11 +59,14 @@ except ImportError:  # standalone tests import these modules as top-level
 
 try:  # production: plugin package
     from .host import notices as notice_channel
+    from .host.session import GAME_SID
 except ImportError:  # standalone tests: host adapter may be absent
     try:
         from host import notices as notice_channel
+        from host.session import GAME_SID
     except ImportError:  # pragma: no cover - host-less unit tests
         notice_channel = None  # type: ignore[assignment]
+        GAME_SID = "gamehub:gm:room"  # mirrors host/session.py
 
 try:  # production: KiraAI host logging (AGENTS.md)
     from core.plugin import logger
@@ -165,6 +168,9 @@ class TurnGrant:
     resolved_at: float = 0.0
     notice_sent: bool = False
     notice_session_id: str = ""
+    # True when the notice target is the shared game session: lifecycle hooks
+    # then scope every signal by ``match_id`` (never by the bare session).
+    shared_session: bool = False
     # Exact notice texts delivered for this grant. The batch hook only
     # applies the configured model when every message is a notice whose
     # text is in this set (see host/notice_model.py).
@@ -277,14 +283,14 @@ def _module_of(kind: str) -> Any:
         return None
 
 
-async def send_notice(plugin: Any, sid: str, text: str) -> bool:
+async def send_notice(plugin: Any, sid: str, text: str, *, match_id: str = "") -> bool:
     """Publish one notice through ``host.notices`` (patchable seam)."""
     sender = getattr(notice_channel, "send_notice", None) if notice_channel else None
     if not callable(sender):
         logger.warning("turn director: notice channel unavailable (sid=%r)", sid)
         return False
     try:
-        return bool(await sender(plugin, sid, text))
+        return bool(await sender(plugin, sid, text, match_id=match_id))
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001 - a failed notice must not kill the turn
@@ -600,35 +606,53 @@ class TurnDirector:
     def grant_of(self, match_id: str) -> TurnGrant | None:
         return self._grants.get(str(match_id or ""))
 
-    def tools_for(self, sid: str) -> list[Any]:
+    def tools_for(self, sid: str, match_id: str | None = None) -> list[Any]:
         """Request-scoped tools for the active grant announced to ``sid``.
 
         Returns the bound ``state_<match>`` read tool (the move rides the
         ``play_<match>`` tag channel — see ``tools_turn.PlayTurnTag``).
         Returns ``[]`` when this session holds no live grant, which is also
         how a grant is revoked: the tool is simply not added to the next
-        request. When several grants share a session only the first one's
-        tool is offered — the mapping is remembered (``_tools_grant``) so F1
-        corrective nudges never blame a grant whose surface the model cannot
-        even see.
+        request. The mapping is remembered (``_tools_grant``) so F1 corrective
+        nudges never blame a grant whose surface the model cannot even see.
+
+        ``match_id`` (``GAME_SID``) scopes the lookup to that one match: no
+        session fallback, so an empty/ambiguous scope gets ``[]`` and a
+        sibling match's grant is never offered. ``None`` keeps the external
+        session-wide behaviour, where several grants sharing one external
+        target are NOT isolated: only the first live grant's tool is offered
+        and the others are unreachable until it resolves (pre-existing,
+        unchanged here).
         """
         target = str(sid or "").strip()
         if not target or self._stopping:
             return []
+        if match_id is not None:
+            grant = self.active_grant_for_match(target, match_id)
+            if grant is None:
+                return []
+            self._remember_tools_grant(target, grant)
+            return build_turn_tools(
+                self._plugin, grant, match_kind=self._match_kind(grant.match_id)
+            )
         for grant in list(self._grants.values()):
             if grant.state != ST_ACTIVE:
                 continue
             if str(grant.session_id or "") != target:
                 continue
-            self._tools_grant[target] = grant.match_id
-            if len(self._tools_grant) > 64:  # hygiene: oldest session evicted;
-                # it may then miss a corrective nudge (fail-closed), never
-                # nudge a surface it cannot see
-                self._tools_grant.pop(next(iter(self._tools_grant)), None)
+            self._remember_tools_grant(target, grant)
             return build_turn_tools(
                 self._plugin, grant, match_kind=self._match_kind(grant.match_id)
             )
         return []
+
+    def _remember_tools_grant(self, target: str, grant: TurnGrant) -> None:
+        """Record which grant's surface was offered on the last request."""
+        self._tools_grant[self._run_key(target, self._grant_scope(grant))] = grant.match_id
+        if len(self._tools_grant) > 64:  # hygiene: oldest session evicted;
+            # it may then miss a corrective nudge (fail-closed), never
+            # nudge a surface it cannot see
+            self._tools_grant.pop(next(iter(self._tools_grant)), None)
 
     def active_grant_for(self, sid: str) -> "TurnGrant | None":
         """The live grant announced to ``sid`` (context-block viewer authority).
@@ -644,6 +668,24 @@ class TurnDirector:
             if grant.state == ST_ACTIVE and str(grant.session_id or "") == target:
                 return grant
         return None
+
+    def active_grant_for_match(self, sid: str, match_id: str) -> "TurnGrant | None":
+        """The live grant for one match, only if it is announced to ``sid``.
+
+        The match-scoped counterpart of :meth:`active_grant_for`: a batch
+        that belongs to match A must never resolve match B's grant, even
+        when both share the session. ``None`` when ``match_id`` is empty.
+        """
+        target = str(sid or "").strip()
+        wanted = str(match_id or "").strip()
+        if not target or not wanted or self._stopping:
+            return None
+        grant = self._grants.get(wanted)
+        if grant is None or grant.state != ST_ACTIVE:
+            return None
+        if str(grant.session_id or "") != target:
+            return None
+        return grant
 
     def notice_texts_for(self, sid: str) -> set[str]:
         """Exact notice texts of every ST_ACTIVE grant announced to ``sid``.
@@ -731,20 +773,58 @@ class TurnDirector:
         self._tasks.add(task)
         task.add_done_callback(_log_event_failure)
 
-    def note_progress(self, sid: str) -> None:
+    @staticmethod
+    def _grant_scope(grant: TurnGrant) -> str | None:
+        """The match scope a grant's run marks are keyed under (``None`` = session)."""
+        return grant.match_id if grant.shared_session else None
+
+    @staticmethod
+    def _run_key(sid: str, match_id: str | None) -> str:
+        """Run-mark key: the session itself, or ``(sid, match)`` when scoped.
+
+        A shared session may carry several matches; their LLM runs must not
+        mark each other in flight. External sessions keep the bare sid.
+        """
+        if match_id is None:
+            return sid
+        return f"{sid}\x00{match_id}"
+
+    def _grants_on(self, sid: str, match_id: str | None) -> list[TurnGrant]:
+        """Active grants this lifecycle signal may touch.
+
+        ``match_id`` set → only that match's grant on ``sid`` (empty scope
+        touches nothing); ``None`` → every active grant on ``sid``.
+        """
+        if match_id is not None:
+            wanted = str(match_id or "").strip()
+            if not wanted:
+                return []
+            grant = self._grants.get(wanted)
+            if (
+                grant is not None
+                and grant.state == ST_ACTIVE
+                and str(grant.session_id or "") == sid
+            ):
+                return [grant]
+            return []
+        return [
+            grant for grant in list(self._grants.values())
+            if grant.state == ST_ACTIVE and str(grant.session_id or "") == sid
+        ]
+
+    def note_progress(self, sid: str, match_id: str | None = None) -> None:
         """Record host-side activity for a session holding a live grant.
 
         Called from the plugin's ``@on.step_result`` / ``@on.tool_result`` hooks:
         the host is demonstrably working on the notice turn, so the watchdog
         must not treat the turn as stalled. Cheap, synchronous, never raises.
+        ``match_id`` scopes the signal to one match on a shared session.
         """
         target = str(sid or "").strip()
         if not target or self._stopping:
             return
         now = time.monotonic()
-        for grant in list(self._grants.values()):
-            if grant.state != ST_ACTIVE or str(grant.session_id or "") != target:
-                continue
+        for grant in self._grants_on(target, match_id):
             timeout_s = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
             candidate = now + max(0.5, timeout_s)
             if grant.short_deadline > 0:
@@ -756,37 +836,39 @@ class TurnDirector:
             grant.deadline = max(grant.deadline, candidate)
             grant.last_progress = now
 
-    def note_llm_request(self, sid: str) -> None:
+    def note_llm_request(self, sid: str, match_id: str | None = None) -> None:
         """Mark an LLM run as started for ``sid`` (F3 in-flight signal).
 
         Paired with :meth:`note_response`; between the two, the watchdog
         treats the session as busy (the model has not even answered yet, so
-        "silence" proves nothing about the turn).
+        "silence" proves nothing about the turn). ``match_id`` keys the mark
+        per match on a shared session, so a sibling's run never reads as this
+        grant's in-flight turn. An empty scope records nothing.
         """
         target = str(sid or "").strip()
         if not target:
             return
-        self._llm_req[target] = time.monotonic()
+        if match_id is not None and not str(match_id or "").strip():
+            return
+        self._llm_req[self._run_key(target, match_id)] = time.monotonic()
         self._prune_llm_marks()
 
-    def note_tool_progress(self, sid: str) -> None:
+    def note_tool_progress(self, sid: str, match_id: str | None = None) -> None:
         """Record real tool activity (``@on.tool_result``) for ``sid``.
 
         Distinguished from text-delivery progress: a tool result between two
         model steps proves the model is mid multi-step turn, so the
         corrective-nudge arming from the previous response must stand down
-        (see :meth:`_text_nudge`).
+        (see :meth:`_text_nudge`). ``match_id`` scopes it to one match.
         """
         target = str(sid or "").strip()
         if not target or self._stopping:
             return
         now = time.monotonic()
-        for grant in list(self._grants.values()):
-            if grant.state != ST_ACTIVE or str(grant.session_id or "") != target:
-                continue
+        for grant in self._grants_on(target, match_id):
             grant.last_tool_progress = now
 
-    def note_response(self, sid: str, content: str = "") -> None:
+    def note_response(self, sid: str, content: str = "", match_id: str | None = None) -> None:
         """A full LLM response completed for ``sid`` (F1 entry point).
 
         First the ordinary progress bookkeeping (the host demonstrably
@@ -823,23 +905,25 @@ class TurnDirector:
         target = str(sid or "").strip()
         if not target or self._stopping:
             return
+        if match_id is not None and not str(match_id or "").strip():
+            return  # unattributable batch on a shared session: touch nothing
         now = time.monotonic()
-        self._llm_resp[target] = now
+        key = self._run_key(target, match_id)
+        self._llm_resp[key] = now
         self._prune_llm_marks()
-        self.note_progress(target)
+        self.note_progress(target, match_id=match_id)
         cap = int(_cfg(self._plugin, "turn_text_retry_max", 2))
-        run_started_after_notice = self._llm_req.get(target, 0.0)
-        for grant in list(self._grants.values()):
-            if grant.state != ST_ACTIVE or str(grant.session_id or "") != target:
-                continue
+        for grant in self._grants_on(target, match_id):
             # New step: last reply's misplaced-tag marker is stale now.
             grant.tag_misplaced = ""
             grant.tag_misplaced_at = 0.0
             if not grant.notice_sent or grant.text_nudges >= max(0, cap):
                 continue
+            grant_key = self._run_key(target, self._grant_scope(grant))
+            run_started_after_notice = self._llm_req.get(grant_key, 0.0)
             if run_started_after_notice <= grant.notice_sent_at:
                 continue  # the response predates the notice's own run
-            if self._tools_grant.get(target) != grant.match_id:
+            if self._tools_grant.get(grant_key) != grant.match_id:
                 # Fail-closed: without a recorded mapping the surface was
                 # never offered (the old ``.get(target, grant.match_id)``
                 # default made every grant pass, contradicting this
@@ -889,6 +973,7 @@ class TurnDirector:
         past ``short_ceiling`` (corrective time + full silence window).
         """
         sid = str(grant.session_id or "")
+        run_key = self._run_key(sid, self._grant_scope(grant))
         grace = max(0.0, float(_cfg(self._plugin, "turn_text_grace_s", 4.0)))
         if grace:
             await asyncio.sleep(grace)
@@ -896,7 +981,7 @@ class TurnDirector:
             return
         if grant.last_tool_progress > spawned_at:
             return  # real tool work since the reply: a multi-step turn
-        if self._llm_req.get(sid, 0.0) > spawned_at:
+        if self._llm_req.get(run_key, 0.0) > spawned_at:
             return  # a newer run opened; its own response re-arms if needed
         rooms = _rooms_of(self._plugin)
         getter = getattr(rooms, "get_room", None)
@@ -918,7 +1003,7 @@ class TurnDirector:
                 grant.match_id, grant.seat, exc_info=True,
             )
             return
-        if not await send_notice(self._plugin, grant.session_id, text):
+        if not await send_notice(self._plugin, grant.session_id, text, match_id=grant.match_id):
             return
         grant.notice_texts.add(text)
         if not self._is_current(grant):  # resolved while the notice was in flight
@@ -986,7 +1071,7 @@ class TurnDirector:
             + "）。盘面与规则见本轮 gamehub_context 注入块"
             f"（含反馈与格式）；若缺失，先调用 {state_tool} 查看局面再行动。]"
         )
-        if not await send_notice(self._plugin, str(sid or ""), text):
+        if not await send_notice(self._plugin, str(sid or ""), text, match_id=grant.match_id):
             return
         grant.notice_texts.add(text)
         # Count only delivered notices — the same contract as ``_text_nudge``
@@ -1082,7 +1167,7 @@ class TurnDirector:
                     exc_info=True,
                 )
                 return
-            if not await send_notice(self._plugin, session_id, text):
+            if not await send_notice(self._plugin, session_id, text, match_id=match_id):
                 return
             self._stage_seen[key] = None
             while len(self._stage_seen) > _STAGE_SEEN_LIMIT:
@@ -1194,6 +1279,7 @@ class TurnDirector:
                 deadline=time.monotonic() + max(0.5, timeout_s),
             )
             grant.session_id = await self._resolve_session(room, match_id)
+            grant.shared_session = grant.session_id == GAME_SID
             self._grants[match_id] = grant
             grant.watchdog = asyncio.create_task(
                 self._watchdog(grant, room),
@@ -1246,7 +1332,7 @@ class TurnDirector:
             return
         grant.notice_sent = True
         grant.notice_session_id = grant.session_id
-        if not await send_notice(self._plugin, grant.session_id, text):
+        if not await send_notice(self._plugin, grant.session_id, text, match_id=grant.match_id):
             # The grant stays: the watchdog is the documented fallback.
             logger.warning(
                 "turn director: action notice delivery failed (%s → %s)",
@@ -1458,7 +1544,7 @@ class TurnDirector:
                 grant.match_id, grant.seat, exc_info=True,
             )
             return False
-        if not await send_notice(self._plugin, sid, text):
+        if not await send_notice(self._plugin, sid, text, match_id=grant.match_id):
             return False
         grant.notice_texts.add(text)
         return True
@@ -1631,8 +1717,9 @@ class TurnDirector:
         """
         window = float(_cfg(self._plugin, "turn_play_timeout_s", 90.0))
         sid = str(getattr(grant, "session_id", "") or "")
-        requested = self._llm_req.get(sid)
-        answered = self._llm_resp.get(sid)
+        key = self._run_key(sid, self._grant_scope(grant))
+        requested = self._llm_req.get(key)
+        answered = self._llm_resp.get(key)
         open_run = (
             requested is not None
             and (answered is None or requested > answered)

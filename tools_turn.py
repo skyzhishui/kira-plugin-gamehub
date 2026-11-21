@@ -304,19 +304,27 @@ async def submit_play_from_actions(
             move = str(getattr(action, "value", "") or "").strip()
             tag_seen = True
             break
+    # Shared-session grants stand down only their own match (never siblings).
+    scope = grant.match_id if getattr(grant, "shared_session", False) else None
     if tag_seen:
         # A play tag was actually parsed: stand down a pending corrective
         # nudge before any submit outcome (even a rejection gives feedback).
         note = getattr(director, "note_tool_progress", None)
         if callable(note):
-            note(str(sid or ""))
+            if scope is None:
+                note(str(sid or ""))
+            else:
+                note(str(sid or ""), match_id=scope)
     elif _consume_misplaced(grant) is not None:
         # A nested attempt this step (body may be empty — the marker is
         # keyed on the timestamp): explicit bounded format feedback instead
         # of a silent watchdog fill or a mislabeled text nudge.
         note = getattr(director, "note_tool_progress", None)
         if callable(note):
-            note(str(sid or ""))
+            if scope is None:
+                note(str(sid or ""))
+            else:
+                note(str(sid or ""), match_id=scope)
         await _reject(plugin, director, sid, grant, "格式错误", _MISPLACED_ERROR,
                       reason="format")
         return False
@@ -358,7 +366,7 @@ async def submit_play_from_actions(
     record = getattr(runtime, "record_agent_line", None)
     if callable(record) and say:
         try:
-            await record(str(sid or ""), say)
+            await record(str(sid or ""), say, match_id=grant.match_id)
         except Exception:  # noqa: BLE001 - the window line must not block the stop
             logger.debug("gamehub: window line record failed", exc_info=True)
     # Stop the reply: the agent loop ends, the delivery tail is skipped and

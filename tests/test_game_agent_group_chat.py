@@ -353,7 +353,7 @@ async def test_spectator_route_does_not_double_buffer_or_trigger(env):
     buffer = Buffer()
     flushed: list[str] = []
 
-    async def flush(sid: str) -> None:
+    async def flush(sid: str, filter_fn=None) -> None:
         flushed.append(sid)
 
     plugin = SimpleNamespace(

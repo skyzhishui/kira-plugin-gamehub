@@ -14,6 +14,8 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from .session import GAME_SID
+
 try:  # production: KiraAI host logging (AGENTS.md)
     from core.plugin import logger
 except ImportError:  # standalone tests outside the host: a plain stdlib logger
@@ -54,14 +56,20 @@ except ImportError:  # standalone tests: minimal structural stand-ins
             return f"MessageChain({self.message_list!r})"
 
 
-async def send_notice(plugin: Any, sid: str, text: str) -> bool:
+async def send_notice(plugin: Any, sid: str, text: str, *, match_id: str = "") -> bool:
     """Publish ``text`` as a mentioned system notice into session ``sid``.
+
+    ``match_id`` names the match the notice is about. For the shared game
+    session it rides on the event's ``extra`` (the same contract as player
+    lines), so the reply the notice triggers is attributed to that match's
+    window. Other sessions keep the stock ``publish_notice`` path unchanged.
 
     Returns ``True`` when the notice was published, ``False`` when the session
     could not be resolved, no adapter is available for it, or the host raised.
     """
     sid = str(sid or "").strip()
     body = str(text or "")
+    match_id = str(match_id or "").strip()
     if not sid or not body:
         logger.warning("send_notice: empty session or text (sid=%r)", sid)
         return False
@@ -84,9 +92,25 @@ async def send_notice(plugin: Any, sid: str, text: str) -> bool:
 
     try:
         chain = MessageChain([Text(body)])
-        await publish(session, chain, is_mentioned=True)
+        if match_id and sid == GAME_SID:
+            await _publish_game_notice(plugin, body, session, match_id)
+        else:
+            await publish(session, chain, is_mentioned=True)
     except Exception:
         logger.warning("send_notice: publish failed for %r", sid, exc_info=True)
         return False
     logger.info("send_notice: published notice to session=%s", sid)
     return True
+
+
+async def _publish_game_notice(plugin: Any, body: str, session: Any, match_id: str) -> None:
+    """Publish a game-session notice with ``extra["match_id"]`` (host-only path).
+
+    Mirrors ``ctx.publish_notice`` for the internal adapter, but keeps the
+    match on the message so the reply it triggers can be attributed.
+    """
+    from .group_chat import build_notice_event
+
+    event = await build_notice_event(plugin, body, match_id=match_id)
+    event.session = session
+    await plugin.ctx.event_bus.publish(event)

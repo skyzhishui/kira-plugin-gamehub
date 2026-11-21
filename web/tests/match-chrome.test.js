@@ -10,7 +10,8 @@
  * 3) action-row rebuilds preserve keyboard focus through shared/focus-keep;
  * 4) the lobby lineup radiogroup delegates keyboard behaviour to shared/radiogroup;
  * 5) the kept seat-bubble media container collapses when empty;
- * 6) the lobby cover placeholder appears only after every candidate asset failed.
+ * 6) the lobby cover placeholder appears only after every candidate asset failed;
+ * 7) external_not_mirrored only feeds the status hint, never the input gate.
  *
  * Run: cd web && node --test
  */
@@ -79,9 +80,32 @@ test("seat-bubble media container is kept and collapses when empty", () => {
 
 /* ---------------- 6) lobby cover empty state timing ---------------- */
 
+/* ---------------- 6) lobby cover empty state timing ---------------- */
+
 test("cover placeholder: marked empty only after every candidate asset fails", () => {
   assert.match(hubJs, /coverImg\(g\.kind, [^,]+, "card-cover", markEmpty\)/, "handed to the candidate chain as the all-failed callback");
   const fn = hubJs.match(/function coverImg\([\s\S]*?\n\}/);
   assert.ok(fn, "coverImg is present");
   assert.match(fn[0], /if \(i >= list\.length\) \{[\s\S]*?onFail\(\)/, "onFail runs only once candidates are exhausted");
+});
+
+/* ---------------- 7) non-blocking "AI notices go elsewhere" hint ---------------- */
+
+test("external_not_mirrored 只加提示条，绝不禁用聊天窗口", () => {
+  // match.js 只把它当文案输入；状态条由纯函数决定，输入区不受影响。
+  assert.match(matchJs, /chat\.externalNotice = isExternalNotMirrored\(cfg\)/, "wiring reads the flag");
+  assert.match(matchJs, /externalNotMirrored: chat\.externalNotice/, "flag reaches the status text helper");
+  assert.doesNotMatch(
+    matchJs,
+    /externalNotice[\s\S]{0,120}?\.disabled\s*=/,
+    "the flag must not disable any input"
+  );
+  // 聊天窗口本身只认 chat_enabled / chat_read_only（本插件不下发只读）。
+  const panel = readSrc("../chat-panel.js");
+  assert.doesNotMatch(panel, /external_not_mirrored|externalNotice/, "chat window never consumes the flag");
+  assert.match(panel, /input\.disabled = !on;/, "input gating stays tied to isEnabled() only");
+  const chatShared = readSrc("../shared/chat.js");
+  assert.doesNotMatch(chatShared, /isExternalNotMirrored[\s\S]{0,80}?chat_read_only\s*=/, "the flag never rewrites the read-only decision");
+  // 信息态与警示态分开配色，不新增色板变量。
+  assert.match(appCss, /\.stage > \.chat-status\.is-info\s*\{[^}]*color:\s*var\(--ink-soft\)/);
 });

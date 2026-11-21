@@ -436,7 +436,10 @@ class TableTalk:
                             meta.get("version"),
                         )
                         continue
-                    await self._send(str(session_id), str(text))
+                    await self._send(
+                        str(session_id), str(text),
+                        match_id=str(meta.get("match_id") or ""),
+                    )
                 else:
                     await self._dispatch(item[1], item[2])
             except asyncio.CancelledError:
@@ -641,7 +644,7 @@ class TableTalk:
             return "queued"
 
         try:
-            await self._send(session_id, text)
+            await self._send(session_id, text, match_id=str(getattr(match, "id", "") or ""))
         except Exception:
             logger.warning("table_talk send failed", exc_info=True)
             return "send_failed"
@@ -821,7 +824,7 @@ class TableTalk:
                 parts.append("轮到 " + "、".join(waiting))
         return "；".join(parts)
 
-    async def _send(self, session_id: str, text: str) -> None:
+    async def _send(self, session_id: str, text: str, *, match_id: str = "") -> None:
         """Publish one notice through the host adapter (``host.notices``)."""
         sender = send_notice
         if sender is None:  # pragma: no cover - host adapter absent in tests
@@ -830,7 +833,7 @@ class TableTalk:
             except ImportError:  # standalone tests import modules as top-level
                 from host.notices import send_notice as host_send
             sender = host_send
-        ok = await sender(self._plugin, session_id, text)
+        ok = await sender(self._plugin, session_id, text, match_id=match_id)
         if not ok:
             raise RuntimeError(f"table_talk: notice publish failed for {session_id!r}")
         logger.info("table_talk published notice session=%s", session_id)

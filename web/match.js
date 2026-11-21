@@ -22,7 +22,9 @@ import { createChatPanel } from "./chat-panel.js";
 import {
   fetchUiConfig,
   isChatReadOnly,
+  isExternalNotMirrored,
   noticeTargetFromConfig,
+  chatStatusText,
   matchSayKey,
   pickNewMatchSays,
   CHAT_READ_ONLY_HINT,
@@ -1034,6 +1036,8 @@ const chat = {
   sayMatchId: "",
   readOnly: false, // chat_read_only=true（目标为非 web 会话）：只读提示
   statusError: "", // notice_target_error：目标诊断提示
+  externalNotice: false, // external_not_mirrored: proactive AI lines go elsewhere (non-blocking)
+  chatEnabled: true, // chat_enabled: gates the "you can still talk here" promise
 };
 
 function seatBubbleEl(seatIndex) {
@@ -1136,8 +1140,12 @@ function applyMatchChat(match, first) {
   entries.forEach((e) => showSeatSays(talkSeatKey(match, e), e.text, matchSayKey(e)));
 }
 
-/* 只读/诊断提示：ui-config 的 chat_read_only 与 notice_target_error。
- * 对局页没有输入框，提示条落在棋盘与动作行之间（元素缺席时静默）。 */
+/* Hints: ui-config's chat_read_only, notice_target_error and external_not_mirrored.
+ * The match page has no chat input of its own, so the hint bar sits between the
+ * board and the action row (silent when the element is absent).
+ * external_not_mirrored only explains that the AI's proactive table lines go to
+ * another channel; it never disables input, because player lines always publish
+ * into gamehub:gm:room and their replies come back to this window. */
 function applyChatNotice() {
   const note = $("chat-readonly");
   if (note) {
@@ -1146,9 +1154,15 @@ function applyChatNotice() {
   }
   const status = $("chat-status");
   if (status) {
-    const show = !chat.readOnly && !!chat.statusError;
-    status.textContent = show ? chat.statusError : "";
-    status.classList.toggle("hidden", !show);
+    const text = chatStatusText({
+      readOnly: chat.readOnly,
+      error: chat.statusError,
+      externalNotMirrored: chat.externalNotice,
+      chatEnabled: chat.chatEnabled,
+    });
+    status.textContent = text;
+    status.classList.toggle("hidden", !text);
+    status.classList.toggle("is-info", !!text && !chat.statusError);
   }
 }
 
@@ -1178,6 +1192,8 @@ async function initUiConfig() {
   chat.seatQueues.forEach((q) => q.setMaxShowMs(chat.holdMs));
   chat.readOnly = isChatReadOnly(cfg);
   chat.statusError = noticeTargetFromConfig(cfg).error;
+  chat.externalNotice = isExternalNotMirrored(cfg);
+  chat.chatEnabled = cfg.chat_enabled !== false && !spectatorMode();
   applyChatNotice();
   // 对局聊天窗口：聊天开关（chat_enabled）与宿主主 agent 名（agent 行 sender）
   if (chatWin) chatWin.applyUiConfig(cfg);
